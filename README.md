@@ -87,9 +87,11 @@ Rust 编写的交互式系统进程管理器，集进程管理、网络分析、
 - 进程关系异常检测
 - 综合加权评分
 
+评分显示：90+ 不显示（默认安全），60-89 黄色，30-59 橙色 + `!`，0-29 红色 + `!!!`。按 `S`（大写）按安全分排序，可疑进程排最前。详情页展示每个风险因子的描述和扣分。非管理员模式下自动降级为路径+命令行检测（不调签名 API）。
+
 ### 录屏与回放
 
-VT100 终端录屏，完整捕获每帧渲染内容（包括光标、搜索状态等），支持回放、暂停、逐帧查看、倍速播放。
+VT100 终端录屏，完整捕获每帧渲染内容（包括光标、搜索状态等），支持回放、暂停、逐帧查看、倍速播放。录制期间状态栏显示红点 + 录制时长。
 
 - `proc record` — 启动 TUI 并自动录制
 - `proc replay <file>` — 回放录制文件
@@ -97,7 +99,27 @@ VT100 终端录屏，完整捕获每帧渲染内容（包括光标、搜索状�
 
 ### 告警系统
 
-可配置的阈值告警规则，支持 CPU/内存/磁盘/网络/连接数等指标，连续命中触发，自动分级（Info/Warning/Critical），集成 Toast 通知。
+可配置的阈值告警规则，支持 CPU/内存/磁盘/网络/连接数等指标，连续命中触发，自动分级（Info/Warning/Critical），Critical 级别 Toast 通知，Warning 级别仅更新侧边栏徽章。
+
+默认规则（无需配置即可工作）：
+
+- 系统内存 > 90% 连续 3 次 → Warning
+- 系统内存 > 95% 连续 2 次 → Critical
+- 单进程 CPU > 95% 连续 5 次 → Warning
+- 磁盘可用 < 5% 连续 3 次 → Warning
+
+自定义规则通过 TOML 配置（`~/.config/proc/alerts.toml`）：
+
+```toml
+[[rule]]
+metric = "CpuUsage"
+op = "GT"
+threshold = 90.0
+consecutive_hits = 3
+severity = "Warning"
+```
+
+侧边栏徽章：无告警不显示，Warning 黄色圆点 + 数量，Critical 红色圆点 + 数量 + 闪烁。按 `a`（进程列表模式下）打开告警弹窗，滚动查看所有活跃告警。
 
 ## 主题
 
@@ -149,7 +171,7 @@ proc docker watch                                 # 监听事件
 ## 安装
 
 ```bash
-git clone https://github.com/<your-username>/proc.git
+git clone https://github.com/Alfroul/proc.git
 cd proc
 cargo build --release
 ```
