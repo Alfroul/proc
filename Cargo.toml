@@ -1,0 +1,58 @@
+[package]
+name = "proc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+clap = { version = "4", features = ["derive"] }
+sysinfo = "0.34"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+colored = "2"
+comfy-table = "7"
+netstat2 = "0.11"
+filelocksmith = "2"
+bollard = { version = "0.18", features = ["http"] }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+arboard = "3"
+dns-lookup = "2"
+encoding_rs = "0.8"
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+toml = "0.8"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.57", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_ProcessStatus",
+    "Win32_Foundation",
+    "Data_Xml_Dom",
+    "UI_Notifications",
+    "Win32_System_Threading",
+    "Win32_System_Services",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Security",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_Graphics_Dxgi",
+    "Win32_System_Performance",
+    "Win32_Security_Cryptography",
+    "Win32_Security_WinTrust",
+] }
+
+[target.'cfg(windows)'.dependencies.nvml-wrapper]
+version = "0.12"
+optional = true
+
+[features]
+default = ["nvidia"]
+nvidia = ["nvml-wrapper"]
+
+[dev-dependencies]
+tempfile = "3"

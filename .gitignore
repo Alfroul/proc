@@ -1,0 +1,8 @@
+/target
+*.db
+perf.log
+prec/
+CONTEXT.md
+plan.md
+docs/
+.claude/
