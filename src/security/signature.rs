@@ -1,6 +1,6 @@
 use super::score::{RiskCategory, RiskFactor};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignatureStatus {
     Signed,
     Trusted,
@@ -39,12 +39,17 @@ pub fn is_trusted_signer(subject: &str) -> bool {
         .any(|s| subject_lower.contains(&s.to_lowercase()))
 }
 
+/// TRUST_E_SUBJECT_NOT_SIGNED — the subject has no signature
+const TRUST_E_SUBJECT_NOT_SIGNED: i32 = 0x800B0100_u32 as i32;
+/// CRYPT_E_REVOKED — the signature certificate has been revoked
+const CRYPT_E_REVOKED: i32 = 0x80092010_u32 as i32;
+
 pub fn verify_signature(exe_path: &str) -> SignatureStatus {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Security::WinTrust::{
-            WinVerifyTrust, WINTRUST_DATA, WINTRUST_DATA_UNION_CHOICE,
-            WINTRUST_FILE_INFO, WINTRUST_ACTION_GENERIC_VERIFY_V2,
+            WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_UNION_CHOICE,
+            WINTRUST_FILE_INFO, WinVerifyTrust,
         };
         use windows::core::PCWSTR;
 
@@ -55,38 +60,41 @@ pub fn verify_signature(exe_path: &str) -> SignatureStatus {
         let path_wide: Vec<u16> = exe_path.encode_utf16().chain(std::iter::once(0)).collect();
 
         unsafe {
-            let mut file_info = WINTRUST_FILE_INFO::default();
-            file_info.cbStruct = std::mem::size_of::<WINTRUST_FILE_INFO>() as u32;
-            file_info.pcwszFilePath = PCWSTR(path_wide.as_ptr());
+            let mut file_info = WINTRUST_FILE_INFO {
+                cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
+                pcwszFilePath: PCWSTR(path_wide.as_ptr()),
+                ..Default::default()
+            };
 
-            let mut trust_data = WINTRUST_DATA::default();
-            trust_data.cbStruct = std::mem::size_of::<WINTRUST_DATA>() as u32;
-            trust_data.dwUnionChoice = WINTRUST_DATA_UNION_CHOICE(1);
+            let mut trust_data = WINTRUST_DATA {
+                cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
+                dwUnionChoice: WINTRUST_DATA_UNION_CHOICE(1),
+                ..Default::default()
+            };
             trust_data.Anonymous.pFile = &mut file_info;
 
             let mut action_id = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-            let result = WinVerifyTrust(
-                None,
-                &mut action_id,
-                &mut trust_data as *mut _ as *mut _,
-            );
+            let result = WinVerifyTrust(None, &mut action_id, &mut trust_data as *mut _ as *mut _);
 
             if result == 0 {
                 // Signed — check company name from version info for trusted matching
-                if let Some(company) = get_file_company_name(exe_path) {
-                    if is_trusted_signer(&company) {
-                        return SignatureStatus::Trusted;
-                    }
+                if let Some(company) = get_file_company_name(exe_path)
+                    && is_trusted_signer(&company)
+                {
+                    return SignatureStatus::Trusted;
                 }
                 SignatureStatus::Signed
-            } else if result == (0x800B0100_u32 as i32) {
-                // TRUST_E_SUBJECT_NOT_SIGNED
+            } else if result == TRUST_E_SUBJECT_NOT_SIGNED {
                 SignatureStatus::Unsigned
-            } else if result == (0x80092010_u32 as i32) {
-                // CRYPT_E_REVOKED
+            } else if result == CRYPT_E_REVOKED {
                 SignatureStatus::Revoked
             } else {
-                SignatureStatus::Signed
+                tracing::debug!(
+                    "WinVerifyTrust unknown error 0x{:08X} for {}",
+                    result as u32,
+                    exe_path
+                );
+                SignatureStatus::Unknown
             }
         }
     }
@@ -118,10 +126,19 @@ fn get_file_company_name(exe_path: &str) -> Option<String> {
         }
 
         let mut buf = vec![0u8; size as usize];
-        GetFileVersionInfoW(pcwsz_path, 0, size, buf.as_mut_ptr() as *mut std::ffi::c_void).ok()?;
+        GetFileVersionInfoW(
+            pcwsz_path,
+            0,
+            size,
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+        )
+        .ok()?;
 
         // Query CompanyName
-        let sub_block: Vec<u16> = "\\CompanyName".encode_utf16().chain(std::iter::once(0)).collect();
+        let sub_block: Vec<u16> = "\\CompanyName"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let mut value_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut value_len: u32 = 0;
 
@@ -163,6 +180,12 @@ pub fn signature_risk_factor(status: SignatureStatus) -> Option<RiskFactor> {
             name: "untrusted_sig".to_string(),
             weight: 10,
             description: "签名但不受信".to_string(),
+        }),
+        SignatureStatus::Unknown => Some(RiskFactor {
+            category: RiskCategory::Signature,
+            name: "signature_unverified".to_string(),
+            weight: 5,
+            description: "签名未验证（需管理员权限）".to_string(),
         }),
         _ => None,
     }

@@ -35,9 +35,9 @@ pub fn spawn_event_watcher(docker: bollard::Docker) -> DockerEventReceiver {
         };
 
         rt.block_on(async move {
-            use std::collections::HashMap;
             use bollard::system::EventsOptions;
             use futures_util::stream::TryStreamExt;
+            use std::collections::HashMap;
 
             let mut filters = HashMap::new();
             filters.insert("type".to_string(), vec!["container".to_string()]);
@@ -91,7 +91,10 @@ pub fn spawn_event_watcher(docker: bollard::Docker) -> DockerEventReceiver {
 
 /// 格式化事件描述（用于 CLI 输出）
 pub fn format_event_description(event: &DockerEvent) -> String {
-    let name = event.container_name.as_deref().unwrap_or(&event.container_id);
+    let name = event
+        .container_name
+        .as_deref()
+        .unwrap_or(&event.container_id);
     match event.action.as_str() {
         "die" | "stop" => format!("容器 {} 已停止", name),
         "start" => format!("容器 {} 已启动", name),

@@ -5,7 +5,9 @@
 use std::collections::{HashSet, VecDeque};
 use std::net::IpAddr;
 
-use crate::port_map::{PortEntry, ProcessNetGroup, RemoteGroup, ConnectionDiff, service_name, Protocol};
+use crate::port_map::{
+    ConnectionDiff, PortEntry, ProcessNetGroup, Protocol, RemoteGroup, service_name,
+};
 
 /// 异常严重级别
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -49,6 +51,12 @@ pub struct AnomalyDetector {
     prev_anomaly_ids: HashSet<String>,
     /// 最大历史长度
     history_len: usize,
+}
+
+impl Default for AnomalyDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AnomalyDetector {
@@ -170,7 +178,13 @@ impl AnomalyDetector {
         }
         let current = *self.connection_history.back().unwrap_or(&0);
         // 计算不含最后一个元素的平均值
-        let history: Vec<&usize> = self.connection_history.iter().rev().skip(1).take(10).collect();
+        let history: Vec<&usize> = self
+            .connection_history
+            .iter()
+            .rev()
+            .skip(1)
+            .take(10)
+            .collect();
         if history.is_empty() {
             return;
         }
@@ -180,10 +194,7 @@ impl AnomalyDetector {
                 rule_id: "R3".to_string(),
                 severity: AnomalySeverity::Warning,
                 title: format!("连接数突增至 {}（平均 {}）", current, avg),
-                detail: format!(
-                    "连接数突增至 {}（最近平均 {}），可能异常",
-                    current, avg
-                ),
+                detail: format!("连接数突增至 {}（最近平均 {}），可能异常", current, avg),
                 affected_pid: None,
                 affected_ip: None,
             });
@@ -191,14 +202,10 @@ impl AnomalyDetector {
     }
 
     /// R4: 新 LISTEN 端口
-    fn detect_new_listen_port(
-        &mut self,
-        entries: &[PortEntry],
-        anomalies: &mut Vec<Anomaly>,
-    ) {
+    fn detect_new_listen_port(&mut self, entries: &[PortEntry], anomalies: &mut Vec<Anomaly>) {
         let current_listen: HashSet<u16> = entries
             .iter()
-            .filter(|e| e.state.as_deref().map_or(false, |s| s.contains("Listen")))
+            .filter(|e| e.state.as_deref().is_some_and(|s| s.contains("Listen")))
             .map(|e| e.local_port)
             .collect();
 
@@ -216,7 +223,7 @@ impl AnomalyDetector {
                     .iter()
                     .find(|e| {
                         e.local_port == port
-                            && e.state.as_deref().map_or(false, |s| s.contains("Listen"))
+                            && e.state.as_deref().is_some_and(|s| s.contains("Listen"))
                     })
                     .map(|e| (e.process_name.clone(), e.pid));
 
@@ -250,16 +257,15 @@ impl AnomalyDetector {
     }
 
     /// R5: TIME_WAIT 洪水
-    fn detect_time_wait_flood(
-        &self,
-        diff: &ConnectionDiff,
-        anomalies: &mut Vec<Anomaly>,
-    ) {
+    fn detect_time_wait_flood(&self, diff: &ConnectionDiff, anomalies: &mut Vec<Anomaly>) {
         if diff.time_wait_count > 100 {
             anomalies.push(Anomaly {
                 rule_id: "R5".to_string(),
                 severity: AnomalySeverity::Warning,
-                title: format!("TIME_WAIT 连接数 {}，可能耗尽端口资源", diff.time_wait_count),
+                title: format!(
+                    "TIME_WAIT 连接数 {}，可能耗尽端口资源",
+                    diff.time_wait_count
+                ),
                 detail: format!(
                     "TIME_WAIT 连接数 {}，可能耗尽端口资源",
                     diff.time_wait_count
@@ -271,16 +277,15 @@ impl AnomalyDetector {
     }
 
     /// R6: 全局 CLOSE_WAIT 过高
-    fn detect_global_close_wait(
-        &self,
-        diff: &ConnectionDiff,
-        anomalies: &mut Vec<Anomaly>,
-    ) {
+    fn detect_global_close_wait(&self, diff: &ConnectionDiff, anomalies: &mut Vec<Anomaly>) {
         if diff.close_wait_count > 50 {
             anomalies.push(Anomaly {
                 rule_id: "R6".to_string(),
                 severity: AnomalySeverity::Critical,
-                title: format!("全局 CLOSE_WAIT 达到 {}，严重连接泄漏", diff.close_wait_count),
+                title: format!(
+                    "全局 CLOSE_WAIT 达到 {}，严重连接泄漏",
+                    diff.close_wait_count
+                ),
                 detail: format!(
                     "全局 CLOSE_WAIT 达到 {}，系统可能存在严重连接泄漏",
                     diff.close_wait_count

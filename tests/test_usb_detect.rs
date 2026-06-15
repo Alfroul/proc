@@ -1,7 +1,7 @@
-use proc::eject::classify::{self, HandleRisk};
-use proc::eject::locks::HandleLock;
-use proc::eject::device::format_size;
 use proc::classify::ProcessClass;
+use proc::eject::classify::{self, HandleRisk};
+use proc::eject::device::format_size;
+use proc::eject::locks::HandleLock;
 
 fn make_lock(pid: u32, name: &str, process_class: ProcessClass) -> HandleLock {
     HandleLock {
@@ -100,7 +100,9 @@ fn test_get_risk_label() {
 
 #[test]
 fn test_risk_weight_ordering() {
-    assert!(classify::risk_weight(HandleRisk::Critical) > classify::risk_weight(HandleRisk::Warning));
+    assert!(
+        classify::risk_weight(HandleRisk::Critical) > classify::risk_weight(HandleRisk::Warning)
+    );
     assert!(classify::risk_weight(HandleRisk::Warning) > classify::risk_weight(HandleRisk::Safe));
     assert!(classify::risk_weight(HandleRisk::Safe) > classify::risk_weight(HandleRisk::Harmless));
 }

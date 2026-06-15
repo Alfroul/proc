@@ -64,6 +64,10 @@ pub struct UiFrame {
     pub search_query: String,
     pub sort_field: String,
 
+    // Process view mode (0=List, 1=Tree, 2=AppGroup)
+    #[serde(default)]
+    pub process_view_mode: u8,
+
     // Process tree
     pub tree_nodes: Vec<FrameTreeNode>,
 
@@ -100,12 +104,12 @@ pub struct FrameNav {
     // ProcessList
     pub cursor: usize,
     pub scroll: usize,
-    pub selected: Vec<usize>,
+    pub selected: Vec<u32>,
 
     // ProcessTree
     pub tree_cursor: usize,
     pub tree_scroll: usize,
-    pub tree_selected: Vec<usize>,
+    pub tree_selected: Vec<u32>,
 
     // PortMap
     pub port_cursor: usize,

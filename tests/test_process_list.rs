@@ -10,6 +10,8 @@ fn make_process(pid: u32, name: &str, cpu: f32, memory: u64) -> ProcessInfo {
         memory,
         virtual_memory: memory * 2,
         disk_usage: (0, 0),
+        disk_read_speed: 0,
+        disk_write_speed: 0,
         status: "Running".to_string(),
         exe: Some(format!("C:\\{}", name)),
         cmd: vec![name.to_string()],
@@ -32,8 +34,8 @@ fn test_process_list_snapshot_refresh() {
 #[test]
 fn test_process_list_processes_not_empty() {
     let mut snapshot = SystemSnapshot::new().expect("SystemSnapshot::new() should not panic");
-    snapshot.refresh().expect("refresh() should succeed");
-    let processes = snapshot.processes();
+    let _ = snapshot.refresh_heavy_incremental();
+    let processes = snapshot.cached_processes_vec();
     assert!(!processes.is_empty(), "Should have at least some processes");
 }
 
@@ -62,7 +64,13 @@ fn test_classify_kernel_process() {
 
 #[test]
 fn test_classify_system_process() {
-    let names = ["csrss.exe", "smss.exe", "wininit.exe", "svchost.exe", "lsass.exe"];
+    let names = [
+        "csrss.exe",
+        "smss.exe",
+        "wininit.exe",
+        "svchost.exe",
+        "lsass.exe",
+    ];
     for name in names {
         let proc = make_process(100, name, 0.0, 1000);
         assert_eq!(
@@ -83,7 +91,10 @@ fn test_classify_user_process() {
 #[test]
 fn test_classify_case_insensitive() {
     let proc = make_process(100, "CSRSS.EXE", 0.0, 1000);
-    assert_eq!(classify::classify_process(&proc), ProcessClass::SystemProcess);
+    assert_eq!(
+        classify::classify_process(&proc),
+        ProcessClass::SystemProcess
+    );
 }
 
 #[test]
@@ -111,15 +122,27 @@ fn test_classify_label() {
 #[test]
 fn test_kill_already_gone() {
     let result = kill::kill_process(99999999, false).expect("kill_process should not error");
-    assert!(matches!(result, kill::KillResult::AlreadyGone | kill::KillResult::AccessDenied),
-        "expected AlreadyGone or AccessDenied for non-existent PID, got {:?}", result);
+    assert!(
+        matches!(
+            result,
+            kill::KillResult::AlreadyGone | kill::KillResult::AccessDenied
+        ),
+        "expected AlreadyGone or AccessDenied for non-existent PID, got {:?}",
+        result
+    );
 }
 
 #[test]
 fn test_kill_force_already_gone() {
     let result = kill::kill_process(99999999, true).expect("kill_process should not error");
-    assert!(matches!(result, kill::KillResult::AlreadyGone | kill::KillResult::AccessDenied),
-        "expected AlreadyGone or AccessDenied for non-existent PID, got {:?}", result);
+    assert!(
+        matches!(
+            result,
+            kill::KillResult::AlreadyGone | kill::KillResult::AccessDenied
+        ),
+        "expected AlreadyGone or AccessDenied for non-existent PID, got {:?}",
+        result
+    );
 }
 
 #[test]
@@ -129,11 +152,24 @@ fn test_sort_field_cycle() {
     assert_eq!(field.next().next(), SortField::Pid);
     assert_eq!(field.next().next().next(), SortField::Name);
     assert_eq!(field.next().next().next().next(), SortField::Security);
-    assert_eq!(field.next().next().next().next().next(), SortField::Cpu);
+    assert_eq!(
+        field.next().next().next().next().next(),
+        SortField::DiskRead
+    );
+    assert_eq!(
+        field.next().next().next().next().next().next(),
+        SortField::DiskWrite
+    );
+    assert_eq!(
+        field.next().next().next().next().next().next().next(),
+        SortField::Cpu
+    );
 
-    assert_eq!(field.prev(), SortField::Security);
-    assert_eq!(field.prev().prev(), SortField::Name);
-    assert_eq!(field.prev().prev().prev(), SortField::Pid);
+    assert_eq!(field.prev(), SortField::DiskWrite);
+    assert_eq!(field.prev().prev(), SortField::DiskRead);
+    assert_eq!(field.prev().prev().prev(), SortField::Security);
+    assert_eq!(field.prev().prev().prev().prev(), SortField::Name);
+    assert_eq!(field.prev().prev().prev().prev().prev(), SortField::Pid);
 }
 
 #[test]
@@ -147,14 +183,16 @@ fn test_sort_field_label() {
 
 #[test]
 fn test_sort_by_cpu() {
-    let mut processes = vec![
+    let mut processes = [
         make_process(1, "low.exe", 1.0, 100),
         make_process(2, "high.exe", 50.0, 100),
         make_process(3, "mid.exe", 25.0, 100),
     ];
 
     processes.sort_by(|a, b| {
-        b.cpu_usage.partial_cmp(&a.cpu_usage).unwrap_or(std::cmp::Ordering::Equal)
+        b.cpu_usage
+            .partial_cmp(&a.cpu_usage)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     assert_eq!(processes[0].pid, 2);
@@ -164,13 +202,13 @@ fn test_sort_by_cpu() {
 
 #[test]
 fn test_sort_by_memory() {
-    let mut processes = vec![
+    let mut processes = [
         make_process(1, "low.exe", 1.0, 100),
         make_process(2, "high.exe", 1.0, 500),
         make_process(3, "mid.exe", 1.0, 300),
     ];
 
-    processes.sort_by(|a, b| b.memory.cmp(&a.memory));
+    processes.sort_by_key(|b| std::cmp::Reverse(b.memory));
 
     assert_eq!(processes[0].pid, 2);
     assert_eq!(processes[1].pid, 3);
@@ -179,13 +217,13 @@ fn test_sort_by_memory() {
 
 #[test]
 fn test_sort_by_name() {
-    let mut processes = vec![
+    let mut processes = [
         make_process(1, "chrome.exe", 1.0, 100),
         make_process(2, "alg.exe", 1.0, 100),
         make_process(3, "zoom.exe", 1.0, 100),
     ];
 
-    processes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    processes.sort_by_key(|a| a.name.to_lowercase());
 
     assert_eq!(processes[0].name, "alg.exe");
     assert_eq!(processes[1].name, "chrome.exe");
@@ -206,8 +244,77 @@ fn test_process_info_fields() {
 #[test]
 fn test_process_count() {
     let mut snapshot = SystemSnapshot::new().expect("SystemSnapshot::new() should not panic");
-    snapshot.refresh().expect("refresh() should succeed");
+    let _ = snapshot.refresh_heavy_incremental();
     let count = snapshot.process_count();
     assert!(count > 0, "Should have at least 1 process");
-    assert_eq!(count, snapshot.processes().len());
+    // cached_processes_vec may include extras from collect_missing_processes
+    assert!(snapshot.cached_processes_vec().len() >= count);
+}
+
+#[test]
+fn test_incremental_refresh_populates_cache() {
+    let mut snapshot = SystemSnapshot::new().expect("SystemSnapshot::new() should not panic");
+    snapshot.refresh().expect("refresh() should succeed");
+    // After initial refresh, process_cache should be empty (not yet used incremental path)
+    assert!(snapshot.process_cache().is_empty());
+
+    // Now run incremental refresh
+    snapshot
+        .refresh_heavy_incremental()
+        .expect("incremental refresh should succeed");
+    let cache = snapshot.process_cache();
+    assert!(
+        !cache.is_empty(),
+        "process_cache should be populated after incremental refresh"
+    );
+
+    // Every cached process should have a valid PID
+    for (&pid, proc) in cache.iter() {
+        assert_eq!(pid, proc.pid);
+    }
+}
+
+#[test]
+fn test_cached_processes_vec_matches_cache() {
+    let mut snapshot = SystemSnapshot::new().expect("SystemSnapshot::new() should not panic");
+    snapshot.refresh().expect("refresh() should succeed");
+    snapshot
+        .refresh_heavy_incremental()
+        .expect("incremental refresh should succeed");
+
+    let vec = snapshot.cached_processes_vec();
+    let cache = snapshot.process_cache();
+    assert_eq!(vec.len(), cache.len());
+
+    for proc in &vec {
+        assert!(
+            cache.contains_key(&proc.pid),
+            "Vec entry PID {} should exist in cache",
+            proc.pid
+        );
+    }
+}
+
+#[test]
+fn test_incremental_refresh_idempotent() {
+    let mut snapshot = SystemSnapshot::new().expect("SystemSnapshot::new() should not panic");
+    snapshot.refresh().expect("refresh() should succeed");
+
+    snapshot
+        .refresh_heavy_incremental()
+        .expect("first incremental should succeed");
+    let count1 = snapshot.process_cache().len();
+
+    snapshot
+        .refresh_heavy_incremental()
+        .expect("second incremental should succeed");
+    let count2 = snapshot.process_cache().len();
+
+    // Counts should be similar (processes may start/stop but not hundreds in 2s)
+    assert!(
+        (count1 as i64 - count2 as i64).unsigned_abs() < 50,
+        "Process count should be stable between incremental refreshes: {} vs {}",
+        count1,
+        count2
+    );
 }

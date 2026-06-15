@@ -38,7 +38,10 @@ fn test_find_pid_by_port_unused_port() {
     // Use a very high port that's unlikely to be in use
     let result = port_map::find_pid_by_port(59999);
     assert!(result.is_ok());
-    assert!(result.unwrap().is_empty(), "unused port should return empty");
+    assert!(
+        result.unwrap().is_empty(),
+        "unused port should return empty"
+    );
 }
 
 #[test]
@@ -58,7 +61,10 @@ fn test_find_ports_by_pid_known_pid() {
 fn test_find_ports_by_pid_nonexistent() {
     let result = port_map::find_ports_by_pid(99999);
     assert!(result.is_ok());
-    assert!(result.unwrap().is_empty(), "nonexistent PID should return empty");
+    assert!(
+        result.unwrap().is_empty(),
+        "nonexistent PID should return empty"
+    );
 }
 
 #[test]
@@ -91,8 +97,14 @@ fn test_udp_entries_no_remote() {
     let entries = port_map::scan_ports().unwrap();
     for entry in &entries {
         if entry.protocol == Protocol::Udp {
-            assert!(entry.remote_addr.is_none(), "UDP should not have remote_addr");
-            assert!(entry.remote_port.is_none(), "UDP should not have remote_port");
+            assert!(
+                entry.remote_addr.is_none(),
+                "UDP should not have remote_addr"
+            );
+            assert!(
+                entry.remote_port.is_none(),
+                "UDP should not have remote_port"
+            );
             assert!(entry.state.is_none(), "UDP should not have state");
         }
     }

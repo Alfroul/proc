@@ -1,12 +1,12 @@
+pub mod cache;
+pub mod classify;
 pub mod device;
 pub mod locks;
-pub mod classify;
-pub mod cache;
 
-use crate::error::{ProcError, Result};
-use crate::eject::classify::{classify_handle, HandleRisk};
+use crate::eject::classify::{HandleRisk, classify_handle};
 use crate::eject::device::{RemovableDevice, detect_removable_devices, format_size};
 use crate::eject::locks::HandleLock;
+use crate::error::{ProcError, Result};
 use crate::kill;
 
 /// U盘扫描结果
@@ -28,7 +28,10 @@ pub fn scan_device_locks(drive_letter: char) -> Result<Vec<(HandleLock, HandleRi
     scan_device_locks_with_processes(drive_letter, &[])
 }
 
-pub fn scan_device_locks_with_processes(drive_letter: char, processes: &[crate::collect::ProcessInfo]) -> Result<Vec<(HandleLock, HandleRisk)>> {
+pub fn scan_device_locks_with_processes(
+    drive_letter: char,
+    processes: &[crate::collect::ProcessInfo],
+) -> Result<Vec<(HandleLock, HandleRisk)>> {
     let locks = locks::find_volume_lockers_with_processes(drive_letter, processes)?;
     let mut classified: Vec<(HandleLock, HandleRisk)> = locks
         .into_iter()
@@ -38,9 +41,7 @@ pub fn scan_device_locks_with_processes(drive_letter: char, processes: &[crate::
         })
         .collect();
 
-    classified.sort_by(|a, b| {
-        classify::risk_weight(b.1).cmp(&classify::risk_weight(a.1))
-    });
+    classified.sort_by_key(|b| std::cmp::Reverse(classify::risk_weight(b.1)));
 
     Ok(classified)
 }
@@ -58,24 +59,25 @@ pub fn kill_safe_processes(drive_letter: char) -> Result<(u32, u32, Vec<String>)
 
     for (lock, risk) in &classified {
         match risk {
-            HandleRisk::Safe => {
-                match kill::kill_process(lock.pid, false) {
-                    Ok(kill::KillResult::Killed) => killed += 1,
-                    Ok(kill::KillResult::AlreadyGone) => {}
-                    Ok(kill::KillResult::AccessDenied) => {
-                        errors.push(format!(
-                            "PID {} ({}) 权限不足",
-                            lock.pid, lock.process_name
-                        ));
-                    }
-                    Ok(kill::KillResult::Failed(e)) => {
-                        errors.push(format!("PID {} ({}) 失败: {}", lock.pid, lock.process_name, e));
-                    }
-                    Err(e) => {
-                        errors.push(format!("PID {} ({}) 错误: {}", lock.pid, lock.process_name, e));
-                    }
+            HandleRisk::Safe => match kill::kill_process(lock.pid, false) {
+                Ok(kill::KillResult::Killed) => killed += 1,
+                Ok(kill::KillResult::AlreadyGone) => {}
+                Ok(kill::KillResult::AccessDenied) => {
+                    errors.push(format!("PID {} ({}) 权限不足", lock.pid, lock.process_name));
                 }
-            }
+                Ok(kill::KillResult::Failed(e)) => {
+                    errors.push(format!(
+                        "PID {} ({}) 失败: {}",
+                        lock.pid, lock.process_name, e
+                    ));
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "PID {} ({}) 错误: {}",
+                        lock.pid, lock.process_name, e
+                    ));
+                }
+            },
             _ => skipped += 1,
         }
     }
@@ -137,10 +139,7 @@ pub fn cli_check_drive(drive_str: &str, find_locks_only: bool) -> Result<()> {
         } else {
             format!(" [{}]", lock.port_info.join(", "))
         };
-        let exe = lock
-            .exe_path
-            .as_deref()
-            .unwrap_or("-");
+        let exe = lock.exe_path.as_deref().unwrap_or("-");
         println!(
             "  {} PID {:>6}  {:<25} {} {}{}",
             risk.label(),
@@ -158,7 +157,10 @@ pub fn cli_check_drive(drive_str: &str, find_locks_only: bool) -> Result<()> {
         return Ok(());
     }
 
-    let safe_count = classified.iter().filter(|(_, r)| *r == HandleRisk::Safe).count();
+    let safe_count = classified
+        .iter()
+        .filter(|(_, r)| *r == HandleRisk::Safe)
+        .count();
     let warn_count = classified
         .iter()
         .filter(|(_, r)| *r == HandleRisk::Warning)
@@ -175,7 +177,10 @@ pub fn cli_check_drive(drive_str: &str, find_locks_only: bool) -> Result<()> {
         );
     }
     if warn_count > 0 {
-        println!("  提示: {} 个系统后台进程占用，建议等待或关闭相关窗口", warn_count);
+        println!(
+            "  提示: {} 个系统后台进程占用，建议等待或关闭相关窗口",
+            warn_count
+        );
     }
     if crit_count > 0 {
         println!(
@@ -189,7 +194,10 @@ pub fn cli_check_drive(drive_str: &str, find_locks_only: bool) -> Result<()> {
 }
 
 fn parse_drive_letter(drive_str: &str) -> Result<char> {
-    let cleaned = drive_str.trim().trim_end_matches(':').trim_end_matches('\\');
+    let cleaned = drive_str
+        .trim()
+        .trim_end_matches(':')
+        .trim_end_matches('\\');
     if cleaned.len() == 1 {
         let c = cleaned.chars().next().unwrap();
         if c.is_ascii_alphabetic() {

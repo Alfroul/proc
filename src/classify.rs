@@ -54,9 +54,7 @@ const SYSTEM_PROCESS_NAMES: &[&str] = &[
     "secure system",
 ];
 
-pub const EXPECTED_ORPHAN_NAMES: &[&str] = &[
-    "explorer.exe",
-];
+pub const EXPECTED_ORPHAN_NAMES: &[&str] = &["explorer.exe"];
 
 static SERVICE_CACHE: OnceLock<HashMap<u32, String>> = OnceLock::new();
 
@@ -64,14 +62,14 @@ fn build_service_cache() -> HashMap<u32, String> {
     let mut cache = HashMap::new();
 
     use windows::Win32::System::Services::{
-        EnumServicesStatusExW, OpenSCManagerW, SC_ENUM_PROCESS_INFO,
-        SC_MANAGER_ENUMERATE_SERVICE, SERVICE_WIN32, SERVICE_STATE_ALL,
-        ENUM_SERVICE_STATUS_PROCESSW,
+        ENUM_SERVICE_STATUS_PROCESSW, EnumServicesStatusExW, OpenSCManagerW, SC_ENUM_PROCESS_INFO,
+        SC_MANAGER_ENUMERATE_SERVICE, SERVICE_STATE_ALL, SERVICE_WIN32,
     };
     use windows::core::PCWSTR;
 
     unsafe {
-        let scm = match OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ENUMERATE_SERVICE) {
+        let scm = match OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ENUMERATE_SERVICE)
+        {
             Ok(scm) => scm,
             Err(_) => return cache,
         };
@@ -143,7 +141,9 @@ fn widestring_to_string(ptr: windows::core::PWSTR) -> String {
         return String::new();
     }
     let slice = unsafe { std::slice::from_raw_parts(ptr_raw, len) };
-    std::ffi::OsString::from_wide(slice).to_string_lossy().into_owned()
+    std::ffi::OsString::from_wide(slice)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn get_service_cache() -> &'static HashMap<u32, String> {

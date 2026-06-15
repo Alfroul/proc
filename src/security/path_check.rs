@@ -76,7 +76,18 @@ fn is_in_temp(path: &str) -> bool {
 }
 
 fn is_in_downloads(path: &str) -> bool {
-    path.contains("\\downloads\\") || path.contains("\\downloads")
+    let lower = path.to_lowercase();
+    if let Some(idx) = lower.find("\\downloads") {
+        let after = &lower[idx + "\\downloads".len()..];
+        let segments = after.split('\\').filter(|s| !s.is_empty()).count();
+        if segments <= 2 {
+            let skip = ["\\bin\\", "\\lib\\", "\\vendor\\", "\\node_modules\\"];
+            if !skip.iter().any(|s| after.contains(s)) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn is_on_desktop(path: &str) -> bool {
@@ -84,11 +95,14 @@ fn is_on_desktop(path: &str) -> bool {
 }
 
 fn check_system32_impersonation(path: &str) -> Option<RiskFactor> {
+    // Only processes that should ONLY live in System32/SysWOW64
     let system32_names = [
-        "cmd.exe", "powershell.exe", "pwsh.exe",
-        "svchost.exe", "lsass.exe", "csrss.exe",
-        "smss.exe", "winlogon.exe", "services.exe",
-        "conhost.exe", "taskhostw.exe",
+        "svchost.exe",
+        "lsass.exe",
+        "csrss.exe",
+        "smss.exe",
+        "winlogon.exe",
+        "services.exe",
     ];
 
     let filename = path.rsplit('\\').next().unwrap_or("").to_lowercase();
@@ -97,7 +111,6 @@ fn check_system32_impersonation(path: &str) -> Option<RiskFactor> {
         return None;
     }
 
-    // Check if it's NOT in system32 or syswow64
     let is_real_system32 = path.contains("\\windows\\system32\\")
         || path.contains("\\windows\\system32")
         || path.contains("\\windows\\syswow64\\")

@@ -22,8 +22,13 @@ pub fn draw_alert_badge(f: &mut Frame, area: Rect, app: &App) {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis()
-            % 1000 < 500;
-        let c = if blink { theme::danger() } else { theme::warning() };
+            % 1000
+            < 500;
+        let c = if blink {
+            theme::danger()
+        } else {
+            theme::warning()
+        };
         ("●", c)
     } else if warning > 0 {
         ("●", theme::warning())
@@ -36,10 +41,7 @@ pub fn draw_alert_badge(f: &mut Frame, area: Rect, app: &App) {
             format!(" {} ", icon),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("alerts: {}", total),
-            Style::default().fg(color),
-        ),
+        Span::styled(format!("alerts: {}", total), Style::default().fg(color)),
     ]);
 
     let p = Paragraph::new(line);
@@ -55,7 +57,12 @@ pub fn draw_alert_popup(f: &mut Frame, app: &App) {
         f.render_widget(Clear, area);
         let p = Paragraph::new("  No active alerts")
             .style(theme::style_muted())
-            .block(Block::default().borders(Borders::ALL).title(" Alerts ").style(theme::style_header()));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Alerts ")
+                    .style(theme::style_header()),
+            );
         f.render_widget(p, area);
         return;
     }
@@ -79,7 +86,8 @@ pub fn draw_alert_popup(f: &mut Frame, app: &App) {
                 crate::alert::AlertSeverity::Info => ("[INFO]", theme::info()),
             };
 
-            let pid_str = alert.related_pid
+            let pid_str = alert
+                .related_pid
                 .map(|p| format!(" (PID {})", p))
                 .unwrap_or_default();
 
@@ -91,7 +99,10 @@ pub fn draw_alert_popup(f: &mut Frame, app: &App) {
             };
 
             Line::from(vec![
-                Span::styled(format!(" {} ", icon), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(" {} ", icon),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     format!("{:.1}/{}", alert.current_value, alert.threshold),
                     theme::style_normal(),
@@ -104,12 +115,13 @@ pub fn draw_alert_popup(f: &mut Frame, app: &App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Alerts ({}) - Shift+A toggle, Esc close ", alerts.len()))
+        .title(format!(
+            " Alerts ({}) - Shift+A toggle, Esc close ",
+            alerts.len()
+        ))
         .style(theme::style_header());
 
-    let p = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: true });
+    let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
     f.render_widget(p, area);
 }
 

@@ -9,15 +9,24 @@ use crate::monitor::{MonitorManager, RestartPolicy};
 /// Watchdog 发送给主线程的状态更新消息
 #[derive(Debug)]
 pub enum WatchdogEvent {
-    Started { monitor_id: u32, pid: u32 },
+    Started {
+        monitor_id: u32,
+        pid: u32,
+    },
     Crashed {
         monitor_id: u32,
         exit_code: Option<i32>,
         attempt: u32,
         restarting: bool,
     },
-    Stopped { monitor_id: u32, reason: String },
-    Running { monitor_id: u32, pid: u32 },
+    Stopped {
+        monitor_id: u32,
+        reason: String,
+    },
+    Running {
+        monitor_id: u32,
+        pid: u32,
+    },
 }
 
 /// Watchdog 后台句柄
@@ -73,7 +82,11 @@ pub fn spawn_watchdog(
                 return;
             }
 
-            let mut child = match Command::new(&cmd).args(&args).current_dir(cwd.as_deref().unwrap_or(Path::new("."))).spawn() {
+            let mut child = match Command::new(&cmd)
+                .args(&args)
+                .current_dir(cwd.as_deref().unwrap_or(Path::new(".")))
+                .spawn()
+            {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = event_tx.send(WatchdogEvent::Stopped {
@@ -85,22 +98,35 @@ pub fn spawn_watchdog(
             };
 
             let pid = child.id();
-            let _ = event_tx.send(WatchdogEvent::Started {
-                monitor_id,
-                pid,
-            });
+            let _ = event_tx.send(WatchdogEvent::Started { monitor_id, pid });
 
-            let status = match child.wait() {
-                Ok(s) => s,
-                Err(e) => {
+            // 用 try_wait 轮询代替阻塞的 child.wait()，否则 child 长跑时
+            // shutdown 信号要等到 child 自然退出才能被检测到（ADR 0005）。
+            let status = loop {
+                if shutdown_rx.try_recv().is_ok() {
+                    // 收到 Ctrl+C：必须显式 kill child，否则子进程会变孤儿。
+                    let _ = child.kill();
+                    let _ = child.wait();
                     let _ = event_tx.send(WatchdogEvent::Stopped {
                         monitor_id,
-                        reason: format!("wait 失败: {}", e),
+                        reason: "手动停止".to_string(),
                     });
                     return;
                 }
+                match child.try_wait() {
+                    Ok(Some(s)) => break s,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                    Err(e) => {
+                        let _ = event_tx.send(WatchdogEvent::Stopped {
+                            monitor_id,
+                            reason: format!("wait 失败: {}", e),
+                        });
+                        return;
+                    }
+                }
             };
 
+            // child 已退出，但 shutdown 可能在退出同时到达，再次检查
             if shutdown_rx.try_recv().is_ok() {
                 let _ = event_tx.send(WatchdogEvent::Stopped {
                     monitor_id,
@@ -161,7 +187,20 @@ pub fn spawn_watchdog(
             .ok();
 
             let backoff = MonitorManager::calc_backoff(base_backoff, crash_count, max_backoff);
-            std::thread::sleep(Duration::from_secs(backoff));
+            // 可中断退避：1 秒为单位 sleep，期间收到 shutdown 立即返回
+            let mut slept: u64 = 0;
+            while slept < backoff {
+                if shutdown_rx.try_recv().is_ok() {
+                    let _ = event_tx.send(WatchdogEvent::Stopped {
+                        monitor_id,
+                        reason: "手动停止".to_string(),
+                    });
+                    return;
+                }
+                let chunk = std::cmp::min(1, backoff - slept);
+                std::thread::sleep(Duration::from_secs(chunk));
+                slept += chunk;
+            }
         }
     });
 

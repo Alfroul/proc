@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use proc::monitor::{MonitorManager, MonitorTarget, RestartPolicy, MonitorStatus};
+use proc::monitor::{MonitorManager, MonitorStatus, MonitorTarget, RestartPolicy};
 
 #[test]
 fn test_monitor_manager_add_by_pid() {
@@ -76,9 +76,15 @@ fn test_monitor_manager_remove_nonexistent() {
 #[test]
 fn test_monitor_manager_auto_increment_id() {
     let mut mgr = MonitorManager::new();
-    let id1 = mgr.add_monitor(MonitorTarget::ByPid { pid: 1 }, RestartPolicy::NotifyOnly).unwrap();
-    let id2 = mgr.add_monitor(MonitorTarget::ByPid { pid: 2 }, RestartPolicy::NotifyOnly).unwrap();
-    let id3 = mgr.add_monitor(MonitorTarget::ByPid { pid: 3 }, RestartPolicy::NotifyOnly).unwrap();
+    let id1 = mgr
+        .add_monitor(MonitorTarget::ByPid { pid: 1 }, RestartPolicy::NotifyOnly)
+        .unwrap();
+    let id2 = mgr
+        .add_monitor(MonitorTarget::ByPid { pid: 2 }, RestartPolicy::NotifyOnly)
+        .unwrap();
+    let id3 = mgr
+        .add_monitor(MonitorTarget::ByPid { pid: 3 }, RestartPolicy::NotifyOnly)
+        .unwrap();
     assert_eq!(id1, 1);
     assert_eq!(id2, 2);
     assert_eq!(id3, 3);
@@ -177,7 +183,9 @@ fn test_notification_cap_at_100() {
 #[test]
 fn test_monitor_get_by_id() {
     let mut mgr = MonitorManager::new();
-    let id = mgr.add_monitor(MonitorTarget::ByPid { pid: 42 }, RestartPolicy::NotifyOnly).unwrap();
+    let id = mgr
+        .add_monitor(MonitorTarget::ByPid { pid: 42 }, RestartPolicy::NotifyOnly)
+        .unwrap();
     let entry = mgr.get_monitor(id).unwrap();
     assert_eq!(entry.pid, Some(42));
     assert!(mgr.get_monitor(999).is_none());

@@ -33,3 +33,28 @@ jobs:
 
       - name: test
         run: cargo test --release
+
+  check-linux:
+    # Linux 平台仅要求 cargo check 通过。功能性测试不在 Linux 上执行。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: check (default features)
+        run: cargo check --all-targets
+
+      - name: check (no default features)
+        run: cargo check --no-default-features --all-targets
+
+      - name: build platform_compat test
+        run: cargo test --test test_platform_compat --no-run

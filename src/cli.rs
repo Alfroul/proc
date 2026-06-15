@@ -50,6 +50,20 @@ pub enum Command {
         force: bool,
     },
 
+    /// 按名称终止进程
+    Pkill {
+        /// 进程名（如 chrome.exe），精确匹配，大小写不敏感
+        name: String,
+
+        /// 强制终止（进程树）
+        #[arg(long)]
+        force: bool,
+
+        /// 仅显示匹配的进程，不终止
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// U盘助手
     Eject {
         /// 驱动器号 (如 E:)
@@ -105,5 +119,24 @@ pub enum Command {
     Replay {
         /// 录制文件路径
         file: std::path::PathBuf,
+    },
+
+    /// 导出当前进程快照
+    Export {
+        /// 输出格式：json | csv
+        #[arg(long, default_value = "json")]
+        format: String,
+
+        /// 输出文件路径（不指定则输出到 stdout）
+        #[arg(short = 'o', long)]
+        output: Option<std::path::PathBuf>,
+
+        /// 排序字段：cpu | mem | name | pid
+        #[arg(long, default_value = "cpu")]
+        sort: String,
+
+        /// 限制导出数量
+        #[arg(long)]
+        limit: Option<usize>,
     },
 }

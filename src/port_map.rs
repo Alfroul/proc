@@ -102,14 +102,22 @@ impl PortStateFilter {
 pub fn matches_filter(entry: &PortEntry, filter: &PortStateFilter) -> bool {
     match filter {
         PortStateFilter::All => true,
-        PortStateFilter::Established => entry.state.as_deref().map_or(false, |s| s.contains("Established")),
-        PortStateFilter::Listening => entry.protocol == Protocol::Tcp && entry.state.as_deref().map_or(false, |s| s.contains("Listen")),
+        PortStateFilter::Established => entry
+            .state
+            .as_deref()
+            .is_some_and(|s| s.contains("Established")),
+        PortStateFilter::Listening => {
+            entry.protocol == Protocol::Tcp
+                && entry.state.as_deref().is_some_and(|s| s.contains("Listen"))
+        }
         PortStateFilter::Udp => entry.protocol == Protocol::Udp,
     }
 }
 
 pub fn state_group(state: &Option<String>, protocol: &Protocol) -> u8 {
-    if *protocol == Protocol::Udp { return 3; }
+    if *protocol == Protocol::Udp {
+        return 3;
+    }
     match state.as_deref() {
         Some(s) if s.contains("Established") => 0,
         Some(s) if s.contains("Listen") => 1,
@@ -128,7 +136,7 @@ pub fn sort_entries(entries: &mut [PortEntry], sort: PortSortField) {
                     let a_remote = a.remote_addr.map(|ip| ip.to_string()).unwrap_or_default();
                     let b_remote = b.remote_addr.map(|ip| ip.to_string()).unwrap_or_default();
                     a_remote.cmp(&b_remote)
-                },
+                }
                 PortSortField::State => a.state.cmp(&b.state),
                 PortSortField::Process => a.process_name.cmp(&b.process_name),
             },
@@ -142,7 +150,9 @@ pub fn is_ipv6_duplicate(entry: &PortEntry, seen: &[(u16, u32, String)]) -> bool
         return false;
     }
     seen.iter().any(|(port, pid, state)| {
-        *port == entry.local_port && *pid == entry.pid && *state == entry.state.clone().unwrap_or_default()
+        *port == entry.local_port
+            && *pid == entry.pid
+            && *state == entry.state.clone().unwrap_or_default()
     })
 }
 
@@ -165,11 +175,13 @@ pub fn scan_ports() -> Result<Vec<PortEntry>> {
     let sockets_info = netstat2::get_sockets_info(af_flags, proto_flags)
         .map_err(|e| ProcError::PortScan(format!("端口扫描失败: {}", e)))?;
 
-    let sys = sysinfo::System::new_all();
-    let mut name_map: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-    for (pid, proc) in sys.processes() {
-        name_map.insert(pid.as_u32(), proc.name().to_string_lossy().to_string());
-    }
+    let name_map = crate::collect::sysinfo_with(|sys| {
+        let mut map: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        for (pid, proc) in sys.processes() {
+            map.insert(pid.as_u32(), proc.name().to_string_lossy().to_string());
+        }
+        map
+    });
     scan_ports_with_names(&sockets_info, &name_map)
 }
 
@@ -182,7 +194,10 @@ pub fn scan_ports_with_names(
     for si in sockets_info {
         let pid = si.associated_pids.first().copied().unwrap_or(0);
         let process_name = if pid > 0 {
-            name_map.get(&pid).cloned().unwrap_or_else(|| "-".to_string())
+            name_map
+                .get(&pid)
+                .cloned()
+                .unwrap_or_else(|| "-".to_string())
         } else {
             "-".to_string()
         };
@@ -227,10 +242,7 @@ pub fn scan_ports_with_names(
 
 pub fn find_pid_by_port(port: u16) -> Result<Vec<PortEntry>> {
     let all = scan_ports()?;
-    Ok(all
-        .into_iter()
-        .filter(|e| e.local_port == port)
-        .collect())
+    Ok(all.into_iter().filter(|e| e.local_port == port).collect())
 }
 
 pub fn find_ports_by_pid(pid: u32) -> Result<Vec<PortEntry>> {
@@ -253,21 +265,28 @@ impl ProcessNetSummary {
     pub fn from_pid(pid: u32, entries: &[PortEntry]) -> Self {
         let mut s = Self::default();
         for e in entries {
-            if e.pid != pid { continue; }
+            if e.pid != pid {
+                continue;
+            }
             match e.protocol {
                 Protocol::Tcp => {
                     s.tcp_connections += 1;
                     match e.state.as_deref() {
                         Some(st) if st.contains("Established") => s.established += 1,
-                        Some(st) if st.contains("CloseWait") || st.contains("CLOSE_WAIT") => s.close_wait += 1,
+                        Some(st) if st.contains("CloseWait") || st.contains("CLOSE_WAIT") => {
+                            s.close_wait += 1
+                        }
                         Some(st) if st.contains("Listen") => s.listening += 1,
-                        Some(st) if st.contains("TimeWait") || st.contains("TIME_WAIT") => s.time_wait += 1,
+                        Some(st) if st.contains("TimeWait") || st.contains("TIME_WAIT") => {
+                            s.time_wait += 1
+                        }
                         _ => {}
                     }
-                    if let Some(addr) = e.remote_addr {
-                        if !addr.is_unspecified() && !addr.is_loopback() {
-                            s.unique_remote_addrs.insert(addr);
-                        }
+                    if let Some(addr) = e.remote_addr
+                        && !addr.is_unspecified()
+                        && !addr.is_loopback()
+                    {
+                        s.unique_remote_addrs.insert(addr);
                     }
                 }
                 Protocol::Udp => s.udp_connections += 1,
@@ -330,15 +349,22 @@ impl ProcessNetGroup {
                             g.tcp_count += 1;
                             match e.state.as_deref() {
                                 Some(st) if st.contains("Established") => g.established += 1,
-                                Some(st) if st.contains("CloseWait") || st.contains("CLOSE_WAIT") => g.close_wait += 1,
+                                Some(st)
+                                    if st.contains("CloseWait") || st.contains("CLOSE_WAIT") =>
+                                {
+                                    g.close_wait += 1
+                                }
                                 Some(st) if st.contains("Listen") => g.listening += 1,
-                                Some(st) if st.contains("TimeWait") || st.contains("TIME_WAIT") => g.time_wait += 1,
+                                Some(st) if st.contains("TimeWait") || st.contains("TIME_WAIT") => {
+                                    g.time_wait += 1
+                                }
                                 _ => {}
                             }
-                            if let Some(addr) = e.remote_addr {
-                                if !addr.is_unspecified() && !addr.is_loopback() {
-                                    g.unique_remote_addrs.insert(addr);
-                                }
+                            if let Some(addr) = e.remote_addr
+                                && !addr.is_unspecified()
+                                && !addr.is_loopback()
+                            {
+                                g.unique_remote_addrs.insert(addr);
                             }
                         }
                         Protocol::Udp => g.udp_count += 1,
@@ -348,7 +374,7 @@ impl ProcessNetGroup {
             })
             .collect();
 
-        groups.sort_by(|a, b| a.process_name.to_lowercase().cmp(&b.process_name.to_lowercase()));
+        groups.sort_by_key(|a| a.process_name.to_lowercase());
         groups
     }
 }
@@ -384,9 +410,10 @@ pub fn sort_process_groups(groups: &mut [ProcessNetGroup], sort: ProcessSortFiel
             let b_total = b.tcp_count + b.udp_count;
             b_total.cmp(&a_total)
         }
-        ProcessSortField::ProcessName => {
-            a.process_name.to_lowercase().cmp(&b.process_name.to_lowercase())
-        }
+        ProcessSortField::ProcessName => a
+            .process_name
+            .to_lowercase()
+            .cmp(&b.process_name.to_lowercase()),
         ProcessSortField::Pid => a.pid.cmp(&b.pid),
     });
 }
@@ -518,13 +545,18 @@ pub fn detect_cloud_provider(addr: &IpAddr) -> Option<CloudProvider> {
 
     macro_rules! in_range {
         ($lo:expr, $hi:expr) => {
-            first >= $lo && first <= $hi
+            ($lo..=$hi).contains(&first)
         };
     }
 
     // AWS
-    if in_range!(3, 3) || in_range!(13, 13) || in_range!(15, 15) || in_range!(18, 18)
-        || in_range!(34, 35) || in_range!(52, 52) || in_range!(54, 55)
+    if in_range!(3, 3)
+        || in_range!(13, 13)
+        || in_range!(15, 15)
+        || in_range!(18, 18)
+        || in_range!(34, 35)
+        || in_range!(52, 52)
+        || in_range!(54, 55)
     {
         return Some(CloudProvider::Aws);
     }
@@ -634,7 +666,11 @@ impl RemoteGroup {
                 Some(a) if !a.is_unspecified() => a,
                 _ => {
                     let key = if e.local_addr.is_unspecified() {
-                        if e.local_addr == local_addr_v6 { local_addr_v4 } else { e.local_addr }
+                        if e.local_addr == local_addr_v6 {
+                            local_addr_v4
+                        } else {
+                            e.local_addr
+                        }
                     } else {
                         e.local_addr
                     };
@@ -665,15 +701,17 @@ impl RemoteGroup {
                     g.process_names.insert(e.process_name.clone());
                     g.protocols.insert(e.protocol);
                     match e.protocol {
-                        Protocol::Tcp => {
-                            match e.state.as_deref() {
-                                Some(st) if st.contains("Established") => g.established += 1,
-                                Some(st) if st.contains("CloseWait") || st.contains("CLOSE_WAIT") => g.close_wait += 1,
-                                Some(st) if st.contains("Listen") => g.listening += 1,
-                                Some(st) if st.contains("TimeWait") || st.contains("TIME_WAIT") => g.time_wait += 1,
-                                _ => {}
+                        Protocol::Tcp => match e.state.as_deref() {
+                            Some(st) if st.contains("Established") => g.established += 1,
+                            Some(st) if st.contains("CloseWait") || st.contains("CLOSE_WAIT") => {
+                                g.close_wait += 1
                             }
-                        }
+                            Some(st) if st.contains("Listen") => g.listening += 1,
+                            Some(st) if st.contains("TimeWait") || st.contains("TIME_WAIT") => {
+                                g.time_wait += 1
+                            }
+                            _ => {}
+                        },
                         Protocol::Udp => {}
                     }
                 }
@@ -737,7 +775,14 @@ pub struct ConnectionDiff {
 }
 
 fn conn_key(e: &PortEntry) -> (Protocol, IpAddr, u16, Option<IpAddr>, Option<u16>, u32) {
-    (e.protocol, e.local_addr, e.local_port, e.remote_addr, e.remote_port, e.pid)
+    (
+        e.protocol,
+        e.local_addr,
+        e.local_port,
+        e.remote_addr,
+        e.remote_port,
+        e.pid,
+    )
 }
 
 pub fn diff_connections(prev: &[PortEntry], current: &[PortEntry]) -> ConnectionDiff {
@@ -747,12 +792,22 @@ pub fn diff_connections(prev: &[PortEntry], current: &[PortEntry]) -> Connection
     let new_count = cur_keys.difference(&prev_keys).count();
     let closed_count = prev_keys.difference(&cur_keys).count();
     let active_count = current.len();
-    let close_wait_count = current.iter().filter(|e| {
-        e.state.as_deref().map_or(false, |s| s.contains("CloseWait") || s.contains("CLOSE_WAIT"))
-    }).count();
-    let time_wait_count = current.iter().filter(|e| {
-        e.state.as_deref().map_or(false, |s| s.contains("TimeWait") || s.contains("TIME_WAIT"))
-    }).count();
+    let close_wait_count = current
+        .iter()
+        .filter(|e| {
+            e.state
+                .as_deref()
+                .is_some_and(|s| s.contains("CloseWait") || s.contains("CLOSE_WAIT"))
+        })
+        .count();
+    let time_wait_count = current
+        .iter()
+        .filter(|e| {
+            e.state
+                .as_deref()
+                .is_some_and(|s| s.contains("TimeWait") || s.contains("TIME_WAIT"))
+        })
+        .count();
 
     ConnectionDiff {
         new_count,

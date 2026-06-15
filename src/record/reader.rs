@@ -1,9 +1,7 @@
 use std::io::{BufReader, Read};
 use std::path::PathBuf;
 
-use super::frame::{
-    FrameProcess, LegacySystemFrame, RecordingHeader, UiFrame, RECORDING_MAGIC,
-};
+use super::frame::{LegacySystemFrame, RECORDING_MAGIC, RecordingHeader, UiFrame};
 use crate::collect::ProcessInfo;
 
 pub struct Player {
@@ -120,11 +118,7 @@ impl Player {
         }
         let diff_lo = (self.frames[lo].timestamp as i64 - ts as i64).unsigned_abs();
         let diff_prev = (self.frames[lo - 1].timestamp as i64 - ts as i64).unsigned_abs();
-        if diff_prev <= diff_lo {
-            lo - 1
-        } else {
-            lo
-        }
+        if diff_prev <= diff_lo { lo - 1 } else { lo }
     }
 
     pub fn header(&self) -> &RecordingHeader {
@@ -147,6 +141,7 @@ fn legacy_to_v2(legacy: LegacySystemFrame) -> UiFrame {
         processes: legacy.processes,
         search_query: String::new(),
         sort_field: "Cpu".to_string(),
+        process_view_mode: 0,
         tree_nodes: Vec::new(),
         port_entries: Vec::new(),
         port_view_mode: 0,
@@ -170,22 +165,8 @@ fn legacy_to_v2(legacy: LegacySystemFrame) -> UiFrame {
     }
 }
 
-pub fn frame_process_to_process_info(fp: &FrameProcess) -> ProcessInfo {
-    ProcessInfo {
-        pid: fp.pid,
-        name: fp.name.clone(),
-        cpu_usage: fp.cpu,
-        memory: fp.memory,
-        virtual_memory: 0,
-        disk_usage: (fp.disk_read, fp.disk_write),
-        status: String::new(),
-        exe: None,
-        cmd: Vec::new(),
-        cwd: None,
-        parent_pid: None,
-        session_id: None,
-        user_id: None,
-        start_time: 0,
-        run_time: 0,
-    }
+/// Legacy entry point kept for test compatibility. Delegates to the
+/// `From<&FrameProcess>` impl in `super::conversions`.
+pub fn frame_process_to_process_info(fp: &super::frame::FrameProcess) -> ProcessInfo {
+    ProcessInfo::from(fp)
 }

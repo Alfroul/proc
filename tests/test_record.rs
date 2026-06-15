@@ -1,5 +1,7 @@
-use proc::record::frame::{FrameProcess, RecordingHeader, UiFrame, RECORDING_MAGIC, RECORDING_VERSION};
-use proc::record::reader::{frame_process_to_process_info, Player};
+use proc::record::frame::{
+    FrameProcess, RECORDING_MAGIC, RECORDING_VERSION, RecordingHeader, UiFrame,
+};
+use proc::record::reader::{Player, frame_process_to_process_info};
 use proc::record::writer::Recorder;
 
 fn make_test_frame(timestamp: u64, cpu: f32) -> UiFrame {
@@ -34,6 +36,7 @@ fn make_test_frame(timestamp: u64, cpu: f32) -> UiFrame {
         ],
         search_query: String::new(),
         sort_field: "Cpu".to_string(),
+        process_view_mode: 0,
         tree_nodes: vec![],
         port_entries: vec![],
         port_view_mode: 0,
@@ -47,6 +50,7 @@ fn make_test_frame(timestamp: u64, cpu: f32) -> UiFrame {
         docker_containers: vec![],
         docker_events: vec![],
         ops: vec![],
+        nav: Default::default(),
     }
 }
 

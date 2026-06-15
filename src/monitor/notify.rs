@@ -19,7 +19,13 @@ pub fn send_toast(title: &str, body: &str) -> Result<()> {
 }
 
 /// 通知进程崩溃
-pub fn notify_crash(name: &str, pid: u32, exit_code: i32, attempt: u32, max_retries: u32) -> Result<()> {
+pub fn notify_crash(
+    name: &str,
+    pid: u32,
+    exit_code: i32,
+    attempt: u32,
+    max_retries: u32,
+) -> Result<()> {
     send_toast(
         "进程崩溃",
         &format!(
@@ -39,10 +45,7 @@ pub fn notify_port_change(port: u16, old_status: &str, new_status: &str) -> Resu
 
 /// 通知网络异常
 pub fn notify_anomaly(level: &str, description: &str) -> Result<()> {
-    send_toast(
-        &format!("proc - 网络异常: {}", level),
-        description,
-    )
+    send_toast(&format!("proc - 网络异常: {}", level), description)
 }
 
 fn xml_escape(s: &str) -> String {
@@ -96,6 +99,9 @@ mod tests {
 
     #[test]
     fn test_xml_escape() {
-        assert_eq!(xml_escape("a<b>c&d\"e'f"), "a&lt;b&gt;c&amp;d&quot;e&apos;f");
+        assert_eq!(
+            xml_escape("a<b>c&d\"e'f"),
+            "a&lt;b&gt;c&amp;d&quot;e&apos;f"
+        );
     }
 }

@@ -74,36 +74,40 @@ impl DockerMonitor {
         let mut last_err = String::new();
 
         // Try 1: Named pipe (Docker Desktop for Windows)
-        if let Ok(docker) = runtime.block_on(async {
-            bollard::Docker::connect_with_socket_defaults()
-        }) {
-            if let Ok(docker) = Self::verify_connection(docker, &runtime, "命名管道") {
-                return Ok(Self { runtime, docker });
+        if let Ok(docker) =
+            runtime.block_on(async { bollard::Docker::connect_with_socket_defaults() })
+        {
+            match Self::verify_connection(docker, &runtime, "命名管道") {
+                Ok(docker) => return Ok(Self { runtime, docker }),
+                Err(e) => last_err = e,
             }
-            last_err = "命名管道不可用".to_string();
         }
 
         // Try 2: TCP localhost:2375 (WSL Docker with TCP enabled)
-        if let Ok(docker) = runtime.block_on(async {
-            bollard::Docker::connect_with_http_defaults()
-        }) {
-            if let Ok(docker) = Self::verify_connection(docker, &runtime, "TCP") {
-                return Ok(Self { runtime, docker });
+        if let Ok(docker) =
+            runtime.block_on(async { bollard::Docker::connect_with_http_defaults() })
+        {
+            match Self::verify_connection(docker, &runtime, "TCP") {
+                Ok(docker) => return Ok(Self { runtime, docker }),
+                Err(e) => last_err = e,
             }
-            last_err = "TCP 连接不可用".to_string();
         }
 
         Err(ProcError::Docker(format!(
             "Docker 未运行或未安装 (已尝试命名管道和 TCP 连接{})",
-            if last_err.is_empty() { String::new() } else { format!(": {}", last_err) }
+            if last_err.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", last_err)
+            }
         )))
     }
 
     fn verify_connection(
         docker: bollard::Docker,
         runtime: &tokio::runtime::Runtime,
-        _label: &str,
-    ) -> std::result::Result<bollard::Docker, ()> {
+        label: &str,
+    ) -> std::result::Result<bollard::Docker, String> {
         use bollard::container::ListContainersOptions;
 
         let opts: ListContainersOptions<String> = ListContainersOptions {
@@ -114,7 +118,7 @@ impl DockerMonitor {
         runtime
             .block_on(async { docker.list_containers(Some(opts)).await })
             .map(|_| docker)
-            .map_err(|_| ())
+            .map_err(|e| format!("{} 验证失败: {}", label, e))
     }
 
     /// 获取 Docker 客户端的克隆（用于事件监听线程）
@@ -151,12 +155,7 @@ impl DockerMonitor {
             let image = c.image.unwrap_or_default();
             // image 可能是 sha256:xxx 形式，取短 ID
             let image_display = if let Some(hash) = image.strip_prefix("sha256:") {
-                if hash.len() > 12 {
-                    &hash[..12]
-                } else {
-                    hash
-                }
-                .to_string()
+                if hash.len() > 12 { &hash[..12] } else { hash }.to_string()
             } else {
                 image.clone()
             };
@@ -231,7 +230,9 @@ impl DockerMonitor {
 }
 
 fn format_ports(ports: &Option<Vec<bollard::models::Port>>) -> String {
-    let Some(ports) = ports else { return String::new() };
+    let Some(ports) = ports else {
+        return String::new();
+    };
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
     for p in ports {

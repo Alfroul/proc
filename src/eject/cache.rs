@@ -27,11 +27,7 @@ pub fn flush_write_cache(drive_letter: char) -> Result<()> {
 ///
 /// 每隔 `interval_secs` 秒扫描一次，直到无占用或达到最大尝试次数。
 /// 返回 true 表示已无占用，false 表示仍有占用。
-pub fn wait_and_monitor(
-    drive_letter: char,
-    interval_secs: u64,
-    max_attempts: u32,
-) -> Result<bool> {
+pub fn wait_and_monitor(drive_letter: char, interval_secs: u64, max_attempts: u32) -> Result<bool> {
     for _ in 0..max_attempts {
         thread::sleep(Duration::from_secs(interval_secs));
 

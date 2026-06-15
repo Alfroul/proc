@@ -5,6 +5,7 @@ use std::sync::mpsc;
 
 use super::frame::{RecordingHeader, UiFrame};
 
+#[allow(clippy::large_enum_variant)]
 enum WriterMsg {
     Frame(UiFrame),
     Stop,

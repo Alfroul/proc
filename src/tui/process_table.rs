@@ -5,35 +5,59 @@ use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
 
 use crate::app::App;
 use crate::classify::ProcessClass;
-use crate::tui::theme;
+use crate::collect::SortField;
+use crate::format::format_bytes;
 use crate::tui::security_badge;
+use crate::tui::theme;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let sorted = app.get_filtered_sorted_processes();
 
     let rows_visible = area.height.saturating_sub(3) as usize;
+    let show_disk = matches!(
+        app.process_panel.sort_field,
+        SortField::DiskRead | SortField::DiskWrite
+    );
 
-    let header = Row::new(vec![
-        Cell::from("  "),
-        Cell::from("PID"),
-        Cell::from("CPU%"),
-        Cell::from("MEM%"),
-        Cell::from("内存"),
-        Cell::from("状态"),
-        Cell::from("分类"),
-        Cell::from("安全"),
-        Cell::from("名称"),
-    ])
-    .style(theme::style_header());
+    let header = if show_disk {
+        Row::new(vec![
+            Cell::from("  "),
+            Cell::from("PID"),
+            Cell::from("CPU%"),
+            Cell::from("MEM%"),
+            Cell::from("内存"),
+            Cell::from("磁盘R"),
+            Cell::from("磁盘W"),
+            Cell::from("状态"),
+            Cell::from("分类"),
+            Cell::from("安全"),
+            Cell::from("名称"),
+        ])
+        .style(theme::style_header())
+    } else {
+        Row::new(vec![
+            Cell::from("  "),
+            Cell::from("PID"),
+            Cell::from("CPU%"),
+            Cell::from("MEM%"),
+            Cell::from("内存"),
+            Cell::from("状态"),
+            Cell::from("分类"),
+            Cell::from("安全"),
+            Cell::from("名称"),
+        ])
+        .style(theme::style_header())
+    };
 
     let rows: Vec<Row> = sorted
         .iter()
         .enumerate()
-        .skip(app.scroll_offset)
+        .skip(app.process_panel.scroll_offset)
         .take(rows_visible)
-        .map(|(i, (class, proc))| {
-            let selected = app.selected_indices.contains(&i);
-            let is_cursor = i == app.cursor_index;
+        .map(|(i, (idx, class))| {
+            let proc = &app.cached_processes[*idx];
+            let selected = app.process_panel.selected_pids.contains(&proc.pid);
+            let is_cursor = i == app.process_panel.cursor_index;
 
             let checkbox = if selected { "☑ " } else { "☐ " };
             let mem_str = format_bytes(proc.memory);
@@ -53,9 +77,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 Color::Reset
             };
 
-            let row_style = Style::default()
-                .fg(theme::text_primary())
-                .bg(bg);
+            let row_style = Style::default().fg(theme::text_primary()).bg(bg);
 
             let sec_cell = if let Some(score) = app.security_scores.get(&proc.pid) {
                 let text = if score.score >= 90 {
@@ -72,36 +94,71 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 Cell::from("")
             };
 
-            Row::new(vec![
-                Cell::from(checkbox),
-                Cell::from(proc.pid.to_string()),
-                Cell::from(cpu_str),
-                Cell::from(mem_pct),
-                Cell::from(mem_str),
-                Cell::from(proc.status.clone()),
-                Cell::from(class.label()).style(class_style(class)),
-                sec_cell,
-                Cell::from(proc.name.clone()),
-            ])
-            .style(row_style)
+            if show_disk {
+                let disk_r = format_speed(proc.disk_read_speed);
+                let disk_w = format_speed(proc.disk_write_speed);
+                Row::new(vec![
+                    Cell::from(checkbox),
+                    Cell::from(proc.pid.to_string()),
+                    Cell::from(cpu_str),
+                    Cell::from(mem_pct),
+                    Cell::from(mem_str),
+                    Cell::from(disk_r),
+                    Cell::from(disk_w),
+                    Cell::from(proc.status.clone()),
+                    Cell::from(class.label()).style(class_style(class)),
+                    sec_cell,
+                    Cell::from(proc.name.clone()),
+                ])
+                .style(row_style)
+            } else {
+                Row::new(vec![
+                    Cell::from(checkbox),
+                    Cell::from(proc.pid.to_string()),
+                    Cell::from(cpu_str),
+                    Cell::from(mem_pct),
+                    Cell::from(mem_str),
+                    Cell::from(proc.status.clone()),
+                    Cell::from(class.label()).style(class_style(class)),
+                    sec_cell,
+                    Cell::from(proc.name.clone()),
+                ])
+                .style(row_style)
+            }
         })
         .collect();
 
-    let widths = [
-        ratatui::layout::Constraint::Length(2),
-        ratatui::layout::Constraint::Length(7),
-        ratatui::layout::Constraint::Length(7),
-        ratatui::layout::Constraint::Length(7),
-        ratatui::layout::Constraint::Length(9),
-        ratatui::layout::Constraint::Length(6),
-        ratatui::layout::Constraint::Length(4),
-        ratatui::layout::Constraint::Length(5),
-        ratatui::layout::Constraint::Min(10),
-    ];
+    let widths: Vec<ratatui::layout::Constraint> = if show_disk {
+        vec![
+            ratatui::layout::Constraint::Length(2),
+            ratatui::layout::Constraint::Length(7),
+            ratatui::layout::Constraint::Length(7),
+            ratatui::layout::Constraint::Length(7),
+            ratatui::layout::Constraint::Length(9),
+            ratatui::layout::Constraint::Length(9),
+            ratatui::layout::Constraint::Length(9),
+            ratatui::layout::Constraint::Length(6),
+            ratatui::layout::Constraint::Length(4),
+            ratatui::layout::Constraint::Length(5),
+            ratatui::layout::Constraint::Min(10),
+        ]
+    } else {
+        vec![
+            ratatui::layout::Constraint::Length(2),
+            ratatui::layout::Constraint::Length(7),
+            ratatui::layout::Constraint::Length(7),
+            ratatui::layout::Constraint::Length(7),
+            ratatui::layout::Constraint::Length(9),
+            ratatui::layout::Constraint::Length(6),
+            ratatui::layout::Constraint::Length(4),
+            ratatui::layout::Constraint::Length(5),
+            ratatui::layout::Constraint::Min(10),
+        ]
+    };
 
-    let sort_indicator = format!("排序: {} ◀▶切换", app.sort_field.label());
-    let search_indicator = if app.search_active {
-        format!(" | 搜索: {} | ESC取消", app.search_query)
+    let sort_indicator = format!("排序: {} ◀▶切换", app.process_panel.sort_field.label());
+    let search_indicator = if app.process_panel.search.is_active() {
+        format!(" | 搜索: {} | ESC取消", app.process_panel.search.query())
     } else {
         String::new()
     };
@@ -112,12 +169,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .title(format!(" {} ", title))
         .style(theme::style_normal());
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(block);
+    let table = Table::new(rows, widths).header(header).block(block);
 
     let mut state = TableState::default();
-    let visible_cursor = app.cursor_index.saturating_sub(app.scroll_offset);
+    let visible_cursor = app
+        .process_panel
+        .cursor_index
+        .saturating_sub(app.process_panel.scroll_offset);
     state.select(Some(visible_cursor));
     f.render_stateful_widget(table, area, &mut state);
 }
@@ -132,7 +190,20 @@ fn class_style(class: &ProcessClass) -> Style {
     }
 }
 
-use crate::format::format_bytes;
+fn format_speed(bytes_per_sec: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if bytes_per_sec >= GB {
+        format!("{:.1}GB/s", bytes_per_sec as f64 / GB as f64)
+    } else if bytes_per_sec >= MB {
+        format!("{:.1}MB/s", bytes_per_sec as f64 / MB as f64)
+    } else if bytes_per_sec >= KB {
+        format!("{:.0}KB/s", bytes_per_sec as f64 / KB as f64)
+    } else {
+        format!("{}B/s", bytes_per_sec)
+    }
+}
 
 pub fn draw_placeholder(_area: Rect) -> String {
     "进程列表（加载中...）".to_string()

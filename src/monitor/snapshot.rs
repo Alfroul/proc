@@ -4,7 +4,7 @@ use crate::collect::SystemSnapshot;
 
 /// 记录当前所有活跃 PID
 pub fn snapshot_pids(sys: &SystemSnapshot) -> HashSet<u32> {
-    sys.processes().iter().map(|p| p.pid).collect()
+    sys.process_cache().keys().copied().collect()
 }
 
 /// 对比两个快照，返回 (新增 PID, 死亡 PID)

@@ -16,6 +16,10 @@ pub struct TreeNode {
     pub name: String,
     pub cpu: f32,
     pub memory: u64,
+    pub mem_pct: f64,
+    pub status: String,
+    pub disk_read_speed: u64,
+    pub disk_write_speed: u64,
     pub depth: usize,
     pub children: Vec<TreeNode>,
     pub expanded: bool,
@@ -36,7 +40,7 @@ pub enum TreeFilter {
 }
 
 /// 构建进程树
-pub fn build_process_tree(processes: &[ProcessInfo]) -> Vec<TreeNode> {
+pub fn build_process_tree(processes: &[ProcessInfo], total_mem: u64) -> Vec<TreeNode> {
     // 构建 parent_pid → children PIDs 映射
     let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut proc_map: HashMap<u32, &ProcessInfo> = HashMap::new();
@@ -54,7 +58,8 @@ pub fn build_process_tree(processes: &[ProcessInfo]) -> Vec<TreeNode> {
         .filter(|p| {
             p.parent_pid.is_none()
                 || p.parent_pid == Some(0)
-                || p.parent_pid.is_none_or(|ppid| !proc_map.contains_key(&ppid))
+                || p.parent_pid
+                    .is_none_or(|ppid| !proc_map.contains_key(&ppid))
         })
         .map(|p| p.pid)
         .collect();
@@ -63,7 +68,14 @@ pub fn build_process_tree(processes: &[ProcessInfo]) -> Vec<TreeNode> {
     let mut visited = std::collections::HashSet::new();
     let mut result = Vec::new();
     for root_pid in roots {
-        if let Some(node) = build_node(root_pid, 0, &children_map, &proc_map, &mut visited) {
+        if let Some(node) = build_node(
+            root_pid,
+            0,
+            &children_map,
+            &proc_map,
+            &mut visited,
+            total_mem,
+        ) {
             result.push(node);
         }
     }
@@ -79,6 +91,7 @@ fn build_node(
     children_map: &HashMap<u32, Vec<u32>>,
     proc_map: &HashMap<u32, &ProcessInfo>,
     visited: &mut std::collections::HashSet<u32>,
+    total_mem: u64,
 ) -> Option<TreeNode> {
     if visited.contains(&pid) {
         return None;
@@ -98,22 +111,26 @@ fn build_node(
     let is_orphan = is_user
         && !is_expected_orphan
         && pid > 4
-        && proc.parent_pid.is_some_and(|ppid| {
-            ppid > 0 && ppid != 4 && !proc_map.contains_key(&ppid)
-        });
+        && proc
+            .parent_pid
+            .is_some_and(|ppid| ppid > 0 && ppid != 4 && !proc_map.contains_key(&ppid));
 
     let is_zombie = proc.status == "Zombie";
 
-    let is_stale = !is_zombie
-        && is_user
-        && proc.memory == 0
-        && proc.cpu_usage == 0.0
-        && proc.run_time > 3600;
+    let is_stale =
+        !is_zombie && is_user && proc.memory == 0 && proc.cpu_usage == 0.0 && proc.run_time > 3600;
 
     let mut children = Vec::new();
     if let Some(child_pids) = children_map.get(&pid) {
         for &child_pid in child_pids {
-            if let Some(child) = build_node(child_pid, depth + 1, children_map, proc_map, visited) {
+            if let Some(child) = build_node(
+                child_pid,
+                depth + 1,
+                children_map,
+                proc_map,
+                visited,
+                total_mem,
+            ) {
                 children.push(child);
             }
         }
@@ -130,11 +147,21 @@ fn build_node(
         None
     };
 
+    let mem_pct = if total_mem > 0 {
+        proc.memory as f64 / total_mem as f64 * 100.0
+    } else {
+        0.0
+    };
+
     Some(TreeNode {
         pid: proc.pid,
         name: proc.name.clone(),
         cpu: proc.cpu_usage,
         memory: proc.memory,
+        mem_pct,
+        status: proc.status.clone(),
+        disk_read_speed: proc.disk_read_speed,
+        disk_write_speed: proc.disk_write_speed,
         depth,
         children,
         expanded: depth < 1,
@@ -169,9 +196,9 @@ fn count_anomalies_recursive(tree: &[TreeNode], orphans: &mut usize, zombies: &m
 pub fn filter_tree(tree: &[TreeNode], filter: TreeFilter) -> Vec<TreeNode> {
     match filter {
         TreeFilter::All => tree.to_vec(),
-        TreeFilter::MyProcesses => filter_nodes(tree, |n| {
-            matches!(n.class, classify::ProcessClass::UserApp)
-        }),
+        TreeFilter::MyProcesses => {
+            filter_nodes(tree, |n| matches!(n.class, classify::ProcessClass::UserApp))
+        }
         TreeFilter::SystemProcesses => filter_nodes(tree, |n| {
             matches!(
                 n.class,
@@ -230,14 +257,8 @@ pub fn search_tree<'a>(tree: &'a [TreeNode], query: &str) -> Vec<&'a TreeNode> {
     result
 }
 
-fn search_node<'a>(
-    node: &'a TreeNode,
-    query: &str,
-    result: &mut Vec<&'a TreeNode>,
-) {
-    if node.name.to_lowercase().contains(query)
-        || node.pid.to_string().contains(query)
-    {
+fn search_node<'a>(node: &'a TreeNode, query: &str, result: &mut Vec<&'a TreeNode>) {
+    if node.name.to_lowercase().contains(query) || node.pid.to_string().contains(query) {
         result.push(node);
     }
     for child in &node.children {
@@ -255,12 +276,7 @@ pub fn format_tree_text(tree: &[TreeNode]) -> String {
     lines.join("\n")
 }
 
-fn format_node_text(
-    node: &TreeNode,
-    prefix: &str,
-    is_last: bool,
-    lines: &mut Vec<String>,
-) {
+fn format_node_text(node: &TreeNode, prefix: &str, is_last: bool, lines: &mut Vec<String>) {
     let connector = if is_last { "└─ " } else { "├─ " };
     let line = format!(
         "{}{}[{}] {} (PID {}, CPU {:.1}%, MEM {})",
@@ -330,5 +346,54 @@ pub fn restore_expanded_pids(nodes: &mut [TreeNode], expanded: &std::collections
     for node in nodes.iter_mut() {
         node.expanded = expanded.contains(&node.pid);
         restore_expanded_pids(&mut node.children, expanded);
+    }
+}
+
+/// 同级排序字段
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeSortField {
+    Cpu,
+    Memory,
+    Pid,
+}
+
+impl TreeSortField {
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Cpu => Self::Memory,
+            Self::Memory => Self::Pid,
+            Self::Pid => Self::Cpu,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            Self::Cpu => Self::Pid,
+            Self::Memory => Self::Cpu,
+            Self::Pid => Self::Memory,
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Cpu => "CPU%",
+            Self::Memory => "内存",
+            Self::Pid => "PID",
+        }
+    }
+}
+
+/// 按指定字段对同级兄弟节点排序（不破坏树结构）
+pub fn sort_siblings(nodes: &mut [TreeNode], field: TreeSortField) {
+    nodes.sort_by(|a, b| match field {
+        TreeSortField::Cpu => b
+            .cpu
+            .partial_cmp(&a.cpu)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        TreeSortField::Memory => b.memory.cmp(&a.memory),
+        TreeSortField::Pid => a.pid.cmp(&b.pid),
+    });
+    for node in nodes.iter_mut() {
+        sort_siblings(&mut node.children, field);
     }
 }

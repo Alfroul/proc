@@ -48,7 +48,10 @@ pub fn get_container_stats(
 
 // CPU: (cpu_delta / system_delta) * num_cpus * 100
 fn calculate_cpu_percent(stats: &bollard::container::Stats) -> f64 {
-    let cpu_delta = stats.cpu_stats.cpu_usage.total_usage
+    let cpu_delta = stats
+        .cpu_stats
+        .cpu_usage
+        .total_usage
         .saturating_sub(stats.precpu_stats.cpu_usage.total_usage) as f64;
 
     let system_delta = match (
@@ -63,18 +66,15 @@ fn calculate_cpu_percent(stats: &bollard::container::Stats) -> f64 {
         return 0.0;
     }
 
-    let num_cpus = stats
-        .cpu_stats
-        .online_cpus
-        .unwrap_or(
-            stats
-                .cpu_stats
-                .cpu_usage
-                .percpu_usage
-                .as_ref()
-                .map(|v| v.len() as u64)
-                .unwrap_or(1),
-        ) as f64;
+    let num_cpus = stats.cpu_stats.online_cpus.unwrap_or(
+        stats
+            .cpu_stats
+            .cpu_usage
+            .percpu_usage
+            .as_ref()
+            .map(|v| v.len() as u64)
+            .unwrap_or(1),
+    ) as f64;
 
     (cpu_delta / system_delta) * num_cpus * 100.0
 }

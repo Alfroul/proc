@@ -1,7 +1,7 @@
-pub mod watchdog;
+pub mod notify;
 pub mod port_watcher;
 pub mod snapshot;
-pub mod notify;
+pub mod watchdog;
 
 use std::path::PathBuf;
 use std::time::SystemTime;

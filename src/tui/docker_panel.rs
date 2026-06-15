@@ -17,31 +17,38 @@ const COL_UPTIME: usize = 8;
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Percentage(60), Constraint::Percentage(40)])
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Percentage(60),
+            Constraint::Percentage(40),
+        ])
         .split(area);
 
     draw_title(f, chunks[0], app);
     draw_container_list(f, chunks[1], app);
     draw_event_log(f, chunks[2], app);
 
-    if app.docker_detail.is_some() {
+    if app.docker_panel.detail.is_some() {
         draw_detail_popup(f, area, app);
     }
 }
 
 fn draw_title(f: &mut Frame, area: Rect, app: &App) {
-    let conn_status = if app.docker_connected {
+    let conn_status = if app.docker_panel.connected {
         Span::styled(" ✅ 已连接 Docker ", theme::style_success())
     } else {
         Span::styled(" ❌ Docker 未运行 ", theme::style_danger())
     };
 
-    let containers = &app.docker_containers;
+    let containers = &app.docker_panel.containers;
 
     let title_line = Line::from(vec![
         Span::styled(" Docker 容器 ", theme::style_header()),
         conn_status,
-        Span::styled(format!("  共 {} 个", containers.len()), theme::style_muted()),
+        Span::styled(
+            format!("  共 {} 个", containers.len()),
+            theme::style_muted(),
+        ),
     ]);
 
     let header_line = Line::from(vec![
@@ -62,9 +69,9 @@ fn draw_title(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_container_list(f: &mut Frame, area: Rect, app: &App) {
-    let containers = &app.docker_containers;
+    let containers = &app.docker_panel.containers;
 
-    let empty_msg = if app.docker_connected {
+    let empty_msg = if app.docker_panel.connected {
         "  暂无容器"
     } else {
         "  Docker 未运行或未安装\n  提示: WSL Docker 需配置 TCP 端口 — dockerd -H tcp://0.0.0.0:2375"
@@ -80,7 +87,7 @@ fn draw_container_list(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let selected = i == app.docker_cursor;
+                let selected = i == app.docker_panel.cursor;
                 let bg = if selected {
                     theme::accent()
                 } else {
@@ -111,7 +118,10 @@ fn draw_container_list(f: &mut Frame, area: Rect, app: &App) {
                     sep.clone(),
                     Span::styled(pad_display(&c.ports, COL_PORTS), theme::style_info()),
                     sep.clone(),
-                    Span::styled(pad_display(&c.status_text(), COL_STATUS), Style::default().bg(bg)),
+                    Span::styled(
+                        pad_display(&c.status_text(), COL_STATUS),
+                        Style::default().bg(bg),
+                    ),
                     sep,
                     Span::styled(pad_display(&uptime, COL_UPTIME), theme::style_muted()),
                 ]);
@@ -121,24 +131,21 @@ fn draw_container_list(f: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::NONE),
-    );
+    let list = List::new(items).block(Block::default().borders(Borders::NONE));
 
     let mut state = ListState::default();
     if !containers.is_empty() {
-        state.select(Some(app.docker_cursor.min(containers.len() - 1)));
+        state.select(Some(app.docker_panel.cursor.min(containers.len() - 1)));
     }
     f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_event_log(f: &mut Frame, area: Rect, app: &App) {
-    let events = &app.docker_events;
+    let events = &app.docker_panel.events;
 
     let items: Vec<ListItem> = if events.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
-            if app.docker_connected {
+            if app.docker_panel.connected {
                 "  监听中 — 容器启停事件将实时显示"
             } else {
                 "  暂无事件"
@@ -162,7 +169,10 @@ fn draw_event_log(f: &mut Frame, area: Rect, app: &App) {
                     .as_deref()
                     .unwrap_or(&event.container_id);
 
-                let elapsed = event.timestamp.elapsed().unwrap_or(std::time::Duration::ZERO);
+                let elapsed = event
+                    .timestamp
+                    .elapsed()
+                    .unwrap_or(std::time::Duration::ZERO);
                 let time_str = format_duration_short(elapsed);
 
                 ListItem::new(Line::from(vec![
@@ -176,11 +186,9 @@ fn draw_event_log(f: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::TOP)
-            .title(Line::from(Span::styled(" 事件日志 ", theme::style_header()))),
-    );
+    let list = List::new(items).block(Block::default().borders(Borders::TOP).title(Line::from(
+        Span::styled(" 事件日志 ", theme::style_header()),
+    )));
 
     f.render_widget(list, area);
 }
@@ -189,16 +197,24 @@ fn draw_detail_popup(f: &mut Frame, area: Rect, app: &App) {
     let popup_area = centered_rect(60, 18, area);
     f.render_widget(ratatui::widgets::Clear, popup_area);
 
-    let container = match &app.docker_detail {
+    let container = match &app.docker_panel.detail {
         Some(c) => c,
         None => return,
     };
 
-    let stats_section = match &app.docker_detail_stats {
+    let stats_section = match &app.docker_panel.detail_stats {
         Some(s) => vec![
             Line::from(format!("  CPU:  {:.1}%", s.cpu_percent)),
-            Line::from(format!("  内存: {} / {}", format_bytes(s.memory_usage), format_bytes(s.memory_limit))),
-            Line::from(format!("  网络: ↓{} ↑{}", format_bytes(s.network_in), format_bytes(s.network_out))),
+            Line::from(format!(
+                "  内存: {} / {}",
+                format_bytes(s.memory_usage),
+                format_bytes(s.memory_limit)
+            )),
+            Line::from(format!(
+                "  网络: ↓{} ↑{}",
+                format_bytes(s.network_in),
+                format_bytes(s.network_out)
+            )),
         ],
         None => vec![Line::from(Span::styled(
             "  资源统计不可用",
@@ -241,13 +257,14 @@ fn draw_detail_popup(f: &mut Frame, area: Rect, app: &App) {
     let mut all_lines = content;
     all_lines.extend(stats_section);
     all_lines.push(Line::from(""));
-    all_lines.push(Line::from(Span::styled(
-        "  Esc 关闭",
-        theme::style_muted(),
-    )));
+    all_lines.push(Line::from(Span::styled("  Esc 关闭", theme::style_muted())));
 
     let paragraph = Paragraph::new(all_lines)
-        .block(Block::default().borders(Borders::ALL).style(theme::style_normal()))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .style(theme::style_normal()),
+        )
         .wrap(Wrap { trim: true });
 
     f.render_widget(paragraph, popup_area);

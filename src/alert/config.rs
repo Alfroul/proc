@@ -79,5 +79,42 @@ fn default_rules() -> Vec<ThresholdRule> {
             severity: AlertSeverity::Warning,
             description: "Disk usage > 95%".into(),
         },
+        // Temperature / throttle rules
+        ThresholdRule {
+            id: "cpu-temp-80".into(),
+            metric: MetricName::CpuTemperature,
+            op: ComparisonOp::GT,
+            threshold: 80.0,
+            consecutive_hits: 3,
+            severity: AlertSeverity::Warning,
+            description: "CPU temperature > 80°C".into(),
+        },
+        ThresholdRule {
+            id: "cpu-temp-90".into(),
+            metric: MetricName::CpuTemperature,
+            op: ComparisonOp::GT,
+            threshold: 90.0,
+            consecutive_hits: 2,
+            severity: AlertSeverity::Critical,
+            description: "CPU temperature > 90°C".into(),
+        },
+        ThresholdRule {
+            id: "gpu-temp-85".into(),
+            metric: MetricName::GpuTemperature,
+            op: ComparisonOp::GT,
+            threshold: 85.0,
+            consecutive_hits: 3,
+            severity: AlertSeverity::Warning,
+            description: "GPU temperature > 85°C".into(),
+        },
+        ThresholdRule {
+            id: "cpu-throttle-30".into(),
+            metric: MetricName::CpuThrottlePercent,
+            op: ComparisonOp::GT,
+            threshold: 30.0,
+            consecutive_hits: 5,
+            severity: AlertSeverity::Warning,
+            description: "CPU throttle > 30%".into(),
+        },
     ]
 }

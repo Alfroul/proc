@@ -4,8 +4,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState};
 
-use crate::app::App;
 use crate::anomaly::AnomalySeverity;
+use crate::app::App;
 use crate::format::format_bytes;
 use crate::port_map::{self, NetworkViewMode, Protocol, RemoteGroup};
 use crate::tui::theme;
@@ -37,20 +37,35 @@ fn draw_net_traffic_bar(f: &mut Frame, area: Rect, app: &App) {
 
     let adapter_name = adapters.first().map(|a| a.name.as_str()).unwrap_or("未知");
 
-    let sparkline_str = build_sparkline(&app.connection_history);
+    let sparkline_str = build_sparkline(&app.port_panel.connection_history);
 
     let line = Line::from(vec![
         Span::styled(format!(" {} ", adapter_name), theme::style_header()),
         Span::styled(" ▼ ", theme::style_muted()),
-        Span::styled(format!("{}/s", format_bytes(app.snapshot.net_down_speed)), Style::default().fg(theme::success())),
+        Span::styled(
+            format!("{}/s", format_bytes(app.snapshot.net_down_speed)),
+            Style::default().fg(theme::success()),
+        ),
         Span::styled(" 总 ", theme::style_muted()),
-        Span::styled(format_bytes(app.snapshot.net_total_rx), theme::style_header()),
+        Span::styled(
+            format_bytes(app.snapshot.net_total_rx),
+            theme::style_header(),
+        ),
         Span::styled("  ▲ ", theme::style_muted()),
-        Span::styled(format!("{}/s", format_bytes(app.snapshot.net_up_speed)), Style::default().fg(theme::warning())),
+        Span::styled(
+            format!("{}/s", format_bytes(app.snapshot.net_up_speed)),
+            Style::default().fg(theme::warning()),
+        ),
         Span::styled(" 总 ", theme::style_muted()),
-        Span::styled(format_bytes(app.snapshot.net_total_tx), theme::style_header()),
+        Span::styled(
+            format_bytes(app.snapshot.net_total_tx),
+            theme::style_header(),
+        ),
         Span::styled(format!("  连接: {}", sparkline_str), theme::style_muted()),
-        Span::styled(format!(" {}", app.connection_diff.active_count), theme::style_header()),
+        Span::styled(
+            format!(" {}", app.port_panel.connection_diff.active_count),
+            theme::style_header(),
+        ),
     ]);
     let p = Paragraph::new(line);
     f.render_widget(p, area);
@@ -65,9 +80,9 @@ fn split_with_traffic_bar(area: Rect) -> (Rect, Rect) {
 }
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
-    if let Some(ref detail) = app.port_detail {
+    if let Some(ref detail) = app.port_panel.port_detail {
         draw_port_detail(f, area, detail);
-    } else if app.show_anomaly_detail {
+    } else if app.port_panel.show_anomaly_detail {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(0), Constraint::Length(12)])
@@ -79,26 +94,32 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         draw_main_view(f, area, app);
     }
 
-    if app.show_diagnostics {
-        if let Some(ref diag) = app.diagnostic {
-            match diag.phase {
-                crate::diag::DiagnosticPhase::Menu => {
-                    draw_diagnostic_menu(f, area, app);
-                }
-                crate::diag::DiagnosticPhase::Running
-                | crate::diag::DiagnosticPhase::Completed
-                | crate::diag::DiagnosticPhase::Failed => {
-                    draw_diagnostic_result(f, area, app);
-                }
+    if app.port_panel.show_diagnostics
+        && let Some(ref diag) = app.port_panel.diagnostic
+    {
+        match diag.phase {
+            crate::diag::DiagnosticPhase::Menu => {
+                draw_diagnostic_menu(f, area, app);
+            }
+            crate::diag::DiagnosticPhase::Running
+            | crate::diag::DiagnosticPhase::Completed
+            | crate::diag::DiagnosticPhase::Failed => {
+                draw_diagnostic_result(f, area, app);
             }
         }
     }
 }
 
 fn draw_main_view(f: &mut Frame, area: Rect, app: &App) {
-    match app.port_view_mode {
-        NetworkViewMode::Process => { draw_process_view(f, area, app); return; }
-        NetworkViewMode::Remote => { draw_remote_view(f, area, app); return; }
+    match app.port_panel.port_view_mode {
+        NetworkViewMode::Process => {
+            draw_process_view(f, area, app);
+            return;
+        }
+        NetworkViewMode::Remote => {
+            draw_remote_view(f, area, app);
+            return;
+        }
         NetworkViewMode::Port => {}
     }
 
@@ -109,7 +130,7 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
     let (bar_area, table_area) = split_with_traffic_bar(area);
     draw_net_traffic_bar(f, bar_area, app);
 
-    let mut entries = app.get_filtered_port_entries_owned();
+    let mut entries = app.filtered_ports().to_vec();
     let rows_visible = table_area.height.saturating_sub(3) as usize;
 
     // Deduplicate IPv4/IPv6 entries
@@ -130,8 +151,14 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
         group_counts[g] += 1;
     }
 
-    let tcp_count = entries.iter().filter(|e| e.protocol == Protocol::Tcp).count();
-    let udp_count = entries.iter().filter(|e| e.protocol == Protocol::Udp).count();
+    let tcp_count = entries
+        .iter()
+        .filter(|e| e.protocol == Protocol::Tcp)
+        .count();
+    let udp_count = entries
+        .iter()
+        .filter(|e| e.protocol == Protocol::Udp)
+        .count();
 
     // Build display rows with separators
     let mut display_rows: Vec<DisplayRow> = Vec::new();
@@ -162,7 +189,11 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
             last_group = Some(g);
         }
 
-        let local = format!("{}:{}", e.local_addr, port_map::format_port_service(e.local_port, e.protocol));
+        let local = format!(
+            "{}:{}",
+            e.local_addr,
+            port_map::format_port_service(e.local_port, e.protocol)
+        );
         let remote = match (e.remote_addr, e.remote_port) {
             (Some(addr), Some(port)) => {
                 let class = port_map::classify_ip(&addr);
@@ -195,7 +226,7 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
 
     let visible_rows: Vec<&DisplayRow> = display_rows
         .iter()
-        .skip(app.port_scroll)
+        .skip(app.port_panel.port_scroll)
         .take(rows_visible)
         .collect();
 
@@ -209,7 +240,7 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
     ])
     .style(theme::style_header());
 
-    let scroll_offset = app.port_scroll;
+    let scroll_offset = app.port_panel.port_scroll;
     let rows: Vec<Row> = visible_rows
         .iter()
         .enumerate()
@@ -230,7 +261,7 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
             let is_cursor = data_indices
                 .iter()
                 .position(|&di| di == global_display_i)
-                .map(|pos| pos == app.port_cursor)
+                .map(|pos| pos == app.port_panel.port_cursor)
                 .unwrap_or(false);
 
             let bg = if is_cursor {
@@ -246,44 +277,48 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
             };
 
             Row::new(vec![
-                Cell::from(
-                    row.protocol
-                        .map(|p| p.to_string())
-                        .unwrap_or_default(),
-                )
-                .style(proto_style),
+                Cell::from(row.protocol.map(|p| p.to_string()).unwrap_or_default())
+                    .style(proto_style),
                 Cell::from(row.local_addr.clone()),
                 Cell::from(row.remote_addr.clone()),
                 Cell::from(row.state.clone()),
                 Cell::from(row.pid.clone()),
                 Cell::from(row.process_name.clone()),
             ])
-            .style(
-                Style::default()
-                    .fg(theme::text_primary())
-                    .bg(bg),
-            )
+            .style(Style::default().fg(theme::text_primary()).bg(bg))
         })
         .collect();
 
-    let filter_label = app.port_state_filter.label();
-    let sort_label = app.port_sort_field.label();
+    let filter_label = app.port_panel.port_state_filter.label();
+    let sort_label = app.port_panel.port_sort_field.label();
 
-    let search_indicator = if app.port_search_active {
-        format!(" 搜索: {} | ESC取消", app.port_search_query)
-    } else if !app.port_search_query.is_empty() {
-        format!(" 过滤: {}", app.port_search_query)
+    let search_indicator = if app.port_panel.port_search.is_active() {
+        format!(" 搜索: {} | ESC取消", app.port_panel.port_search.query())
+    } else if !app.port_panel.port_search.query().is_empty() {
+        format!(" 过滤: {}", app.port_panel.port_search.query())
     } else {
         String::new()
     };
 
-    let mode_label = if app.port_is_admin { "增强模式 ✓" } else { "基础模式" };
-    let diff = &app.connection_diff;
+    let mode_label = if app.port_panel.port_is_admin {
+        "增强模式 ✓"
+    } else {
+        "基础模式"
+    };
+    let diff = &app.port_panel.connection_diff;
     let anomaly_part = anomaly_indicator(app).unwrap_or_default();
     let title = format!(
         "端口映射 | {} | TCP:{} UDP:{} | ⬆+{} ⬇-{} 活跃{}{} | 过滤:[{}] 排序:{} f切换 s排序{}",
-        mode_label, tcp_count, udp_count, diff.new_count, diff.closed_count, diff.active_count,
-        anomaly_part, filter_label, sort_label, search_indicator
+        mode_label,
+        tcp_count,
+        udp_count,
+        diff.new_count,
+        diff.closed_count,
+        diff.active_count,
+        anomaly_part,
+        filter_label,
+        sort_label,
+        search_indicator
     );
 
     let block = Block::default()
@@ -300,12 +335,13 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
         ratatui::layout::Constraint::Min(12),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(block);
+    let table = Table::new(rows, widths).header(header).block(block);
 
     let mut state = TableState::default();
-    let visible_cursor = app.port_cursor.saturating_sub(app.port_scroll);
+    let visible_cursor = app
+        .port_panel
+        .port_cursor
+        .saturating_sub(app.port_panel.port_scroll);
     state.select(Some(visible_cursor));
     f.render_stateful_widget(table, table_area, &mut state);
 }
@@ -325,10 +361,16 @@ fn draw_port_detail(f: &mut Frame, area: Rect, entry: &crate::port_map::PortEntr
     };
 
     let lines = vec![
-        format!("端口详情 — {}:{} ({}){}", entry.local_addr, entry.local_port, entry.protocol, service_info),
+        format!(
+            "端口详情 — {}:{} ({}){}",
+            entry.local_addr, entry.local_port, entry.protocol, service_info
+        ),
         String::new(),
         format!("  协议:     {}", entry.protocol),
-        format!("  本地地址: {}:{}{}", entry.local_addr, entry.local_port, service_info),
+        format!(
+            "  本地地址: {}:{}{}",
+            entry.local_addr, entry.local_port, service_info
+        ),
         format!("  远程地址: {}", remote_display),
         format!("  状态:     {}", entry.state.as_deref().unwrap_or("-")),
         String::new(),
@@ -340,7 +382,9 @@ fn draw_port_detail(f: &mut Frame, area: Rect, entry: &crate::port_map::PortEntr
 
     let text: ratatui::text::Text = lines
         .into_iter()
-        .map(|line| ratatui::text::Line::from(ratatui::text::Span::styled(line, theme::style_normal())))
+        .map(|line| {
+            ratatui::text::Line::from(ratatui::text::Span::styled(line, theme::style_normal()))
+        })
         .collect();
 
     let block = Block::default()
@@ -359,7 +403,7 @@ fn draw_remote_view(f: &mut Frame, area: Rect, app: &App) {
     let (bar_area, table_area) = split_with_traffic_bar(area);
     draw_net_traffic_bar(f, bar_area, app);
 
-    let groups = app.get_filtered_remote_groups();
+    let groups = app.filtered_remote_groups().to_vec();
     let rows_visible = table_area.height.saturating_sub(3) as usize;
 
     if groups.is_empty() {
@@ -373,8 +417,11 @@ fn draw_remote_view(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let cursor = app.port_remote_cursor.min(groups.len() - 1);
-    let scroll = app.port_remote_scroll.min(groups.len().saturating_sub(1));
+    let cursor = app.port_panel.port_remote_cursor.min(groups.len() - 1);
+    let scroll = app
+        .port_panel
+        .port_remote_scroll
+        .min(groups.len().saturating_sub(1));
     let visible: Vec<&RemoteGroup> = groups.iter().skip(scroll).take(rows_visible).collect();
 
     let header = Row::new(vec![
@@ -393,7 +440,11 @@ fn draw_remote_view(f: &mut Frame, area: Rect, app: &App) {
         .map(|(vi, group)| {
             let gi = scroll + vi;
             let is_cursor = gi == cursor;
-            let bg = if is_cursor { Color::DarkGray } else { Color::Reset };
+            let bg = if is_cursor {
+                Color::DarkGray
+            } else {
+                Color::Reset
+            };
 
             let addr_str = group.remote_addr.to_string();
 
@@ -413,7 +464,8 @@ fn draw_remote_view(f: &mut Frame, area: Rect, app: &App) {
                 group.established, group.listening, group.time_wait, group.close_wait
             );
 
-            let mut proc_names: Vec<&str> = group.process_names.iter().map(|s| s.as_str()).collect();
+            let mut proc_names: Vec<&str> =
+                group.process_names.iter().map(|s| s.as_str()).collect();
             proc_names.sort();
             let proc_display = if proc_names.len() <= 3 {
                 proc_names.join(",")
@@ -423,22 +475,42 @@ fn draw_remote_view(f: &mut Frame, area: Rect, app: &App) {
 
             let proto_display = {
                 let mut parts = Vec::new();
-                if group.protocols.contains(&Protocol::Tcp) { parts.push("TCP"); }
-                if group.protocols.contains(&Protocol::Udp) { parts.push("UDP"); }
+                if group.protocols.contains(&Protocol::Tcp) {
+                    parts.push("TCP");
+                }
+                if group.protocols.contains(&Protocol::Udp) {
+                    parts.push("UDP");
+                }
                 parts.join("/")
             };
 
             let status_parts = {
                 let mut s = String::new();
-                if group.established > 0 { s.push_str(&format!("EST:{} ", group.established)); }
-                if group.listening > 0 { s.push_str(&format!("LIST:{} ", group.listening)); }
-                if group.time_wait > 0 { s.push_str(&format!("TW:{} ", group.time_wait)); }
-                if group.close_wait > 0 { s.push_str(&format!("CW:{}", group.close_wait)); }
+                if group.established > 0 {
+                    s.push_str(&format!("EST:{} ", group.established));
+                }
+                if group.listening > 0 {
+                    s.push_str(&format!("LIST:{} ", group.listening));
+                }
+                if group.time_wait > 0 {
+                    s.push_str(&format!("TW:{} ", group.time_wait));
+                }
+                if group.close_wait > 0 {
+                    s.push_str(&format!("CW:{}", group.close_wait));
+                }
                 s.trim_end().to_string()
             };
 
-            let est_color = if group.established > 10 { Color::Yellow } else { theme::text_primary() };
-            let cw_color = if group.close_wait > 0 { Color::Red } else { theme::text_primary() };
+            let est_color = if group.established > 10 {
+                Color::Yellow
+            } else {
+                theme::text_primary()
+            };
+            let cw_color = if group.close_wait > 0 {
+                Color::Red
+            } else {
+                theme::text_primary()
+            };
 
             Row::new(vec![
                 Cell::from(addr_str),
@@ -452,16 +524,22 @@ fn draw_remote_view(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let private_count = groups.iter().filter(|g| g.ip_class == port_map::IpClass::Private).count();
-    let public_count = groups.iter().filter(|g| g.ip_class == port_map::IpClass::Public).count();
+    let private_count = groups
+        .iter()
+        .filter(|g| g.ip_class == port_map::IpClass::Private)
+        .count();
+    let public_count = groups
+        .iter()
+        .filter(|g| g.ip_class == port_map::IpClass::Public)
+        .count();
 
-    let filter_label = app.port_state_filter.label();
-    let sort_label = app.port_remote_sort.label();
+    let filter_label = app.port_panel.port_state_filter.label();
+    let sort_label = app.port_panel.port_remote_sort.label();
 
-    let search_indicator = if app.port_search_active {
-        format!(" 搜索: {} | ESC取消", app.port_search_query)
-    } else if !app.port_search_query.is_empty() {
-        format!(" 过滤: {}", app.port_search_query)
+    let search_indicator = if app.port_panel.port_search.is_active() {
+        format!(" 搜索: {} | ESC取消", app.port_panel.port_search.query())
+    } else if !app.port_panel.port_search.query().is_empty() {
+        format!(" 过滤: {}", app.port_panel.port_search.query())
     } else {
         String::new()
     };
@@ -469,7 +547,13 @@ fn draw_remote_view(f: &mut Frame, area: Rect, app: &App) {
     let anomaly_part = anomaly_indicator(app).unwrap_or_default();
     let title = format!(
         "按远程视图 | {}个远程IP | 内网:{} 外网:{}{} | 过滤:[{}] 排序:{}{}",
-        groups.len(), private_count, public_count, anomaly_part, filter_label, sort_label, search_indicator
+        groups.len(),
+        private_count,
+        public_count,
+        anomaly_part,
+        filter_label,
+        sort_label,
+        search_indicator
     );
 
     let block = Block::default()
@@ -486,9 +570,7 @@ fn draw_remote_view(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Min(14),
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(block);
+    let table = Table::new(rows, widths).header(header).block(block);
 
     let selected_visual = cursor.saturating_sub(scroll);
     let mut state = TableState::default();
@@ -500,13 +582,17 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
     let (bar_area, table_area) = split_with_traffic_bar(area);
     draw_net_traffic_bar(f, bar_area, app);
 
-    let groups = app.get_filtered_process_groups();
+    let groups = app.filtered_process_groups().to_vec();
     let rows_visible = table_area.height.saturating_sub(3) as usize;
 
-    let is_enhanced = app.port_is_admin && app.estats_collector.is_some();
+    let is_enhanced = app.port_panel.port_is_admin && app.port_panel.estats_collector.is_some();
 
     if groups.is_empty() {
-        let mode_label = if is_enhanced { "增强模式 ✓" } else { "基础模式" };
+        let mode_label = if is_enhanced {
+            "增强模式 ✓"
+        } else {
+            "基础模式"
+        };
         let text = ratatui::text::Text::from("无匹配进程");
         let block = Block::default()
             .borders(Borders::ALL)
@@ -517,8 +603,8 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let cursor = app.port_process_cursor.min(groups.len() - 1);
-    let expanded_pid = app.port_expanded_pid;
+    let cursor = app.port_panel.port_process_cursor.min(groups.len() - 1);
+    let expanded_pid = app.port_panel.port_expanded_pid;
 
     let mut group_visual_pos: Vec<usize> = Vec::with_capacity(groups.len());
     let mut all_rows: Vec<(usize, Option<usize>)> = Vec::new();
@@ -535,12 +621,12 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    let scroll = app.port_process_scroll.min(all_rows.len().saturating_sub(1));
-    let visible: Vec<&(usize, Option<usize>)> = all_rows
-        .iter()
-        .skip(scroll)
-        .take(rows_visible)
-        .collect();
+    let scroll = app
+        .port_panel
+        .port_process_scroll
+        .min(all_rows.len().saturating_sub(1));
+    let visible: Vec<&(usize, Option<usize>)> =
+        all_rows.iter().skip(scroll).take(rows_visible).collect();
 
     let header = if is_enhanced {
         Row::new(vec![
@@ -581,11 +667,27 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
             match conn_idx {
                 None => {
                     let is_cursor = *gi == cursor;
-                    let bg = if is_cursor { Color::DarkGray } else { Color::Reset };
+                    let bg = if is_cursor {
+                        Color::DarkGray
+                    } else {
+                        Color::Reset
+                    };
 
-                    let est_color = if group.established > 50 { theme::warning() } else { theme::text_primary() };
-                    let tw_color = if group.time_wait > 20 { theme::warning() } else { theme::text_primary() };
-                    let cw_color = if group.close_wait > 5 { theme::danger() } else { theme::text_primary() };
+                    let est_color = if group.established > 50 {
+                        theme::warning()
+                    } else {
+                        theme::text_primary()
+                    };
+                    let tw_color = if group.time_wait > 20 {
+                        theme::warning()
+                    } else {
+                        theme::text_primary()
+                    };
+                    let cw_color = if group.close_wait > 5 {
+                        theme::danger()
+                    } else {
+                        theme::text_primary()
+                    };
 
                     let name_str = truncate_str(&group.process_name, 20);
 
@@ -599,13 +701,18 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
                             Cell::from(group.pid.to_string()),
                             Cell::from(group.tcp_count.to_string()),
                             Cell::from(group.udp_count.to_string()),
-                            Cell::from(group.established.to_string()).style(Style::default().fg(est_color)),
+                            Cell::from(group.established.to_string())
+                                .style(Style::default().fg(est_color)),
                             Cell::from(group.listening.to_string()),
-                            Cell::from(group.time_wait.to_string()).style(Style::default().fg(tw_color)),
-                            Cell::from(group.close_wait.to_string()).style(Style::default().fg(cw_color)),
+                            Cell::from(group.time_wait.to_string())
+                                .style(Style::default().fg(tw_color)),
+                            Cell::from(group.close_wait.to_string())
+                                .style(Style::default().fg(cw_color)),
                             Cell::from(group.unique_remote_addrs.len().to_string()),
-                            Cell::from(format_speed(group.up_speed)).style(Style::default().fg(up_style)),
-                            Cell::from(format_speed(group.down_speed)).style(Style::default().fg(down_style)),
+                            Cell::from(format_speed(group.up_speed))
+                                .style(Style::default().fg(up_style)),
+                            Cell::from(format_speed(group.down_speed))
+                                .style(Style::default().fg(down_style)),
                             Cell::from(total_str),
                         ])
                         .style(Style::default().fg(theme::text_primary()).bg(bg))
@@ -615,10 +722,13 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
                             Cell::from(group.pid.to_string()),
                             Cell::from(group.tcp_count.to_string()),
                             Cell::from(group.udp_count.to_string()),
-                            Cell::from(group.established.to_string()).style(Style::default().fg(est_color)),
+                            Cell::from(group.established.to_string())
+                                .style(Style::default().fg(est_color)),
                             Cell::from(group.listening.to_string()),
-                            Cell::from(group.time_wait.to_string()).style(Style::default().fg(tw_color)),
-                            Cell::from(group.close_wait.to_string()).style(Style::default().fg(cw_color)),
+                            Cell::from(group.time_wait.to_string())
+                                .style(Style::default().fg(tw_color)),
+                            Cell::from(group.close_wait.to_string())
+                                .style(Style::default().fg(cw_color)),
                             Cell::from(group.unique_remote_addrs.len().to_string()),
                         ])
                         .style(Style::default().fg(theme::text_primary()).bg(bg))
@@ -627,7 +737,11 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
                 Some(ci) => {
                     let conn = &group.connections[*ci];
                     let total = group.connections.len();
-                    let prefix = if *ci < total - 1 { "  ├→" } else { "  └→" };
+                    let prefix = if *ci < total - 1 {
+                        "  ├→"
+                    } else {
+                        "  └→"
+                    };
 
                     let remote = match (conn.remote_addr, conn.remote_port) {
                         (Some(addr), Some(port)) => {
@@ -679,14 +793,18 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let mode_label = if is_enhanced { "增强模式 ✓" } else { "基础模式" };
-    let filter_label = app.port_state_filter.label();
-    let sort_label = app.port_process_sort.label();
+    let mode_label = if is_enhanced {
+        "增强模式 ✓"
+    } else {
+        "基础模式"
+    };
+    let filter_label = app.port_panel.port_state_filter.label();
+    let sort_label = app.port_panel.port_process_sort.label();
 
-    let search_indicator = if app.port_search_active {
-        format!(" 搜索: {} | ESC取消", app.port_search_query)
-    } else if !app.port_search_query.is_empty() {
-        format!(" 过滤: {}", app.port_search_query)
+    let search_indicator = if app.port_panel.port_search.is_active() {
+        format!(" 搜索: {} | ESC取消", app.port_panel.port_search.query())
+    } else if !app.port_panel.port_search.query().is_empty() {
+        format!(" 过滤: {}", app.port_panel.port_search.query())
     } else {
         String::new()
     };
@@ -694,7 +812,12 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
     let anomaly_part = anomaly_indicator(app).unwrap_or_default();
     let title = format!(
         "按进程视图 | {} | {}个进程{} | 过滤:[{}] 排序:{}{}",
-        mode_label, groups.len(), anomaly_part, filter_label, sort_label, search_indicator
+        mode_label,
+        groups.len(),
+        anomaly_part,
+        filter_label,
+        sort_label,
+        search_indicator
     );
 
     let block = Block::default()
@@ -731,9 +854,7 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
         ]
     };
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(block);
+    let table = Table::new(rows, widths).header(header).block(block);
 
     let cursor_visual = group_visual_pos.get(cursor).copied().unwrap_or(0);
     let selected_visual = cursor_visual.saturating_sub(scroll);
@@ -824,7 +945,10 @@ fn draw_anomaly_panel(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Clear, area);
 
     let visible = app.visible_anomalies();
-    let cursor = app.anomaly_cursor.min(visible.len().saturating_sub(1));
+    let cursor = app
+        .port_panel
+        .anomaly_cursor
+        .min(visible.len().saturating_sub(1));
 
     let severity_icon = |s: AnomalySeverity| -> (&'static str, Color) {
         match s {
@@ -835,7 +959,10 @@ fn draw_anomaly_panel(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let lines: Vec<Line> = if visible.is_empty() {
-        vec![Line::from(Span::styled("  无活跃异常 ✅", theme::style_muted()))]
+        vec![Line::from(Span::styled(
+            "  无活跃异常 ✅",
+            theme::style_muted(),
+        ))]
     } else {
         visible
             .iter()
@@ -844,22 +971,25 @@ fn draw_anomaly_panel(f: &mut Frame, area: Rect, app: &App) {
                 let (icon, color) = severity_icon(a.severity);
                 let is_selected = i == cursor;
                 let style = if is_selected {
-                    Style::default().fg(color).bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(color)
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(color)
                 };
                 let detail_style = if is_selected {
-                    Style::default().fg(theme::text_primary()).bg(Color::DarkGray)
+                    Style::default()
+                        .fg(theme::text_primary())
+                        .bg(Color::DarkGray)
                 } else {
                     theme::style_muted()
                 };
 
-                let mut lines = vec![
-                    Line::from(vec![
-                        Span::styled(format!("  {} ", icon), style),
-                        Span::styled(&a.title, style),
-                    ]),
-                ];
+                let mut lines = vec![Line::from(vec![
+                    Span::styled(format!("  {} ", icon), style),
+                    Span::styled(&a.title, style),
+                ])];
                 if is_selected {
                     lines.push(Line::from(Span::styled(
                         format!("    {}", a.detail),
@@ -873,7 +1003,10 @@ fn draw_anomaly_panel(f: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" 异常详情 ({}条) | d=忽略 a/Esc=关闭 ", visible.len()))
+        .title(format!(
+            " 异常详情 ({}条) | d=忽略 a/Esc=关闭 ",
+            visible.len()
+        ))
         .style(Style::default().fg(theme::text_primary()));
 
     let paragraph = Paragraph::new(lines)
@@ -887,7 +1020,9 @@ fn draw_diagnostic_menu(f: &mut Frame, area: Rect, app: &App) {
     let popup_area = crate::tui::centered_rect(60, 14, area);
     f.render_widget(Clear, popup_area);
 
-    let Some(ref diag) = app.diagnostic else { return };
+    let Some(ref diag) = app.port_panel.diagnostic else {
+        return;
+    };
     let tools = crate::diag::DiagnosticState::tool_list();
     let is_private = crate::diag::is_private_or_loopback(&diag.target_ip);
 
@@ -896,8 +1031,8 @@ fn draw_diagnostic_menu(f: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::new();
     for (i, tool) in tools.iter().enumerate() {
         let name = crate::diag::DiagnosticState::tool_name(tool);
-        let unavailable = is_private
-            && crate::diag::DiagnosticState::tool_unavailable_for_private(tool);
+        let unavailable =
+            is_private && crate::diag::DiagnosticState::tool_unavailable_for_private(tool);
 
         let cursor = if i == diag.tool_index { " > " } else { "   " };
 
@@ -948,31 +1083,68 @@ fn style_diagnostic_line(line: &str, tool_index: usize) -> Line<'static> {
         0 => {
             let lower = line.to_lowercase();
             if lower.contains("时间=") || lower.contains("time=") || lower.contains("time<") {
-                Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Green)))
-            } else if lower.contains("请求超时") || lower.contains("timed out") || lower.contains("丢失") || lower.contains("lost") {
-                Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Red)))
-            } else if lower.contains("packets") || lower.contains("数据包") || lower.contains("平均") || lower.contains("average") || lower.contains("minimum") || lower.contains("maximum") || lower.contains("最小") || lower.contains("最大") {
-                Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Yellow)))
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::Green),
+                ))
+            } else if lower.contains("请求超时")
+                || lower.contains("timed out")
+                || lower.contains("丢失")
+                || lower.contains("lost")
+            {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::Red),
+                ))
+            } else if lower.contains("packets")
+                || lower.contains("数据包")
+                || lower.contains("平均")
+                || lower.contains("average")
+                || lower.contains("minimum")
+                || lower.contains("maximum")
+                || lower.contains("最小")
+                || lower.contains("最大")
+            {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::Yellow),
+                ))
             } else {
-                Line::from(Span::styled(line.to_string(), Style::default().fg(theme::text_primary())))
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme::text_primary()),
+                ))
             }
         }
         // Port scan
         4 => {
             if line.contains("开放") {
-                Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Green)))
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::Green),
+                ))
             } else if line.contains("关闭") {
-                Line::from(Span::styled(line.to_string(), Style::default().fg(Color::DarkGray)))
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ))
             } else if line.contains("扫描完成") {
-                Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Yellow)))
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::Yellow),
+                ))
             } else {
-                Line::from(Span::styled(line.to_string(), Style::default().fg(theme::text_primary())))
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme::text_primary()),
+                ))
             }
         }
         // Other tools (DNS, Whois, Traceroute)
-        _ => {
-            Line::from(Span::styled(line.to_string(), Style::default().fg(theme::text_primary())))
-        }
+        _ => Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(theme::text_primary()),
+        )),
     }
 }
 
@@ -980,7 +1152,9 @@ fn draw_diagnostic_result(f: &mut Frame, area: Rect, app: &App) {
     let popup_area = crate::tui::centered_rect(70, 20, area);
     f.render_widget(Clear, popup_area);
 
-    let Some(ref diag) = app.diagnostic else { return };
+    let Some(ref diag) = app.port_panel.diagnostic else {
+        return;
+    };
     let tools = crate::diag::DiagnosticState::tool_list();
     let tool_name = tools
         .get(diag.tool_index)
@@ -1011,9 +1185,7 @@ fn draw_diagnostic_result(f: &mut Frame, area: Rect, app: &App) {
         .title(title)
         .style(Style::default().fg(theme::text_primary()));
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .scroll((scroll, 0));
+    let paragraph = Paragraph::new(lines).block(block).scroll((scroll, 0));
 
     f.render_widget(paragraph, popup_area);
 

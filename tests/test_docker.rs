@@ -42,21 +42,48 @@ fn test_health_status_variants() {
     ];
     assert_eq!(variants.len(), 4);
 
-    assert_eq!(format!("{}", proc::docker::HealthStatus::Healthy), "healthy");
-    assert_eq!(format!("{}", proc::docker::HealthStatus::Unhealthy), "unhealthy");
-    assert_eq!(format!("{}", proc::docker::HealthStatus::Starting), "starting");
-    assert_eq!(format!("{}", proc::docker::HealthStatus::NotConfigured), "-");
+    assert_eq!(
+        format!("{}", proc::docker::HealthStatus::Healthy),
+        "healthy"
+    );
+    assert_eq!(
+        format!("{}", proc::docker::HealthStatus::Unhealthy),
+        "unhealthy"
+    );
+    assert_eq!(
+        format!("{}", proc::docker::HealthStatus::Starting),
+        "starting"
+    );
+    assert_eq!(
+        format!("{}", proc::docker::HealthStatus::NotConfigured),
+        "-"
+    );
 }
 
 #[test]
 fn test_health_status_from_status() {
     use proc::docker::HealthStatus;
 
-    assert_eq!(HealthStatus::from_status("Up 2 hours (healthy)"), HealthStatus::Healthy);
-    assert_eq!(HealthStatus::from_status("Up 2 hours (unhealthy)"), HealthStatus::Unhealthy);
-    assert_eq!(HealthStatus::from_status("Up 2 hours (health: starting)"), HealthStatus::Starting);
-    assert_eq!(HealthStatus::from_status("Up 2 hours"), HealthStatus::NotConfigured);
-    assert_eq!(HealthStatus::from_status("Exited (0) 3 minutes ago"), HealthStatus::NotConfigured);
+    assert_eq!(
+        HealthStatus::from_status("Up 2 hours (healthy)"),
+        HealthStatus::Healthy
+    );
+    assert_eq!(
+        HealthStatus::from_status("Up 2 hours (unhealthy)"),
+        HealthStatus::Unhealthy
+    );
+    assert_eq!(
+        HealthStatus::from_status("Up 2 hours (health: starting)"),
+        HealthStatus::Starting
+    );
+    assert_eq!(
+        HealthStatus::from_status("Up 2 hours"),
+        HealthStatus::NotConfigured
+    );
+    assert_eq!(
+        HealthStatus::from_status("Exited (0) 3 minutes ago"),
+        HealthStatus::NotConfigured
+    );
 }
 
 #[test]
@@ -162,7 +189,9 @@ fn test_docker_event_no_name() {
 #[ignore = "需要 Docker 运行"]
 fn test_docker_list_containers() {
     let monitor = proc::docker::DockerMonitor::connect().expect("Docker should be running");
-    let containers = monitor.list_containers(true).expect("Should list containers");
+    let containers = monitor
+        .list_containers(true)
+        .expect("Should list containers");
     // Just verify it returns a Vec without error
     println!("Found {} containers", containers.len());
 }

@@ -3,8 +3,14 @@ use crate::error::{ProcError, Result};
 /// 容器健康检查详情
 #[derive(Debug, Clone)]
 pub enum HealthInfo {
-    Healthy { failing_streak: i64, last_output: String },
-    Unhealthy { failing_streak: i64, last_output: String },
+    Healthy {
+        failing_streak: i64,
+        last_output: String,
+    },
+    Unhealthy {
+        failing_streak: i64,
+        last_output: String,
+    },
     Starting,
     NotConfigured,
 }
@@ -12,8 +18,12 @@ pub enum HealthInfo {
 impl std::fmt::Display for HealthInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Healthy { failing_streak, .. } => write!(f, "healthy (failing: {})", failing_streak),
-            Self::Unhealthy { failing_streak, .. } => write!(f, "unhealthy (failing: {})", failing_streak),
+            Self::Healthy { failing_streak, .. } => {
+                write!(f, "healthy (failing: {})", failing_streak)
+            }
+            Self::Unhealthy { failing_streak, .. } => {
+                write!(f, "unhealthy (failing: {})", failing_streak)
+            }
             Self::Starting => write!(f, "starting"),
             Self::NotConfigured => write!(f, "not configured"),
         }
@@ -54,7 +64,9 @@ pub fn inspect_container_health(
         .and_then(|entry| entry.output.clone())
         .unwrap_or_default();
 
-    let status = health.status.unwrap_or(bollard::models::HealthStatusEnum::EMPTY);
+    let status = health
+        .status
+        .unwrap_or(bollard::models::HealthStatusEnum::EMPTY);
     match status {
         bollard::models::HealthStatusEnum::HEALTHY => Ok(HealthInfo::Healthy {
             failing_streak,

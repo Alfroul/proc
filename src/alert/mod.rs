@@ -25,7 +25,11 @@ impl AlertManager {
         }
     }
 
-    pub fn evaluate(&mut self, snapshot: &SystemSnapshot, procs: &[ProcessInfo]) -> Vec<AlertEvent> {
+    pub fn evaluate(
+        &mut self,
+        snapshot: &SystemSnapshot,
+        procs: &[ProcessInfo],
+    ) -> Vec<AlertEvent> {
         let mut events = Vec::new();
 
         for rule in &self.config.rules {
@@ -59,15 +63,17 @@ impl AlertManager {
         }
 
         // Clean up resolved alerts that have been resolved for a while
-        self.active_alerts.retain(|_, alert| {
-            alert.state != AlertState::Resolved || alert.hit_count > 0
-        });
+        self.active_alerts
+            .retain(|_, alert| alert.state != AlertState::Resolved || alert.hit_count > 0);
 
         events
     }
 
     pub fn active_alerts(&self) -> Vec<&Alert> {
-        self.active_alerts.values().filter(|a| a.is_active()).collect()
+        self.active_alerts
+            .values()
+            .filter(|a| a.is_active())
+            .collect()
     }
 
     pub fn all_alerts(&self) -> Vec<&Alert> {
@@ -95,7 +101,10 @@ impl AlertManager {
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| ".".to_string());
-        let path = PathBuf::from(home).join(".config").join("proc").join("alerts.toml");
+        let path = PathBuf::from(home)
+            .join(".config")
+            .join("proc")
+            .join("alerts.toml");
         let content = std::fs::read_to_string(&path)?;
         let config: ThresholdConfig = toml::from_str(&content)?;
         Ok(config)

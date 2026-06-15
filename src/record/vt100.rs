@@ -11,7 +11,7 @@ use ratatui::widgets::Widget;
 use serde::{Deserialize, Serialize};
 
 pub const VT100_MAGIC: &[u8; 4] = b"VT10";
-pub const VT100_VERSION: u16 = 1;
+pub const VT100_VERSION: u16 = 2;
 
 const MIN_CAPTURE_MS: u64 = 200; // 5 fps
 
@@ -31,8 +31,8 @@ pub struct VtHeader {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct CellDump {
     pub ch: u32,
-    pub fg: u8,
-    pub bg: u8,
+    pub fg: u32,
+    pub bg: u32,
     pub flags: u8,
 }
 
@@ -63,11 +63,11 @@ impl VtFrame {
                     None => CellDump::default(),
                 };
 
-                if let Some((count, prev)) = rle.last_mut() {
-                    if *prev == dump {
-                        *count += 1;
-                        continue;
-                    }
+                if let Some((count, prev)) = rle.last_mut()
+                    && *prev == dump
+                {
+                    *count += 1;
+                    continue;
                 }
                 rle.push((1, dump));
             }
@@ -102,18 +102,19 @@ impl Widget for VtFrameWidget<'_> {
 
         for (count, cell) in &self.frame.rle {
             for _ in 0..*count {
-                if y < area.height && x < area.width {
-                    if let Some(buf_cell) = buf.cell_mut((area.x + x, area.y + y)) {
-                        let ch = char::from_u32(cell.ch).unwrap_or(' ');
-                        if ch == '\0' {
-                            buf_cell.set_symbol(" ");
-                        } else {
-                            buf_cell.set_symbol(&ch.to_string());
-                        }
-                        buf_cell.set_fg(unpack_color(cell.fg));
-                        buf_cell.set_bg(unpack_color(cell.bg));
-                        buf_cell.modifier = unpack_modifier(cell.flags);
+                if y < area.height
+                    && x < area.width
+                    && let Some(buf_cell) = buf.cell_mut((area.x + x, area.y + y))
+                {
+                    let ch = char::from_u32(cell.ch).unwrap_or(' ');
+                    if ch == '\0' {
+                        buf_cell.set_symbol(" ");
+                    } else {
+                        buf_cell.set_symbol(&ch.to_string());
                     }
+                    buf_cell.set_fg(unpack_color(cell.fg));
+                    buf_cell.set_bg(unpack_color(cell.bg));
+                    buf_cell.modifier = unpack_modifier(cell.flags);
                 }
                 x += 1;
                 if x >= fw {
@@ -126,8 +127,15 @@ impl Widget for VtFrameWidget<'_> {
 }
 
 // ── Color packing ──
+//
+// 32-bit variable encoding. Bit 31 = RGB marker.
+//   - Palette mode (bit 31 = 0): low bits = palette index
+//       0 = Reset, 1..=16 = basic 16 colors, 17..=272 = Indexed(u8)
+//   - RGB mode     (bit 31 = 1): bits 16-23 = R, 8-15 = G, 0-7 = B
 
-fn pack_color(color: Color) -> u8 {
+const RGB_MARKER: u32 = 0x8000_0000;
+
+pub fn pack_color(color: Color) -> u32 {
     match color {
         Color::Reset => 0,
         Color::Black => 1,
@@ -146,31 +154,38 @@ fn pack_color(color: Color) -> u8 {
         Color::LightMagenta => 14,
         Color::LightCyan => 15,
         Color::White => 16,
-        Color::Indexed(i) => 17 + i.min(200),
-        Color::Rgb(_, _, _) => 0,
+        Color::Indexed(i) => 17 + (i as u32).min(255),
+        Color::Rgb(r, g, b) => RGB_MARKER | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
     }
 }
 
-pub fn unpack_color(packed: u8) -> Color {
-    match packed {
-        0 => Color::Reset,
-        1 => Color::Black,
-        2 => Color::Red,
-        3 => Color::Green,
-        4 => Color::Yellow,
-        5 => Color::Blue,
-        6 => Color::Magenta,
-        7 => Color::Cyan,
-        8 => Color::Gray,
-        9 => Color::DarkGray,
-        10 => Color::LightRed,
-        11 => Color::LightGreen,
-        12 => Color::LightYellow,
-        13 => Color::LightBlue,
-        14 => Color::LightMagenta,
-        15 => Color::LightCyan,
-        16 => Color::White,
-        i => Color::Indexed(i.wrapping_sub(17)),
+pub fn unpack_color(packed: u32) -> Color {
+    if packed & RGB_MARKER != 0 {
+        let r = ((packed >> 16) & 0xFF) as u8;
+        let g = ((packed >> 8) & 0xFF) as u8;
+        let b = (packed & 0xFF) as u8;
+        Color::Rgb(r, g, b)
+    } else {
+        match packed {
+            0 => Color::Reset,
+            1 => Color::Black,
+            2 => Color::Red,
+            3 => Color::Green,
+            4 => Color::Yellow,
+            5 => Color::Blue,
+            6 => Color::Magenta,
+            7 => Color::Cyan,
+            8 => Color::Gray,
+            9 => Color::DarkGray,
+            10 => Color::LightRed,
+            11 => Color::LightGreen,
+            12 => Color::LightYellow,
+            13 => Color::LightBlue,
+            14 => Color::LightMagenta,
+            15 => Color::LightCyan,
+            16 => Color::White,
+            i => Color::Indexed((i - 17).min(255) as u8),
+        }
     }
 }
 
@@ -327,6 +342,14 @@ impl VtPlayer {
 
         if &header.magic != VT100_MAGIC {
             anyhow::bail!("无效的 VT100 录制文件");
+        }
+
+        if header.version != VT100_VERSION {
+            anyhow::bail!(
+                "此录制使用旧版格式（v{}），需用旧版本回放。当前版本：v{}",
+                header.version,
+                VT100_VERSION
+            );
         }
 
         let mut frames = Vec::new();

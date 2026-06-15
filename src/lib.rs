@@ -1,20 +1,116 @@
-pub mod cli;
-pub mod app;
-pub mod error;
-pub mod collect;
-pub mod classify;
-pub mod kill;
-pub mod tree;
-pub mod port_map;
-pub mod estats;
-pub mod eject;
-pub mod monitor;
-pub mod docker;
-pub mod tui;
-pub mod format;
-pub mod anomaly;
-pub mod diag;
-pub mod gpu;
 pub mod alert;
+pub mod anomaly;
+pub mod app;
+pub mod app_group;
+pub mod app_panel;
+pub mod classify;
+pub mod cli;
+pub mod collect;
+pub mod diag;
+pub mod docker;
+pub mod eject;
+pub mod error;
+pub mod estats;
+pub mod format;
+pub mod gpu;
+pub mod kill;
+pub mod monitor;
+pub mod port_map;
 pub mod record;
+pub mod search;
 pub mod security;
+pub mod shutdown;
+pub mod throttle;
+pub mod tree;
+pub mod tui;
+pub mod ui_state;
+pub mod view_models;
+
+/// Returns the local timezone offset from UTC in hours (e.g. +8 for CST).
+/// Uses Win32 `GetTimeZoneInformation` to avoid chrono dependency.
+#[cfg(target_os = "windows")]
+pub fn local_offset_hours() -> i64 {
+    use windows::Win32::System::Time::GetTimeZoneInformation;
+    use windows::Win32::System::Time::TIME_ZONE_INFORMATION;
+    unsafe {
+        let mut tz: TIME_ZONE_INFORMATION = std::mem::zeroed();
+        let result = GetTimeZoneInformation(&mut tz);
+        // Bias is in minutes, negative = east of UTC
+        let bias = tz.Bias;
+        // result: 0=unknown, 1=standard, 2=daylight
+        if result == 2 {
+            // Daylight time: total bias = StandardBias + DaylightBias
+            -(bias + tz.StandardBias + tz.DaylightBias) as i64 / 60
+        } else {
+            // Standard time (or unknown)
+            -(bias + tz.StandardBias) as i64 / 60
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn local_offset_hours() -> i64 {
+    // Use libc::localtime_r to get the platform-aware UTC offset (seconds east of UTC).
+    // Returns 0 only if the underlying call fails — keep behavior deterministic for tests.
+    unsafe {
+        let mut now: libc::time_t = 0;
+        if libc::time(&mut now as *mut _) == -1 {
+            return 0;
+        }
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&now, &mut tm).is_null() {
+            return 0;
+        }
+        (tm.tm_gmtoff / 3600) as i64
+    }
+}
+
+/// Returns the proc config directory (~/.config/proc).
+pub fn dirs_config_dir() -> std::path::PathBuf {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".config").join("proc")
+}
+
+/// Convert UTC epoch seconds to (year, month, day) using Howard Hinnant's
+/// civil_from_days algorithm. Takes seconds since 1970-01-01 UTC and treats the
+/// input as a UTC value — callers should add `local_offset_hours() * 3600`
+/// first if they want local-calendar output.
+pub fn epoch_secs_to_ymd(secs: u64) -> (u32, u32, u32) {
+    let days = (secs / 86400) as i64;
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let year = (if m <= 2 { y + 1 } else { y }) as u32;
+    (year, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn epoch_secs_to_ymd_known_dates() {
+        // 2026-06-13 00:00:00 UTC
+        //   = 20617 days from 1970-01-01
+        //   = 1_781_308_800 seconds
+        assert_eq!(epoch_secs_to_ymd(1_781_308_800), (2026, 6, 13));
+        // 2026-06-13 23:00:00 UTC still lands on the 13th
+        assert_eq!(epoch_secs_to_ymd(1_781_308_800 + 23 * 3600), (2026, 6, 13));
+        // 2026-06-14 00:00:00 UTC
+        assert_eq!(epoch_secs_to_ymd(1_781_308_800 + 86400), (2026, 6, 14));
+        // 1970-01-01 00:00:00 UTC
+        assert_eq!(epoch_secs_to_ymd(0), (1970, 1, 1));
+        // 2000-02-29 (leap day) — known daylight-saving-free reference
+        // 30 years * 365 + 7 leap days (1972..1996 inclusive of every 4 except 1900)
+        // = 10957 days => 946_684_800 seconds
+        assert_eq!(epoch_secs_to_ymd(951_782_400), (2000, 2, 29));
+    }
+}

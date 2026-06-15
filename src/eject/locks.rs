@@ -17,28 +17,57 @@ pub fn find_volume_lockers(drive_letter: char) -> Result<Vec<HandleLock>> {
     find_volume_lockers_with_processes(drive_letter, &[])
 }
 
-pub fn find_volume_lockers_with_processes(drive_letter: char, processes: &[crate::collect::ProcessInfo]) -> Result<Vec<HandleLock>> {
+pub fn find_volume_lockers_with_processes(
+    drive_letter: char,
+    processes: &[crate::collect::ProcessInfo],
+) -> Result<Vec<HandleLock>> {
     let drive_root = format!("{}:\\", drive_letter);
 
     let pids = filelocksmith::find_processes_locking_path(&drive_root);
+
+    // 缓存里命不中的 PID 才需要查 sysinfo；一次性在循环外构造 fallback map，
+    // 避免每个未命中 PID 都触发一次 sysinfo::System::new_all()（50-200ms）。
+    let cached_pids: std::collections::HashSet<u32> = processes.iter().map(|p| p.pid).collect();
+    let missing_pids: Vec<u32> = pids
+        .iter()
+        .map(|&p| p as u32)
+        .filter(|pid| !cached_pids.contains(pid))
+        .collect();
+
+    let fallback_map: std::collections::HashMap<u32, (String, Option<String>)> =
+        if missing_pids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            crate::collect::sysinfo_with(|sys| {
+                missing_pids
+                    .iter()
+                    .filter_map(|&pid| {
+                        let pid_sys = sysinfo::Pid::from_u32(pid);
+                        sys.process(pid_sys).map(|proc| {
+                            (
+                                pid,
+                                (
+                                    proc.name().to_string_lossy().to_string(),
+                                    proc.exe().map(|p| p.to_string_lossy().to_string()),
+                                ),
+                            )
+                        })
+                    })
+                    .collect()
+            })
+        };
 
     let mut locks = Vec::new();
 
     for pid_usize in pids {
         let pid = pid_usize as u32;
-        let pid_sys = sysinfo::Pid::from_u32(pid);
 
-        let (name, exe) = processes.iter()
+        let (name, exe) = processes
+            .iter()
             .find(|p| p.pid == pid)
             .map(|p| (p.name.clone(), p.exe.clone()))
-            .unwrap_or_else(|| {
-                let sys = sysinfo::System::new_all();
-                if let Some(proc) = sys.process(pid_sys) {
-                    (proc.name().to_string_lossy().to_string(), proc.exe().map(|p| p.to_string_lossy().to_string()))
-                } else {
-                    (format!("PID {}", pid), None)
-                }
-            });
+            .or_else(|| fallback_map.get(&pid).cloned())
+            .unwrap_or_else(|| (format!("PID {}", pid), None));
 
         let proc_info = ProcessInfo {
             pid,
@@ -47,6 +76,8 @@ pub fn find_volume_lockers_with_processes(drive_letter: char, processes: &[crate
             memory: 0,
             virtual_memory: 0,
             disk_usage: (0, 0),
+            disk_read_speed: 0,
+            disk_write_speed: 0,
             status: String::new(),
             exe: exe.clone(),
             cmd: Vec::new(),

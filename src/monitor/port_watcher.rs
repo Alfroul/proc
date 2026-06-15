@@ -62,16 +62,27 @@ pub fn spawn_port_watcher(port: u16, interval_secs: u64) -> PortWatchHandle {
                     notify::notify_port_change(port, "occupied", "released").ok();
                 }
                 (None, Some(new_pid)) => {
-                    let name = current_entry.as_ref().map(|(_, n)| n.as_str()).unwrap_or("-");
+                    let name = current_entry
+                        .as_ref()
+                        .map(|(_, n)| n.as_str())
+                        .unwrap_or("-");
                     let _ = event_tx.send(PortEvent::Occupied {
                         port,
                         pid: new_pid,
                         process_name: name.to_string(),
                     });
-                    notify::notify_port_change(port, "released", &format!("occupied by {} (PID {})", name, new_pid)).ok();
+                    notify::notify_port_change(
+                        port,
+                        "released",
+                        &format!("occupied by {} (PID {})", name, new_pid),
+                    )
+                    .ok();
                 }
                 (Some(old_pid), Some(new_pid)) if old_pid != new_pid => {
-                    let name = current_entry.as_ref().map(|(_, n)| n.as_str()).unwrap_or("-");
+                    let name = current_entry
+                        .as_ref()
+                        .map(|(_, n)| n.as_str())
+                        .unwrap_or("-");
                     let _ = event_tx.send(PortEvent::Released { port });
                     let _ = event_tx.send(PortEvent::Occupied {
                         port,
@@ -82,7 +93,8 @@ pub fn spawn_port_watcher(port: u16, interval_secs: u64) -> PortWatchHandle {
                         port,
                         &format!("occupied by PID {}", old_pid),
                         &format!("occupied by {} (PID {})", name, new_pid),
-                    ).ok();
+                    )
+                    .ok();
                 }
                 _ => {}
             }

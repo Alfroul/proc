@@ -84,7 +84,10 @@ fn is_private(ip: &IpAddr) -> bool {
 /// Handles GBK-encoded output from Windows ping.exe by decoding with encoding_rs.
 pub fn run_ping(
     ip: IpAddr,
-) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<String>) {
+) -> (
+    std::thread::JoinHandle<()>,
+    std::sync::mpsc::Receiver<String>,
+) {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let handle = std::thread::spawn(move || {
@@ -121,7 +124,10 @@ pub fn run_ping(
 /// Run DNS reverse lookup in a background thread.
 pub fn run_dns_reverse(
     ip: IpAddr,
-) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<String>) {
+) -> (
+    std::thread::JoinHandle<()>,
+    std::sync::mpsc::Receiver<String>,
+) {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let handle = std::thread::spawn(move || {
@@ -143,7 +149,10 @@ pub fn run_dns_reverse(
 /// Run Whois query in a background thread.
 pub fn run_whois(
     ip: IpAddr,
-) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<String>) {
+) -> (
+    std::thread::JoinHandle<()>,
+    std::sync::mpsc::Receiver<String>,
+) {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let handle = std::thread::spawn(move || {
@@ -189,7 +198,10 @@ pub fn run_whois(
 /// Run traceroute in a background thread, streaming output via mpsc channel.
 pub fn run_traceroute(
     ip: IpAddr,
-) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<String>) {
+) -> (
+    std::thread::JoinHandle<()>,
+    std::sync::mpsc::Receiver<String>,
+) {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let handle = std::thread::spawn(move || {
@@ -224,16 +236,30 @@ pub fn run_traceroute(
 }
 
 const SCAN_PORTS: [(u16, &str); 15] = [
-    (21, "FTP"), (22, "SSH"), (23, "Telnet"), (25, "SMTP"),
-    (53, "DNS"), (80, "HTTP"), (110, "POP3"), (143, "IMAP"),
-    (443, "HTTPS"), (465, "SMTPS"), (587, "SMTP"),
-    (993, "IMAPS"), (995, "POP3S"), (3306, "MySQL"), (5432, "PostgreSQL"),
+    (21, "FTP"),
+    (22, "SSH"),
+    (23, "Telnet"),
+    (25, "SMTP"),
+    (53, "DNS"),
+    (80, "HTTP"),
+    (110, "POP3"),
+    (143, "IMAP"),
+    (443, "HTTPS"),
+    (465, "SMTPS"),
+    (587, "SMTP"),
+    (993, "IMAPS"),
+    (995, "POP3S"),
+    (3306, "MySQL"),
+    (5432, "PostgreSQL"),
 ];
 
 /// Run port scan in a background thread.
 pub fn run_port_scan(
     ip: IpAddr,
-) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<String>) {
+) -> (
+    std::thread::JoinHandle<()>,
+    std::sync::mpsc::Receiver<String>,
+) {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let handle = std::thread::spawn(move || {

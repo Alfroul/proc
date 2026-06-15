@@ -48,7 +48,13 @@ pub struct AlertEvent {
 }
 
 impl Alert {
-    pub fn new(rule_id: String, severity: AlertSeverity, threshold: f64, consecutive_hits: u32, pid: Option<u32>) -> Self {
+    pub fn new(
+        rule_id: String,
+        severity: AlertSeverity,
+        threshold: f64,
+        consecutive_hits: u32,
+        pid: Option<u32>,
+    ) -> Self {
         Self {
             rule_id,
             state: AlertState::Pending,
@@ -130,12 +136,14 @@ impl Alert {
         let message = match event_type {
             AlertEventType::Fired => format!(
                 "{}: {} threshold {} ({:.1})",
-                self.rule_id, self.severity_label(), self.threshold, self.current_value
+                self.rule_id,
+                self.severity_label(),
+                self.threshold,
+                self.current_value
             ),
-            AlertEventType::Resolved => format!(
-                "{}: resolved (now {:.1})",
-                self.rule_id, self.current_value
-            ),
+            AlertEventType::Resolved => {
+                format!("{}: resolved (now {:.1})", self.rule_id, self.current_value)
+            }
         };
         AlertEvent {
             rule_id: self.rule_id.clone(),

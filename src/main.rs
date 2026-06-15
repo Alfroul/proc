@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use clap::Parser;
 use colored::Colorize;
@@ -7,17 +7,22 @@ use proc::app;
 use proc::classify;
 use proc::cli;
 use proc::collect::{self, SortField};
+use proc::docker;
+use proc::eject;
 use proc::error;
 use proc::kill;
-use proc::tree;
-use proc::port_map;
-use proc::eject;
-use proc::docker;
 use proc::monitor;
+use proc::port_map;
 use proc::record::vt100::{VtPlayer, is_vt100_file};
+use proc::shutdown;
+use proc::tree;
 use proc::tui;
 
 fn main() {
+    // Install Ctrl+C / SIGINT handler before anything else so every code path
+    // (TUI, replay, CLI subcommand loops) can poll `shutdown::requested()`.
+    shutdown::init();
+
     // Quick check: if first arg is a .prec file, replay directly
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 2 && args[1].to_lowercase().ends_with(".prec") {
@@ -55,7 +60,7 @@ fn main() {
 }
 
 fn init_tracing() {
-    let config_dir = dirs_config_dir();
+    let config_dir = proc::dirs_config_dir();
     std::fs::create_dir_all(&config_dir).ok();
     let log_path = config_dir.join("proc.log");
 
@@ -69,24 +74,37 @@ fn init_tracing() {
     }
 }
 
-fn dirs_config_dir() -> std::path::PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config").join("proc")
-}
-
 fn run_subcommand(cmd: &cli::Command) {
     match cmd {
         cli::Command::Ls { sort, limit } => run_ls(sort, limit),
         cli::Command::Kill { pid, force } => run_kill(*pid, *force),
+        cli::Command::Pkill {
+            name,
+            force,
+            dry_run,
+        } => run_pkill(name, *force, *dry_run),
         cli::Command::Tree => run_tree(),
-        cli::Command::Port { port, kill: do_kill } => run_port(port, do_kill),
+        cli::Command::Port {
+            port,
+            kill: do_kill,
+        } => run_port(port, do_kill),
         cli::Command::Eject { drive, find_locks } => run_eject(drive, find_locks),
-        cli::Command::Monitor { add, remove, port, pid, command } => run_monitor(*add, remove, port, pid, command),
+        cli::Command::Monitor {
+            add,
+            remove,
+            port,
+            pid,
+            command,
+        } => run_monitor(*add, remove, port, pid, command),
         cli::Command::Docker { watch, container } => run_docker(watch, container),
         cli::Command::Record { output } => run_record(output),
         cli::Command::Replay { file } => run_replay(file),
+        cli::Command::Export {
+            format,
+            output,
+            sort,
+            limit,
+        } => run_export(format, output, sort, limit),
     }
 }
 
@@ -104,7 +122,8 @@ fn run_ls(sort: &str, limit: &Option<usize>) {
         std::process::exit(1);
     }
 
-    let mut processes = snapshot.processes();
+    let _ = snapshot.refresh_heavy_incremental();
+    let mut processes = snapshot.cached_processes_vec();
     let sort_field = match sort {
         "mem" | "memory" => SortField::Memory,
         "name" => SortField::Name,
@@ -113,11 +132,16 @@ fn run_ls(sort: &str, limit: &Option<usize>) {
     };
 
     processes.sort_by(|a, b| match sort_field {
-        SortField::Cpu => b.cpu_usage.partial_cmp(&a.cpu_usage).unwrap_or(std::cmp::Ordering::Equal),
+        SortField::Cpu => b
+            .cpu_usage
+            .partial_cmp(&a.cpu_usage)
+            .unwrap_or(std::cmp::Ordering::Equal),
         SortField::Memory => b.memory.cmp(&a.memory),
         SortField::Pid => a.pid.cmp(&b.pid),
         SortField::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         SortField::Security => std::cmp::Ordering::Equal,
+        SortField::DiskRead => b.disk_read_speed.cmp(&a.disk_read_speed),
+        SortField::DiskWrite => b.disk_write_speed.cmp(&a.disk_write_speed),
     });
 
     if let Some(n) = limit {
@@ -132,7 +156,10 @@ fn run_ls(sort: &str, limit: &Option<usize>) {
         let mem_str = format_bytes(proc.memory);
         let cpu_str = format!("{:.1}", proc.cpu_usage);
         let mem_pct = if proc.virtual_memory > 0 {
-            format!("{:.1}", proc.memory as f64 / proc.virtual_memory as f64 * 100.0)
+            format!(
+                "{:.1}",
+                proc.memory as f64 / proc.virtual_memory as f64 * 100.0
+            )
         } else {
             "0.0".to_string()
         };
@@ -172,6 +199,92 @@ fn run_kill(pid: u32, force: bool) {
     }
 }
 
+fn run_pkill(name: &str, force: bool, dry_run: bool) {
+    let mode = if dry_run {
+        "预演"
+    } else if force {
+        "强制"
+    } else {
+        ""
+    };
+    println!(
+        "{}名称为 '{}' 的进程{}...",
+        "查找并".cyan(),
+        name,
+        if mode.is_empty() {
+            "".to_string()
+        } else {
+            format!("（{}）", mode)
+        }
+    );
+
+    let results = match kill::kill_by_name(name, force, dry_run) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{} {}", "✗ 错误:".red(), e);
+            std::process::exit(1);
+        }
+    };
+
+    if results.is_empty() {
+        println!("{}", format!("未找到名称匹配 '{}' 的进程", name).yellow());
+        return;
+    }
+
+    let mut killed = 0u32;
+    let mut failed = 0u32;
+    for r in &results {
+        match &r.outcome {
+            None => println!(
+                "{}  PID {} ({}) — 不终止",
+                "[dry-run]".yellow(),
+                r.pid,
+                r.name
+            ),
+            Some(kill::KillResult::Killed) => {
+                println!("{}", format!("✓ PID {} ({}) 已终止", r.pid, r.name).green());
+                killed += 1;
+            }
+            Some(kill::KillResult::AlreadyGone) => {
+                println!(
+                    "{}",
+                    format!("  PID {} ({}) 已退出", r.pid, r.name).yellow()
+                );
+            }
+            Some(kill::KillResult::AccessDenied) => {
+                eprintln!("{}", format!("✗ PID {} ({}) 权限不足", r.pid, r.name).red());
+                failed += 1;
+            }
+            Some(kill::KillResult::Failed(e)) => {
+                eprintln!(
+                    "{}",
+                    format!("✗ PID {} ({}) 失败: {}", r.pid, r.name, e).red()
+                );
+                failed += 1;
+            }
+        }
+    }
+
+    let total = results.len();
+    println!(
+        "{}",
+        format!(
+            "共匹配 {} 个进程{}",
+            total,
+            if dry_run {
+                "".to_string()
+            } else {
+                format!("，已终止 {} 个，失败 {} 个", killed, failed)
+            }
+        )
+        .cyan()
+    );
+
+    if failed > 0 {
+        std::process::exit(1);
+    }
+}
+
 fn run_tree() {
     let mut snapshot = match collect::SystemSnapshot::new() {
         Ok(s) => s,
@@ -186,8 +299,10 @@ fn run_tree() {
         std::process::exit(1);
     }
 
-    let processes = snapshot.processes();
-    let tree_nodes = tree::build_process_tree(&processes);
+    let _ = snapshot.refresh_heavy_incremental();
+    let processes = snapshot.cached_processes_vec();
+    let (_, total_mem) = snapshot.memory_usage();
+    let tree_nodes = tree::build_process_tree(&processes, total_mem);
     let output = tree::format_tree_text(&tree_nodes);
     println!("{output}");
 }
@@ -237,7 +352,14 @@ fn run_port(port: &Option<u16>, do_kill: &bool) {
                     }
                 } else {
                     let mut table = comfy_table::Table::new();
-                    table.set_header(vec!["协议", "本地地址", "远程地址", "状态", "PID", "进程名"]);
+                    table.set_header(vec![
+                        "协议",
+                        "本地地址",
+                        "远程地址",
+                        "状态",
+                        "PID",
+                        "进程名",
+                    ]);
                     for entry in &entries {
                         let remote = match (entry.remote_addr, entry.remote_port) {
                             (Some(addr), Some(port)) => format!("{}:{}", addr, port),
@@ -265,7 +387,14 @@ fn run_port(port: &Option<u16>, do_kill: &bool) {
         match port_map::scan_ports() {
             Ok(entries) => {
                 let mut table = comfy_table::Table::new();
-                table.set_header(vec!["协议", "本地地址", "远程地址", "状态", "PID", "进程名"]);
+                table.set_header(vec![
+                    "协议",
+                    "本地地址",
+                    "远程地址",
+                    "状态",
+                    "PID",
+                    "进程名",
+                ]);
                 for entry in &entries {
                     let remote = match (entry.remote_addr, entry.remote_port) {
                         (Some(addr), Some(port)) => format!("{}:{}", addr, port),
@@ -310,7 +439,13 @@ fn run_eject(drive: &Option<String>, find_locks: &bool) {
     }
 }
 
-fn run_monitor(_add: bool, remove: &Option<u32>, port: &Option<u16>, pid: &Option<u32>, command: &Option<String>) {
+fn run_monitor(
+    _add: bool,
+    remove: &Option<u32>,
+    port: &Option<u16>,
+    pid: &Option<u32>,
+    command: &Option<String>,
+) {
     let mut mgr = monitor::MonitorManager::new();
 
     if let Some(id) = remove {
@@ -329,14 +464,21 @@ fn run_monitor(_add: bool, remove: &Option<u32>, port: &Option<u16>, pid: &Optio
             monitor::MonitorTarget::ByPid { pid: *p },
             monitor::RestartPolicy::NotifyOnly,
         ) {
-            Ok(id) => println!("{}", format!("✓ 已添加 PID {} 监控 (ID: {})", p, id).green()),
+            Ok(id) => println!(
+                "{}",
+                format!("✓ 已添加 PID {} 监控 (ID: {})", p, id).green()
+            ),
             Err(e) => {
                 eprintln!("{} {}", "✗ 错误:".red(), e);
                 std::process::exit(1);
             }
         }
         println!("{}", "按 Ctrl+C 停止监控".yellow());
-        std::io::stdin().read_line(&mut String::new()).ok();
+        // 不再用 stdin().read_line() 阻塞 — Ctrl+C 由 shutdown::requested() 捕获
+        while !shutdown::requested() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        println!("{}", "停止监控".yellow());
         return;
     }
 
@@ -346,15 +488,30 @@ fn run_monitor(_add: bool, remove: &Option<u32>, port: &Option<u16>, pid: &Optio
             monitor::RestartPolicy::NotifyOnly,
         ) {
             Ok(id) => {
-                println!("{}", format!("✓ 已添加端口 {} 监控 (ID: {})", p, id).green());
+                println!(
+                    "{}",
+                    format!("✓ 已添加端口 {} 监控 (ID: {})", p, id).green()
+                );
                 let handle = monitor::port_watcher::spawn_port_watcher(*p, 5);
                 println!("{}", "监控中... 按 Ctrl+C 停止".yellow());
                 loop {
+                    if shutdown::requested() {
+                        println!("{}", "停止监控".yellow());
+                        return;
+                    }
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     while let Some(event) = handle.try_recv() {
                         match event {
-                            monitor::port_watcher::PortEvent::Occupied { port, pid, process_name } => {
-                                println!("{}", format!("端口 {} 被 {} (PID {}) 占用", port, process_name, pid).cyan());
+                            monitor::port_watcher::PortEvent::Occupied {
+                                port,
+                                pid,
+                                process_name,
+                            } => {
+                                println!(
+                                    "{}",
+                                    format!("端口 {} 被 {} (PID {}) 占用", port, process_name, pid)
+                                        .cyan()
+                                );
                             }
                             monitor::port_watcher::PortEvent::Released { port } => {
                                 println!("{}", format!("端口 {} 已释放", port).yellow());
@@ -371,7 +528,11 @@ fn run_monitor(_add: bool, remove: &Option<u32>, port: &Option<u16>, pid: &Optio
     }
 
     if let Some(cmd) = command {
-        let args: Vec<String> = cmd.split_whitespace().skip(1).map(|s| s.to_string()).collect();
+        let args: Vec<String> = cmd
+            .split_whitespace()
+            .skip(1)
+            .map(|s| s.to_string())
+            .collect();
         let cmd_bin = cmd.split_whitespace().next().unwrap_or(cmd);
         match mgr.add_monitor(
             monitor::MonitorTarget::ByCommand {
@@ -386,11 +547,17 @@ fn run_monitor(_add: bool, remove: &Option<u32>, port: &Option<u16>, pid: &Optio
             },
         ) {
             Ok(id) => {
-                println!("{}", format!("✓ 已添加命令监控: {} (ID: {})", cmd, id).green());
+                println!(
+                    "{}",
+                    format!("✓ 已添加命令监控: {} (ID: {})", cmd, id).green()
+                );
                 let handle = monitor::watchdog::spawn_watchdog(
                     id,
                     cmd_bin,
-                    &cmd.split_whitespace().skip(1).map(|s| s.to_string()).collect::<Vec<_>>(),
+                    &cmd.split_whitespace()
+                        .skip(1)
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>(),
                     None,
                     monitor::RestartPolicy::AutoRestart {
                         max_retries: 5,
@@ -400,17 +567,32 @@ fn run_monitor(_add: bool, remove: &Option<u32>, port: &Option<u16>, pid: &Optio
                 );
                 println!("{}", "监控中... 按 Ctrl+C 停止".yellow());
                 loop {
+                    if shutdown::requested() {
+                        println!("{}", "停止监控".yellow());
+                        return;
+                    }
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     while let Some(event) = handle.try_recv() {
                         match event {
                             monitor::watchdog::WatchdogEvent::Started { pid, .. } => {
                                 println!("{}", format!("进程已启动 (PID {})", pid).green());
                             }
-                            monitor::watchdog::WatchdogEvent::Crashed { exit_code, attempt, restarting, .. } => {
-                                println!("{}", format!("进程崩溃 (code: {:?})，第 {} 次{}",
-                                    exit_code, attempt,
-                                    if restarting { "，正在重启..." } else { "" }
-                                ).red());
+                            monitor::watchdog::WatchdogEvent::Crashed {
+                                exit_code,
+                                attempt,
+                                restarting,
+                                ..
+                            } => {
+                                println!(
+                                    "{}",
+                                    format!(
+                                        "进程崩溃 (code: {:?})，第 {} 次{}",
+                                        exit_code,
+                                        attempt,
+                                        if restarting { "，正在重启..." } else { "" }
+                                    )
+                                    .red()
+                                );
                             }
                             monitor::watchdog::WatchdogEvent::Stopped { reason, .. } => {
                                 println!("{}", format!("监控停止: {}", reason).yellow());
@@ -471,7 +653,75 @@ fn run_record(_output: &Option<std::path::PathBuf>) {
     }
 }
 
-fn run_replay(file: &std::path::PathBuf) {
+fn run_export(
+    format: &str,
+    output: &Option<std::path::PathBuf>,
+    sort: &str,
+    limit: &Option<usize>,
+) {
+    let mut snapshot = match collect::SystemSnapshot::new() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{} {}", "错误:".red(), e);
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = snapshot.refresh() {
+        eprintln!("{} {}", "刷新失败:".red(), e);
+        std::process::exit(1);
+    }
+    let _ = snapshot.refresh_heavy_incremental();
+    let mut processes = snapshot.cached_processes_vec();
+
+    let sort_field = match sort {
+        "mem" | "memory" => SortField::Memory,
+        "name" => SortField::Name,
+        "pid" => SortField::Pid,
+        _ => SortField::Cpu,
+    };
+    processes.sort_by(|a, b| match sort_field {
+        SortField::Cpu => b
+            .cpu_usage
+            .partial_cmp(&a.cpu_usage)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        SortField::Memory => b.memory.cmp(&a.memory),
+        SortField::Pid => a.pid.cmp(&b.pid),
+        SortField::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        SortField::Security => std::cmp::Ordering::Equal,
+        SortField::DiskRead => b.disk_read_speed.cmp(&a.disk_read_speed),
+        SortField::DiskWrite => b.disk_write_speed.cmp(&a.disk_write_speed),
+    });
+
+    if let Some(n) = limit {
+        processes.truncate(*n);
+    }
+
+    let epoch_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let payload = match format.to_lowercase().as_str() {
+        "csv" => proc::format::export_processes_as_csv(&processes),
+        _ => proc::format::export_processes_as_json(&processes, epoch_secs),
+    };
+
+    match output {
+        Some(path) => {
+            if let Err(e) = std::fs::write(path, &payload) {
+                eprintln!("{} {}", "写入失败:".red(), e);
+                std::process::exit(1);
+            }
+            println!(
+                "{}",
+                format!("✓ 已导出 {} 个进程到 {}", processes.len(), path.display()).green()
+            );
+        }
+        None => println!("{}", payload),
+    }
+}
+
+fn run_replay(file: &Path) {
     if is_vt100_file(file) {
         run_vt100_replay(file);
     } else {
@@ -479,8 +729,8 @@ fn run_replay(file: &std::path::PathBuf) {
     }
 }
 
-fn run_vt100_replay(file: &std::path::PathBuf) {
-    let player = match VtPlayer::open(file.clone()) {
+fn run_vt100_replay(file: &Path) {
+    let player = match VtPlayer::open(file.to_path_buf()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{} {}", "打开录制文件失败:".red(), e);
@@ -489,7 +739,10 @@ fn run_vt100_replay(file: &std::path::PathBuf) {
     };
 
     let total = player.total_frames();
-    println!("{}", format!("加载 VT100 录制: {} ({} 帧)", file.display(), total).cyan());
+    println!(
+        "{}",
+        format!("加载 VT100 录制: {} ({} 帧)", file.display(), total).cyan()
+    );
 
     let mut terminal = match tui::setup_terminal() {
         Ok(t) => t,
@@ -507,10 +760,10 @@ fn run_vt100_replay(file: &std::path::PathBuf) {
     }
 }
 
-fn run_legacy_replay(file: &std::path::PathBuf) {
+fn run_legacy_replay(file: &Path) {
     use proc::record::Player;
 
-    let player = match Player::open(file.clone()) {
+    let player = match Player::open(file.to_path_buf()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{} {}", "打开录制文件失败:".red(), e);
@@ -519,7 +772,10 @@ fn run_legacy_replay(file: &std::path::PathBuf) {
     };
 
     let total = player.total_frames();
-    println!("{}", format!("加载录制: {} ({} 帧)", file.display(), total).cyan());
+    println!(
+        "{}",
+        format!("加载录制: {} ({} 帧)", file.display(), total).cyan()
+    );
 
     let mut app = match app::App::new() {
         Ok(a) => a,
@@ -559,7 +815,9 @@ fn run_docker(watch: &bool, container: &Option<String>) {
     if let Some(name) = container {
         match monitor.list_containers(true) {
             Ok(containers) => {
-                let found = containers.iter().find(|c| c.name == *name || c.id.starts_with(name));
+                let found = containers
+                    .iter()
+                    .find(|c| c.name == *name || c.id.starts_with(name));
                 match found {
                     Some(c) => {
                         println!("{}", format!("容器: {} ({})", c.name, c.id).cyan());
@@ -575,8 +833,16 @@ fn run_docker(watch: &bool, container: &Option<String>) {
                         match monitor.get_stats(name) {
                             Ok(stats) => {
                                 println!("CPU:  {:.1}%", stats.cpu_percent);
-                                println!("内存: {} / {}", format_bytes(stats.memory_usage), format_bytes(stats.memory_limit));
-                                println!("网络: ↓{} ↑{}", format_bytes(stats.network_in), format_bytes(stats.network_out));
+                                println!(
+                                    "内存: {} / {}",
+                                    format_bytes(stats.memory_usage),
+                                    format_bytes(stats.memory_limit)
+                                );
+                                println!(
+                                    "网络: ↓{} ↑{}",
+                                    format_bytes(stats.network_in),
+                                    format_bytes(stats.network_out)
+                                );
                             }
                             Err(e) => println!("{} 获取统计失败: {}", "⚠".yellow(), e),
                         }
@@ -601,9 +867,16 @@ fn run_docker(watch: &bool, container: &Option<String>) {
         println!("{}", "监听 Docker 事件中... (Ctrl+C 停止)".cyan());
 
         loop {
+            if shutdown::requested() {
+                println!("{}", "停止事件监听".yellow());
+                return;
+            }
             std::thread::sleep(std::time::Duration::from_millis(500));
             while let Some(event) = receiver.try_recv() {
-                let name = event.container_name.as_deref().unwrap_or(&event.container_id);
+                let name = event
+                    .container_name
+                    .as_deref()
+                    .unwrap_or(&event.container_id);
                 let style = match event.action.as_str() {
                     "die" | "stop" => "red",
                     "start" => "green",
@@ -611,7 +884,9 @@ fn run_docker(watch: &bool, container: &Option<String>) {
                 };
                 let styled = match style {
                     "red" => format!("{} {} ({})", event.action, name, event.container_id).red(),
-                    "green" => format!("{} {} ({})", event.action, name, event.container_id).green(),
+                    "green" => {
+                        format!("{} {} ({})", event.action, name, event.container_id).green()
+                    }
                     _ => format!("{} {} ({})", event.action, name, event.container_id).yellow(),
                 };
                 println!("{}", styled);

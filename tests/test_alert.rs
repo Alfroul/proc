@@ -1,10 +1,17 @@
-use proc::alert::{
-    AlertManager, AlertSeverity, AlertState, AlertEventType,
-    ComparisonOp, MetricName, ThresholdConfig, ThresholdRule,
-};
 use proc::alert::state::Alert;
+use proc::alert::{
+    AlertEventType, AlertManager, AlertSeverity, AlertState, ComparisonOp, MetricName,
+    ThresholdConfig, ThresholdRule,
+};
 
-fn make_rule(id: &str, metric: MetricName, op: ComparisonOp, threshold: f64, hits: u32, severity: AlertSeverity) -> ThresholdRule {
+fn make_rule(
+    id: &str,
+    metric: MetricName,
+    op: ComparisonOp,
+    threshold: f64,
+    hits: u32,
+    severity: AlertSeverity,
+) -> ThresholdRule {
     ThresholdRule {
         id: id.to_string(),
         metric,
@@ -18,7 +25,14 @@ fn make_rule(id: &str, metric: MetricName, op: ComparisonOp, threshold: f64, hit
 
 #[test]
 fn test_rule_evaluate_gt() {
-    let rule = make_rule("test", MetricName::CpuUsage, ComparisonOp::GT, 90.0, 1, AlertSeverity::Warning);
+    let rule = make_rule(
+        "test",
+        MetricName::CpuUsage,
+        ComparisonOp::GT,
+        90.0,
+        1,
+        AlertSeverity::Warning,
+    );
     assert!(rule.evaluate(91.0));
     assert!(rule.evaluate(100.0));
     assert!(!rule.evaluate(90.0));
@@ -27,7 +41,14 @@ fn test_rule_evaluate_gt() {
 
 #[test]
 fn test_rule_evaluate_lte() {
-    let rule = make_rule("test", MetricName::CpuUsage, ComparisonOp::LTE, 90.0, 1, AlertSeverity::Info);
+    let rule = make_rule(
+        "test",
+        MetricName::CpuUsage,
+        ComparisonOp::LTE,
+        90.0,
+        1,
+        AlertSeverity::Info,
+    );
     assert!(rule.evaluate(90.0));
     assert!(rule.evaluate(50.0));
     assert!(!rule.evaluate(91.0));
@@ -35,7 +56,14 @@ fn test_rule_evaluate_lte() {
 
 #[test]
 fn test_rule_evaluate_gte() {
-    let rule = make_rule("test", MetricName::CpuUsage, ComparisonOp::GTE, 90.0, 1, AlertSeverity::Warning);
+    let rule = make_rule(
+        "test",
+        MetricName::CpuUsage,
+        ComparisonOp::GTE,
+        90.0,
+        1,
+        AlertSeverity::Warning,
+    );
     assert!(rule.evaluate(90.0));
     assert!(rule.evaluate(91.0));
     assert!(!rule.evaluate(89.9));
@@ -43,22 +71,37 @@ fn test_rule_evaluate_gte() {
 
 #[test]
 fn test_rule_evaluate_lt() {
-    let rule = make_rule("test", MetricName::CpuUsage, ComparisonOp::LT, 5.0, 3, AlertSeverity::Warning);
+    let rule = make_rule(
+        "test",
+        MetricName::CpuUsage,
+        ComparisonOp::LT,
+        5.0,
+        3,
+        AlertSeverity::Warning,
+    );
     assert!(rule.evaluate(4.9));
     assert!(!rule.evaluate(5.0));
 }
 
 #[test]
 fn test_rule_evaluate_eq() {
-    let rule = make_rule("test", MetricName::CpuUsage, ComparisonOp::EQ, 42.0, 1, AlertSeverity::Info);
+    let rule = make_rule(
+        "test",
+        MetricName::CpuUsage,
+        ComparisonOp::EQ,
+        42.0,
+        1,
+        AlertSeverity::Info,
+    );
     assert!(rule.evaluate(42.0));
     assert!(!rule.evaluate(42.1));
 }
 
 #[test]
 fn test_metric_extract_cpu() {
-    let snapshot = proc::collect::SystemSnapshot::new().expect("snapshot");
-    let procs = snapshot.processes();
+    let mut snapshot = proc::collect::SystemSnapshot::new().expect("snapshot");
+    let _ = snapshot.refresh_heavy_incremental();
+    let procs = snapshot.cached_processes_vec();
     let values = MetricName::CpuUsage.extract(&snapshot, &procs);
     assert_eq!(values.len(), 1);
     assert_eq!(values[0].0, 0); // global metric
@@ -68,8 +111,9 @@ fn test_metric_extract_cpu() {
 
 #[test]
 fn test_metric_extract_memory() {
-    let snapshot = proc::collect::SystemSnapshot::new().expect("snapshot");
-    let procs = snapshot.processes();
+    let mut snapshot = proc::collect::SystemSnapshot::new().expect("snapshot");
+    let _ = snapshot.refresh_heavy_incremental();
+    let procs = snapshot.cached_processes_vec();
     let values = MetricName::MemoryUsage.extract(&snapshot, &procs);
     assert_eq!(values.len(), 1);
     assert_eq!(values[0].0, 0);
@@ -79,8 +123,9 @@ fn test_metric_extract_memory() {
 
 #[test]
 fn test_metric_extract_process_cpu() {
-    let snapshot = proc::collect::SystemSnapshot::new().expect("snapshot");
-    let procs = snapshot.processes();
+    let mut snapshot = proc::collect::SystemSnapshot::new().expect("snapshot");
+    let _ = snapshot.refresh_heavy_incremental();
+    let procs = snapshot.cached_processes_vec();
     // ProcessCpu(0) should return all processes
     let values = MetricName::ProcessCpu(0).extract(&snapshot, &procs);
     assert!(!values.is_empty());
@@ -94,8 +139,9 @@ fn test_metric_extract_process_cpu() {
 
 #[test]
 fn test_metric_extract_process_count() {
-    let snapshot = proc::collect::SystemSnapshot::new().expect("snapshot");
-    let procs = snapshot.processes();
+    let mut snapshot = proc::collect::SystemSnapshot::new().expect("snapshot");
+    let _ = snapshot.refresh_heavy_incremental();
+    let procs = snapshot.cached_processes_vec();
     let values = MetricName::ProcessCount.extract(&snapshot, &procs);
     assert_eq!(values.len(), 1);
     assert_eq!(values[0].0, 0);
@@ -133,13 +179,7 @@ fn test_alert_debounce() {
 
 #[test]
 fn test_alert_debounce_reset() {
-    let mut alert = Alert::new(
-        "test-rule".into(),
-        AlertSeverity::Warning,
-        90.0,
-        3,
-        None,
-    );
+    let mut alert = Alert::new("test-rule".into(), AlertSeverity::Warning, 90.0, 3, None);
 
     alert.tick(true, 95.0);
     assert_eq!(alert.hit_count, 1);
@@ -183,13 +223,7 @@ fn test_alert_resolve() {
 
 #[test]
 fn test_alert_silence() {
-    let mut alert = Alert::new(
-        "test-rule".into(),
-        AlertSeverity::Critical,
-        90.0,
-        1,
-        None,
-    );
+    let mut alert = Alert::new("test-rule".into(), AlertSeverity::Critical, 90.0, 1, None);
 
     // Fire
     alert.tick(true, 95.0);
@@ -280,8 +314,9 @@ fn test_manager_evaluate() {
 #[test]
 fn test_manager_full_flow() {
     let mut mgr = AlertManager::load_or_default();
-    let snapshot = proc::collect::SystemSnapshot::new().expect("snapshot");
-    let procs = snapshot.processes();
+    let mut snapshot = proc::collect::SystemSnapshot::new().expect("snapshot");
+    let _ = snapshot.refresh_heavy_incremental();
+    let procs = snapshot.cached_processes_vec();
 
     // First evaluation should not crash and may produce events
     let events = mgr.evaluate(&snapshot, &procs);

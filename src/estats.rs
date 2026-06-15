@@ -64,14 +64,15 @@ mod win32 {
     }
 
     fn enable_estats_for_all() {
-        use windows::Win32::NetworkManagement::IpHelper::{
-            GetTcpTable2, SetPerTcpConnectionEStats, MIB_TCPTABLE2,
-            TCP_ESTATS_DATA_RW_v0,
-        };
         use windows::Win32::Foundation::BOOLEAN;
+        use windows::Win32::NetworkManagement::IpHelper::{
+            GetTcpTable2, MIB_TCPTABLE2, SetPerTcpConnectionEStats, TCP_ESTATS_DATA_RW_v0,
+        };
 
         let mut table_size = 0u32;
-        unsafe { let _ = GetTcpTable2(None, &mut table_size, false); }
+        unsafe {
+            let _ = GetTcpTable2(None, &mut table_size, false);
+        }
         if table_size == 0 {
             return;
         }
@@ -87,7 +88,17 @@ mod win32 {
 
         let table = unsafe { &*table_ptr };
         let num_entries = table.dwNumEntries as usize;
-        let rows = &table.table[..num_entries];
+        // MIB_TCPTABLE2 has a flexible array member — slice from the raw buffer
+        let rows: &[windows::Win32::NetworkManagement::IpHelper::MIB_TCPROW2] = unsafe {
+            let header = std::mem::size_of::<u32>(); // dwNumEntries
+            let row_size =
+                std::mem::size_of::<windows::Win32::NetworkManagement::IpHelper::MIB_TCPROW2>();
+            if buf.len() < header + num_entries * row_size {
+                tracing::warn!("EStats: buffer too small for {} entries", num_entries);
+                return;
+            }
+            std::slice::from_raw_parts(buf.as_ptr().add(header) as *const _, num_entries)
+        };
 
         let mut rw: TCP_ESTATS_DATA_RW_v0 = unsafe { std::mem::zeroed() };
         rw.EnableCollection = BOOLEAN(1);
@@ -123,12 +134,13 @@ mod win32 {
 
     fn sample_connections() -> Vec<ConnectionEStats> {
         use windows::Win32::NetworkManagement::IpHelper::{
-            GetTcpTable2, GetPerTcpConnectionEStats, MIB_TCPTABLE2,
-            TCP_ESTATS_DATA_ROD_v0,
+            GetPerTcpConnectionEStats, GetTcpTable2, MIB_TCPTABLE2, TCP_ESTATS_DATA_ROD_v0,
         };
 
         let mut table_size = 0u32;
-        unsafe { let _ = GetTcpTable2(None, &mut table_size, false); }
+        unsafe {
+            let _ = GetTcpTable2(None, &mut table_size, false);
+        }
         if table_size == 0 {
             return Vec::new();
         }
@@ -144,7 +156,15 @@ mod win32 {
 
         let table = unsafe { &*table_ptr };
         let num_entries = table.dwNumEntries as usize;
-        let rows = &table.table[..num_entries];
+        let rows: &[windows::Win32::NetworkManagement::IpHelper::MIB_TCPROW2] = unsafe {
+            let header = std::mem::size_of::<u32>();
+            let row_size =
+                std::mem::size_of::<windows::Win32::NetworkManagement::IpHelper::MIB_TCPROW2>();
+            if buf.len() < header + num_entries * row_size {
+                return Vec::new();
+            }
+            std::slice::from_raw_parts(buf.as_ptr().add(header) as *const _, num_entries)
+        };
 
         let mut results = Vec::with_capacity(num_entries);
 
@@ -242,7 +262,10 @@ mod win32 {
                 }
             }
 
-            ((total_down as f64 / elapsed) as u64, (total_up as f64 / elapsed) as u64)
+            (
+                (total_down as f64 / elapsed) as u64,
+                (total_up as f64 / elapsed) as u64,
+            )
         }
 
         pub fn process_speed(&self, _pid: u32, entries: &[PortEntry]) -> (u64, u64, u64, u64) {
@@ -260,11 +283,13 @@ mod win32 {
             let proc_conns: Vec<ConnKey> = entries
                 .iter()
                 .filter(|e| e.protocol == crate::port_map::Protocol::Tcp)
-                .filter_map(|e| Some(ConnKey {
-                    local_port: e.local_port,
-                    remote_addr: e.remote_addr?,
-                    remote_port: e.remote_port?,
-                }))
+                .filter_map(|e| {
+                    Some(ConnKey {
+                        local_port: e.local_port,
+                        remote_addr: e.remote_addr?,
+                        remote_port: e.remote_port?,
+                    })
+                })
                 .collect();
 
             let mut ds: u64 = 0;
@@ -296,6 +321,9 @@ mod win32 {
 #[cfg(not(target_os = "windows"))]
 impl EStatsCollector {
     pub fn new() -> std::result::Result<Self, String> {
+        tracing::warn!(
+            "EStatsCollector::new is not supported on this platform; per-connection bandwidth is disabled"
+        );
         Err("EStats is only available on Windows".to_string())
     }
 

@@ -1,0 +1,826 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
+
+use crossterm::event::{KeyCode, KeyEvent};
+
+use crate::app_group::{self, AppGroup, AppGroupItem, VersionInfo, build_visual_items};
+use crate::app_panel::{AppGroupSortField, AppMode, KeyResult, KillRequest, Panel, PanelContext};
+use crate::classify;
+use crate::collect::{ProcessInfo, ProcessViewMode, SortField};
+use crate::port_map;
+use crate::tree::{self, TreeFilter, TreeNode};
+
+const PAGE_SIZE: usize = 20;
+
+pub struct ProcessPanel {
+    // List view
+    pub sort_field: SortField,
+    pub cursor_index: usize,
+    pub scroll_offset: usize,
+    pub selected_pids: HashSet<u32>,
+    pub search: crate::search::SearchState,
+
+    // View mode
+    pub process_view_mode: ProcessViewMode,
+
+    // Tree view
+    pub tree_nodes: Vec<TreeNode>,
+    pub tree_filter: TreeFilter,
+    pub tree_cursor: usize,
+    pub tree_scroll: usize,
+    pub tree_search: crate::search::SearchState,
+    pub tree_selected_pids: HashSet<u32>,
+    pub tree_sort_field: tree::TreeSortField,
+
+    // AppGroup view
+    pub app_groups: Vec<AppGroup>,
+    pub app_group_cursor: usize,
+    pub app_group_scroll: usize,
+    pub app_group_expanded: Option<usize>,
+    pub app_group_sort: AppGroupSortField,
+    pub app_group_search: crate::search::SearchState,
+    pub version_info_cache: HashMap<String, Option<VersionInfo>>,
+}
+
+impl ProcessPanel {
+    pub fn new(_processes: &[ProcessInfo]) -> Self {
+        let (_, _mem_total) = (0u64, 0u64); // caller provides this in App::new
+        Self {
+            sort_field: crate::ui_state::load_sort_field().unwrap_or_default(),
+            cursor_index: 0,
+            scroll_offset: 0,
+            selected_pids: HashSet::new(),
+            search: crate::search::SearchState::new(),
+            process_view_mode: ProcessViewMode::List,
+            tree_nodes: Vec::new(),
+            tree_filter: TreeFilter::All,
+            tree_cursor: 0,
+            tree_scroll: 0,
+            tree_search: crate::search::SearchState::new(),
+            tree_selected_pids: HashSet::new(),
+            tree_sort_field: tree::TreeSortField::Cpu,
+            app_groups: Vec::new(),
+            app_group_cursor: 0,
+            app_group_scroll: 0,
+            app_group_expanded: None,
+            app_group_sort: AppGroupSortField::Cpu,
+            app_group_search: crate::search::SearchState::new(),
+            version_info_cache: HashMap::new(),
+        }
+    }
+
+    pub fn init_tree(&mut self, processes: &[ProcessInfo], total_mem: u64) {
+        self.tree_nodes = tree::build_process_tree(processes, total_mem);
+    }
+
+    pub fn filtered_count(&self, cached_sorted: &[(usize, classify::ProcessClass)]) -> usize {
+        cached_sorted.len()
+    }
+
+    pub fn get_selected_pids(&self) -> Vec<u32> {
+        self.selected_pids.iter().copied().collect()
+    }
+
+    // --- AppGroup helpers ---
+
+    pub fn app_group_filtered_visual_items(&self) -> Vec<AppGroupItem> {
+        if self.app_group_search.query().is_empty() {
+            return build_visual_items(&self.app_groups, self.app_group_expanded);
+        }
+        let query = self.app_group_search.query().to_lowercase();
+        let filtered_groups: Vec<AppGroup> = self
+            .app_groups
+            .iter()
+            .filter(|g| {
+                g.display_name.to_lowercase().contains(&query)
+                    || g.processes.iter().any(|p| {
+                        p.name.to_lowercase().contains(&query)
+                            || p.pid.to_string().contains(self.app_group_search.query())
+                    })
+            })
+            .cloned()
+            .collect();
+        let mut expanded = None;
+        if let Some(exp_idx) = self.app_group_expanded {
+            let mut count = 0;
+            for (i, g) in self.app_groups.iter().enumerate() {
+                if g.display_name.to_lowercase().contains(&query)
+                    || g.processes.iter().any(|p| {
+                        p.name.to_lowercase().contains(&query)
+                            || p.pid.to_string().contains(self.app_group_search.query())
+                    })
+                {
+                    if i == exp_idx {
+                        expanded = Some(count);
+                        break;
+                    }
+                    count += 1;
+                }
+            }
+        }
+        build_visual_items(&filtered_groups, expanded)
+    }
+
+    pub fn app_group_sort_groups(&mut self) {
+        let sort = self.app_group_sort;
+        self.app_groups.sort_by(|a, b| match sort {
+            AppGroupSortField::Cpu => b
+                .total_cpu
+                .partial_cmp(&a.total_cpu)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            AppGroupSortField::Memory => b.total_memory.cmp(&a.total_memory),
+            AppGroupSortField::ProcessCount => b.processes.len().cmp(&a.processes.len()),
+        });
+    }
+
+    // --- List view actions ---
+
+    pub fn move_cursor(&mut self, delta: i32, cached_sorted: &[(usize, classify::ProcessClass)]) {
+        let total = cached_sorted.len();
+        if total == 0 {
+            return;
+        }
+        let new = self.cursor_index as i32 + delta;
+        self.cursor_index = if new < 0 {
+            total - 1
+        } else if new as usize >= total {
+            0
+        } else {
+            new as usize
+        };
+        self.clamp_scroll(PAGE_SIZE);
+    }
+
+    fn toggle_select(
+        &mut self,
+        cached_sorted: &[(usize, classify::ProcessClass)],
+        cached_processes: &[ProcessInfo],
+    ) {
+        if let Some((idx, _)) = cached_sorted.get(self.cursor_index) {
+            let pid = cached_processes[*idx].pid;
+            if self.selected_pids.contains(&pid) {
+                self.selected_pids.remove(&pid);
+            } else {
+                self.selected_pids.insert(pid);
+            }
+        }
+    }
+
+    fn select_all(
+        &mut self,
+        cached_sorted: &[(usize, classify::ProcessClass)],
+        cached_processes: &[ProcessInfo],
+    ) {
+        for (idx, _) in cached_sorted {
+            self.selected_pids.insert(cached_processes[*idx].pid);
+        }
+    }
+
+    fn deselect_all(&mut self) {
+        self.selected_pids.clear();
+    }
+
+    fn page_up(&mut self) {
+        self.cursor_index = self.cursor_index.saturating_sub(PAGE_SIZE);
+        self.clamp_scroll(PAGE_SIZE);
+    }
+
+    fn page_down(&mut self, cached_sorted: &[(usize, classify::ProcessClass)]) {
+        let total = cached_sorted.len();
+        self.cursor_index = (self.cursor_index + PAGE_SIZE).min(total.saturating_sub(1));
+        self.clamp_scroll(PAGE_SIZE);
+    }
+
+    fn clamp_scroll(&mut self, page_size: usize) {
+        if self.cursor_index < self.scroll_offset {
+            self.scroll_offset = self.cursor_index;
+        } else if self.cursor_index >= self.scroll_offset + page_size {
+            self.scroll_offset = self.cursor_index - page_size + 1;
+        }
+    }
+
+    fn enter_detail(
+        &self,
+        cached_sorted: &[(usize, classify::ProcessClass)],
+        cached_processes: &[ProcessInfo],
+    ) -> Option<ProcessInfo> {
+        let (idx, _) = cached_sorted.get(self.cursor_index)?;
+        Some(cached_processes[*idx].clone())
+    }
+
+    fn initiate_kill(
+        &mut self,
+        cached_sorted: &[(usize, classify::ProcessClass)],
+        cached_processes: &[ProcessInfo],
+        force: bool,
+    ) -> Option<KillRequest> {
+        let pids: Vec<u32> = if self.selected_pids.is_empty() {
+            cached_sorted
+                .get(self.cursor_index)
+                .map(|(idx, _)| cached_processes[*idx].pid)
+                .into_iter()
+                .collect()
+        } else {
+            self.selected_pids.iter().copied().collect()
+        };
+        if pids.is_empty() {
+            return None;
+        }
+        Some(KillRequest { pids, force })
+    }
+
+    // --- Tree view actions ---
+
+    pub fn get_filtered_tree_visible(&self) -> Vec<TreeNode> {
+        let filtered = tree::filter_tree(&self.tree_nodes, self.tree_filter);
+        let visible = tree::flatten_visible(&filtered);
+        if self.tree_search.query().is_empty() {
+            visible.into_iter().cloned().collect()
+        } else {
+            let query_lower = self.tree_search.query().to_lowercase();
+            visible
+                .into_iter()
+                .filter(|n| {
+                    n.name.to_lowercase().contains(&query_lower)
+                        || n.pid.to_string().contains(self.tree_search.query())
+                })
+                .cloned()
+                .collect()
+        }
+    }
+
+    pub fn tree_move_cursor(&mut self, delta: i32) {
+        let visible = self.get_filtered_tree_visible();
+        let total = visible.len();
+        if total == 0 {
+            return;
+        }
+        let new = self.tree_cursor as i32 + delta;
+        self.tree_cursor = if new < 0 {
+            total - 1
+        } else if new as usize >= total {
+            0
+        } else {
+            new as usize
+        };
+        self.tree_clamp_scroll(PAGE_SIZE);
+    }
+
+    fn tree_toggle_expand(&mut self) {
+        let pid = {
+            let filtered = tree::filter_tree(&self.tree_nodes, self.tree_filter);
+            let visible = tree::flatten_visible(&filtered);
+            visible.get(self.tree_cursor).map(|n| n.pid)
+        };
+        if let Some(pid) = pid {
+            tree::toggle_node_by_pid(&mut self.tree_nodes, pid);
+        }
+    }
+
+    fn tree_toggle_select(&mut self) {
+        let visible = self.get_filtered_tree_visible();
+        if let Some(node) = visible.get(self.tree_cursor) {
+            let pid = node.pid;
+            if self.tree_selected_pids.contains(&pid) {
+                self.tree_selected_pids.remove(&pid);
+            } else {
+                self.tree_selected_pids.insert(pid);
+            }
+        }
+    }
+
+    fn tree_select_all(&mut self) {
+        let visible = self.get_filtered_tree_visible();
+        for node in &visible {
+            self.tree_selected_pids.insert(node.pid);
+        }
+    }
+
+    fn tree_deselect_all(&mut self) {
+        self.tree_selected_pids.clear();
+    }
+
+    fn tree_initiate_kill(&mut self, force: bool) -> Option<KillRequest> {
+        let pids: Vec<u32> = if self.tree_selected_pids.is_empty() {
+            self.get_filtered_tree_visible()
+                .get(self.tree_cursor)
+                .map(|n| n.pid)
+                .into_iter()
+                .collect()
+        } else {
+            self.tree_selected_pids.iter().copied().collect()
+        };
+        if pids.is_empty() {
+            return None;
+        }
+        Some(KillRequest { pids, force })
+    }
+
+    fn tree_select_orphans(&mut self) -> Option<String> {
+        let visible = self.get_filtered_tree_visible();
+        let orphan_pids: Vec<u32> = visible
+            .iter()
+            .filter(|n| n.is_orphan)
+            .map(|n| n.pid)
+            .collect();
+        if orphan_pids.is_empty() {
+            return Some("无孤儿进程".to_string());
+        }
+        self.tree_selected_pids = orphan_pids.into_iter().collect();
+        let total_mem: u64 = visible
+            .iter()
+            .filter(|n| n.is_orphan && self.tree_selected_pids.contains(&n.pid))
+            .map(|n| n.memory)
+            .sum();
+        let safe_count = visible
+            .iter()
+            .filter(|n| {
+                n.is_orphan && n.children.is_empty() && self.tree_selected_pids.contains(&n.pid)
+            })
+            .count();
+        Some(format!(
+            "{}个孤儿 | 可直接杀:{} | 共{} | Space取消 | k终止",
+            self.tree_selected_pids.len(),
+            safe_count,
+            crate::format::format_bytes(total_mem)
+        ))
+    }
+
+    fn tree_select_stale(&mut self) -> Option<String> {
+        let visible = self.get_filtered_tree_visible();
+        let stale_pids: Vec<u32> = visible
+            .iter()
+            .filter(|n| n.is_zombie || n.is_stale)
+            .map(|n| n.pid)
+            .collect();
+        if stale_pids.is_empty() {
+            return Some("无僵尸/残存进程".to_string());
+        }
+        self.tree_selected_pids = stale_pids.into_iter().collect();
+        let total_mem: u64 = visible
+            .iter()
+            .filter(|n| (n.is_zombie || n.is_stale) && self.tree_selected_pids.contains(&n.pid))
+            .map(|n| n.memory)
+            .sum();
+        let safe_count = visible
+            .iter()
+            .filter(|n| {
+                (n.is_zombie || n.is_stale)
+                    && n.children.is_empty()
+                    && self.tree_selected_pids.contains(&n.pid)
+            })
+            .count();
+        Some(format!(
+            "{}个残存 | 可直接杀:{} | 共{} | Space取消 | k终止",
+            self.tree_selected_pids.len(),
+            safe_count,
+            crate::format::format_bytes(total_mem)
+        ))
+    }
+
+    fn tree_cycle_filter(&mut self) {
+        self.tree_filter = match self.tree_filter {
+            TreeFilter::All => TreeFilter::MyProcesses,
+            TreeFilter::MyProcesses => TreeFilter::SystemProcesses,
+            TreeFilter::SystemProcesses => TreeFilter::All,
+        };
+        self.tree_cursor = 0;
+        self.tree_scroll = 0;
+    }
+
+    fn tree_clamp_scroll(&mut self, page_size: usize) {
+        if self.tree_cursor < self.tree_scroll {
+            self.tree_scroll = self.tree_cursor;
+        } else if self.tree_cursor >= self.tree_scroll + page_size {
+            self.tree_scroll = self.tree_cursor - page_size + 1;
+        }
+    }
+
+    // --- AppGroup view actions ---
+
+    pub fn app_group_move_cursor(&mut self, delta: i32) {
+        let items = self.app_group_filtered_visual_items();
+        let total = items.len();
+        if total == 0 {
+            return;
+        }
+        let new = self.app_group_cursor as i32 + delta;
+        self.app_group_cursor = if new < 0 {
+            total - 1
+        } else if new as usize >= total {
+            0
+        } else {
+            new as usize
+        };
+        self.app_group_clamp_scroll(PAGE_SIZE);
+    }
+
+    fn app_group_toggle_expand(&mut self) {
+        let items = self.app_group_filtered_visual_items();
+        if let Some(item) = items.get(self.app_group_cursor) {
+            match *item {
+                AppGroupItem::Header { group_idx } | AppGroupItem::Child { group_idx, .. } => {
+                    self.app_group_expanded = if self.app_group_expanded == Some(group_idx) {
+                        None
+                    } else {
+                        Some(group_idx)
+                    };
+                }
+            }
+        }
+    }
+
+    fn app_group_toggle_select(&mut self) {
+        let items = self.app_group_filtered_visual_items();
+        if let Some(item) = items.get(self.app_group_cursor) {
+            let pid = match *item {
+                AppGroupItem::Header { .. } => return,
+                AppGroupItem::Child {
+                    group_idx,
+                    child_idx,
+                } => self
+                    .app_groups
+                    .get(group_idx)
+                    .and_then(|g| g.processes.get(child_idx))
+                    .map(|p| p.pid),
+            };
+            if let Some(pid) = pid {
+                if self.selected_pids.contains(&pid) {
+                    self.selected_pids.remove(&pid);
+                } else {
+                    self.selected_pids.insert(pid);
+                }
+            }
+        }
+    }
+
+    fn app_group_initiate_kill(&mut self, force: bool) -> Option<KillRequest> {
+        let items = self.app_group_filtered_visual_items();
+        let mut pids: Vec<u32> = Vec::new();
+        if !self.selected_pids.is_empty() {
+            for group in &self.app_groups {
+                for proc in &group.processes {
+                    if self.selected_pids.contains(&proc.pid) {
+                        pids.push(proc.pid);
+                    }
+                }
+            }
+        }
+        if pids.is_empty()
+            && let Some(item) = items.get(self.app_group_cursor)
+        {
+            match *item {
+                AppGroupItem::Header { group_idx } => {
+                    if let Some(group) = self.app_groups.get(group_idx) {
+                        pids = group.processes.iter().map(|p| p.pid).collect();
+                    }
+                }
+                AppGroupItem::Child {
+                    group_idx,
+                    child_idx,
+                } => {
+                    if let Some(group) = self.app_groups.get(group_idx)
+                        && let Some(proc) = group.processes.get(child_idx)
+                    {
+                        pids.push(proc.pid);
+                    }
+                }
+            }
+        }
+        if pids.is_empty() {
+            return None;
+        }
+        Some(KillRequest { pids, force })
+    }
+
+    fn app_group_clamp_scroll(&mut self, page_size: usize) {
+        if self.app_group_cursor < self.app_group_scroll {
+            self.app_group_scroll = self.app_group_cursor;
+        } else if self.app_group_cursor >= self.app_group_scroll + page_size {
+            self.app_group_scroll = self.app_group_cursor - page_size + 1;
+        }
+    }
+
+    fn toggle_view_mode(&mut self, cached_processes: &[ProcessInfo]) -> String {
+        self.process_view_mode = self.process_view_mode.toggle();
+        self.cursor_index = 0;
+        self.scroll_offset = 0;
+        self.tree_cursor = 0;
+        self.tree_scroll = 0;
+        self.app_group_cursor = 0;
+        self.app_group_scroll = 0;
+        self.app_group_expanded = None;
+        let label = self.process_view_mode.label().to_string();
+        if self.process_view_mode == ProcessViewMode::AppGroup {
+            self.app_groups =
+                app_group::compute_groups(cached_processes, &mut self.version_info_cache);
+        }
+        label
+    }
+
+    // --- Key handlers by view mode ---
+
+    fn handle_list_key(&mut self, key: KeyEvent, ctx: &mut PanelContext) -> KeyResult {
+        match key.code {
+            KeyCode::Char('q') => return KeyResult::Quit,
+            KeyCode::Up => self.move_cursor(-1, ctx.cached_sorted),
+            KeyCode::Down => self.move_cursor(1, ctx.cached_sorted),
+            KeyCode::Left => {
+                self.sort_field = self.sort_field.prev();
+                crate::ui_state::save_sort_field(self.sort_field);
+                self.cursor_index = 0;
+                self.scroll_offset = 0;
+                *ctx.data_dirty = true;
+            }
+            KeyCode::Right => {
+                self.sort_field = self.sort_field.next();
+                crate::ui_state::save_sort_field(self.sort_field);
+                self.cursor_index = 0;
+                self.scroll_offset = 0;
+                *ctx.data_dirty = true;
+            }
+            KeyCode::Char(' ') => self.toggle_select(ctx.cached_sorted, ctx.cached_processes),
+            KeyCode::Char('a') => self.select_all(ctx.cached_sorted, ctx.cached_processes),
+            KeyCode::Char('A') => self.deselect_all(),
+            KeyCode::Char('/') => {
+                self.search.active = true;
+            }
+            KeyCode::Enter => {
+                if let Some(proc) = self.enter_detail(ctx.cached_sorted, ctx.cached_processes) {
+                    *ctx.detail_process = Some(proc);
+                    return KeyResult::SwitchMode(AppMode::ProcessDetail);
+                }
+            }
+            KeyCode::Char('k') => {
+                if let Some(req) =
+                    self.initiate_kill(ctx.cached_sorted, ctx.cached_processes, false)
+                {
+                    *ctx.pending_kill = Some(req);
+                    return KeyResult::Consumed; // App will set kill_confirm
+                }
+            }
+            KeyCode::Char('K') => {
+                if let Some(req) = self.initiate_kill(ctx.cached_sorted, ctx.cached_processes, true)
+                {
+                    *ctx.pending_kill = Some(req);
+                    return KeyResult::Consumed;
+                }
+            }
+            KeyCode::Char('S') => {
+                self.sort_field = SortField::Security;
+                crate::ui_state::save_sort_field(self.sort_field);
+                self.cursor_index = 0;
+                self.scroll_offset = 0;
+                *ctx.data_dirty = true;
+            }
+            KeyCode::Char('v') => {
+                let label = self.toggle_view_mode(ctx.cached_processes);
+                *ctx.status_message = Some(format!("视图: {}", label));
+            }
+            KeyCode::PageUp => self.page_up(),
+            KeyCode::PageDown => self.page_down(ctx.cached_sorted),
+            KeyCode::Esc => {
+                self.search.clear();
+                *ctx.status_message = None;
+            }
+            _ => return KeyResult::Ignored,
+        }
+        KeyResult::Consumed
+    }
+
+    fn handle_tree_key(&mut self, key: KeyEvent, ctx: &mut PanelContext) -> KeyResult {
+        match key.code {
+            KeyCode::Char('q') => return KeyResult::Quit,
+            KeyCode::Up => self.tree_move_cursor(-1),
+            KeyCode::Down => self.tree_move_cursor(1),
+            KeyCode::Enter => self.tree_toggle_expand(),
+            KeyCode::Left => {
+                self.tree_sort_field = self.tree_sort_field.prev();
+                tree::sort_siblings(&mut self.tree_nodes, self.tree_sort_field);
+                *ctx.status_message = Some(format!("排序: {}", self.tree_sort_field.label()));
+            }
+            KeyCode::Right => {
+                self.tree_sort_field = self.tree_sort_field.next();
+                tree::sort_siblings(&mut self.tree_nodes, self.tree_sort_field);
+                *ctx.status_message = Some(format!("排序: {}", self.tree_sort_field.label()));
+            }
+            KeyCode::Char('/') => {
+                self.tree_search.active = true;
+            }
+            KeyCode::Char(' ') => self.tree_toggle_select(),
+            KeyCode::Char('a') => self.tree_select_all(),
+            KeyCode::Char('A') => self.tree_deselect_all(),
+            KeyCode::Char('k') => {
+                if let Some(req) = self.tree_initiate_kill(false) {
+                    *ctx.pending_kill = Some(req);
+                    return KeyResult::Consumed;
+                }
+            }
+            KeyCode::Char('K') => {
+                if let Some(req) = self.tree_initiate_kill(true) {
+                    *ctx.pending_kill = Some(req);
+                    return KeyResult::Consumed;
+                }
+            }
+            KeyCode::Char('o') => {
+                if let Some(msg) = self.tree_select_orphans() {
+                    *ctx.status_message = Some(msg);
+                }
+            }
+            KeyCode::Char('z') => {
+                if let Some(msg) = self.tree_select_stale() {
+                    *ctx.status_message = Some(msg);
+                }
+            }
+            KeyCode::Char('f') => self.tree_cycle_filter(),
+            KeyCode::Esc => {
+                self.tree_search.clear();
+                *ctx.status_message = None;
+            }
+            KeyCode::Char('v') => {
+                let label = self.toggle_view_mode(ctx.cached_processes);
+                *ctx.status_message = Some(format!("视图: {}", label));
+            }
+            KeyCode::PageUp => {
+                self.tree_cursor = self.tree_cursor.saturating_sub(PAGE_SIZE);
+                self.tree_clamp_scroll(PAGE_SIZE);
+            }
+            KeyCode::PageDown => {
+                let visible = self.get_filtered_tree_visible();
+                let total = visible.len();
+                self.tree_cursor = (self.tree_cursor + PAGE_SIZE).min(total.saturating_sub(1));
+                self.tree_clamp_scroll(PAGE_SIZE);
+            }
+            _ => return KeyResult::Ignored,
+        }
+        KeyResult::Consumed
+    }
+
+    fn handle_app_group_key(&mut self, key: KeyEvent, ctx: &mut PanelContext) -> KeyResult {
+        match key.code {
+            KeyCode::Char('q') => return KeyResult::Quit,
+            KeyCode::Up => self.app_group_move_cursor(-1),
+            KeyCode::Down => self.app_group_move_cursor(1),
+            KeyCode::Enter => self.app_group_toggle_expand(),
+            KeyCode::Char(' ') => self.app_group_toggle_select(),
+            KeyCode::Char('/') => {
+                self.app_group_search.active = true;
+            }
+            KeyCode::Char('k') => {
+                if let Some(req) = self.app_group_initiate_kill(false) {
+                    *ctx.pending_kill = Some(req);
+                    return KeyResult::Consumed;
+                }
+            }
+            KeyCode::Char('K') => {
+                if let Some(req) = self.app_group_initiate_kill(true) {
+                    *ctx.pending_kill = Some(req);
+                    return KeyResult::Consumed;
+                }
+            }
+            KeyCode::Char('S') => {
+                self.app_group_sort = self.app_group_sort.next();
+                self.app_group_sort_groups();
+                *ctx.status_message = Some(format!("排序: {}", self.app_group_sort.label()));
+            }
+            KeyCode::Char('v') => {
+                let label = self.toggle_view_mode(ctx.cached_processes);
+                *ctx.status_message = Some(format!("视图: {}", label));
+            }
+            KeyCode::PageUp => {
+                self.app_group_cursor = self.app_group_cursor.saturating_sub(PAGE_SIZE);
+                self.app_group_clamp_scroll(PAGE_SIZE);
+            }
+            KeyCode::PageDown => {
+                let items = self.app_group_filtered_visual_items();
+                let total = items.len();
+                self.app_group_cursor =
+                    (self.app_group_cursor + PAGE_SIZE).min(total.saturating_sub(1));
+                self.app_group_clamp_scroll(PAGE_SIZE);
+            }
+            KeyCode::Esc => {
+                self.app_group_search.clear();
+                *ctx.status_message = None;
+            }
+            _ => return KeyResult::Ignored,
+        }
+        KeyResult::Consumed
+    }
+
+    pub fn refresh_tree(&mut self, processes: &[ProcessInfo], total_mem: u64) {
+        let expanded_pids = tree::collect_expanded_pids(&self.tree_nodes);
+        self.tree_nodes = tree::build_process_tree(processes, total_mem);
+        tree::restore_expanded_pids(&mut self.tree_nodes, &expanded_pids);
+        tree::sort_siblings(&mut self.tree_nodes, self.tree_sort_field);
+    }
+
+    pub fn rebuild_app_groups(&mut self, processes: &[ProcessInfo]) {
+        let prev_expanded = self.app_group_expanded;
+        self.app_groups = app_group::compute_groups(processes, &mut self.version_info_cache);
+        // Evict stale cache entries
+        if self.version_info_cache.len() > 200 {
+            let active_exes: HashSet<String> =
+                processes.iter().filter_map(|p| p.exe.clone()).collect();
+            self.version_info_cache
+                .retain(|k, _| active_exes.contains(k));
+        }
+        self.app_group_sort_groups();
+        if prev_expanded.is_some() && prev_expanded.unwrap() >= self.app_groups.len() {
+            self.app_group_expanded = None;
+        } else {
+            self.app_group_expanded = prev_expanded;
+        }
+    }
+
+    /// Format port info for a PID (used when entering detail view).
+    pub fn format_port_info(pid: u32) -> String {
+        match port_map::find_ports_by_pid(pid) {
+            Ok(ports) if ports.is_empty() => "无".to_string(),
+            Ok(ports) => ports
+                .iter()
+                .map(|p| format!("{}:{} ({})", p.local_addr, p.local_port, p.protocol))
+                .collect::<Vec<_>>()
+                .join(", "),
+            Err(_) => "扫描失败".to_string(),
+        }
+    }
+}
+
+impl Panel for ProcessPanel {
+    fn handle_key(&mut self, key: KeyEvent, ctx: &mut PanelContext) -> KeyResult {
+        // Handle search for current view mode
+        match self.process_view_mode {
+            ProcessViewMode::List => {
+                if self.search.is_active() {
+                    if self.search.handle_input(key) {
+                        self.cursor_index = 0;
+                        self.scroll_offset = 0;
+                        if !self.search.is_active() || self.search.query().len() <= 1 {
+                            *ctx.data_dirty = true;
+                        }
+                    }
+                    return KeyResult::Consumed;
+                }
+            }
+            ProcessViewMode::Tree => {
+                if self.tree_search.is_active() {
+                    if self.tree_search.handle_input(key) {
+                        self.tree_cursor = 0;
+                        self.tree_scroll = 0;
+                    }
+                    return KeyResult::Consumed;
+                }
+            }
+            ProcessViewMode::AppGroup => {
+                if self.app_group_search.is_active() {
+                    if self.app_group_search.handle_input(key) {
+                        self.app_group_cursor = 0;
+                        self.app_group_scroll = 0;
+                    }
+                    return KeyResult::Consumed;
+                }
+            }
+        }
+
+        match self.process_view_mode {
+            ProcessViewMode::Tree => self.handle_tree_key(key, ctx),
+            ProcessViewMode::AppGroup => self.handle_app_group_key(key, ctx),
+            ProcessViewMode::List => self.handle_list_key(key, ctx),
+        }
+    }
+
+    fn tick(&mut self, ctx: &mut PanelContext) -> bool {
+        let mut needs_draw = false;
+        if self.process_view_mode == ProcessViewMode::Tree {
+            self.refresh_tree(ctx.cached_processes, ctx.snapshot.memory_usage().1);
+            needs_draw = true;
+        } else if self.process_view_mode == ProcessViewMode::AppGroup {
+            self.rebuild_app_groups(ctx.cached_processes);
+            needs_draw = true;
+        }
+
+        // Clamp cursor for list view
+        let total = ctx.cached_sorted.len();
+        if self.cursor_index >= total && total > 0 {
+            self.cursor_index = total - 1;
+        }
+
+        needs_draw
+    }
+
+    fn cursor(&self) -> usize {
+        match self.process_view_mode {
+            ProcessViewMode::List => self.cursor_index,
+            ProcessViewMode::Tree => self.tree_cursor,
+            ProcessViewMode::AppGroup => self.app_group_cursor,
+        }
+    }
+
+    fn scroll(&self) -> usize {
+        match self.process_view_mode {
+            ProcessViewMode::List => self.scroll_offset,
+            ProcessViewMode::Tree => self.tree_scroll,
+            ProcessViewMode::AppGroup => self.app_group_scroll,
+        }
+    }
+}

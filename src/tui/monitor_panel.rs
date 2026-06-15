@@ -17,13 +17,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     draw_monitor_list(f, chunks[0], app);
     draw_notifications(f, chunks[1], app);
 
-    if let Some(ref submenu) = app.monitor_add_submenu {
+    if let Some(ref submenu) = app.monitor_panel.add_submenu {
         draw_add_submenu(f, area, submenu);
     }
 }
 
 fn draw_monitor_list(f: &mut Frame, area: Rect, app: &App) {
-    let monitors = app.monitor_manager.list_monitors();
+    let monitors = app.monitor_panel.manager.list_monitors();
 
     let items: Vec<ListItem> = if monitors.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
@@ -35,7 +35,7 @@ fn draw_monitor_list(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                let selected = i == app.monitor_cursor;
+                let selected = i == app.monitor_panel.cursor;
                 let bg = if selected {
                     theme::accent()
                 } else {
@@ -80,11 +80,20 @@ fn draw_monitor_list(f: &mut Frame, area: Rect, app: &App) {
                     Span::styled(format!(" {:>3} ", type_icon), theme::style_info()),
                     Span::styled(format!(" {:<20}", target_desc), Style::default().bg(bg)),
                     Span::styled(
-                        format!(" {:>6} ", entry.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string())),
+                        format!(
+                            " {:>6} ",
+                            entry
+                                .pid
+                                .map(|p| p.to_string())
+                                .unwrap_or_else(|| "-".to_string())
+                        ),
                         Style::default().bg(bg),
                     ),
                     Span::styled(format!(" {:>6} ", entry.status.to_string()), status_style),
-                    Span::styled(format!(" {:>3} ", entry.crash_count), Style::default().bg(bg)),
+                    Span::styled(
+                        format!(" {:>3} ", entry.crash_count),
+                        Style::default().bg(bg),
+                    ),
                     Span::styled(format!(" {}", policy_str), theme::style_muted()),
                 ]);
 
@@ -93,24 +102,22 @@ fn draw_monitor_list(f: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::BOTTOM)
-            .title(Line::from(vec![
-                Span::styled(" 监控面板 ", theme::style_header()),
-                Span::styled(" a:添加 d:删除 r:重启 s:暂停 ", theme::style_muted()),
-            ])),
-    );
+    let list = List::new(items).block(Block::default().borders(Borders::BOTTOM).title(Line::from(
+        vec![
+            Span::styled(" 监控面板 ", theme::style_header()),
+            Span::styled(" a:添加 d:删除 r:重启 s:暂停 ", theme::style_muted()),
+        ],
+    )));
 
     let mut state = ListState::default();
     if !monitors.is_empty() {
-        state.select(Some(app.monitor_cursor.min(monitors.len() - 1)));
+        state.select(Some(app.monitor_panel.cursor.min(monitors.len() - 1)));
     }
     f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_notifications(f: &mut Frame, area: Rect, app: &App) {
-    let notifications = app.monitor_manager.notifications();
+    let notifications = app.monitor_panel.manager.notifications();
 
     let items: Vec<ListItem> = if notifications.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
@@ -137,11 +144,9 @@ fn draw_notifications(f: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::TOP)
-            .title(Line::from(Span::styled(" 通知记录 ", theme::style_header()))),
-    );
+    let list = List::new(items).block(Block::default().borders(Borders::TOP).title(Line::from(
+        Span::styled(" 通知记录 ", theme::style_header()),
+    )));
 
     f.render_widget(list, area);
 }
@@ -153,7 +158,10 @@ fn draw_add_submenu(f: &mut Frame, area: Rect, submenu: &crate::app::MonitorAddS
     let content = match submenu {
         crate::app::MonitorAddSubmenu::SelectType => {
             vec![
-                Line::from(Span::styled("添加监控", Style::default().add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(
+                    "添加监控",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
                 Line::from(""),
                 Line::from("  1 — 按 PID 监控"),
                 Line::from("  2 — 按端口监控"),
@@ -164,38 +172,65 @@ fn draw_add_submenu(f: &mut Frame, area: Rect, submenu: &crate::app::MonitorAddS
         }
         crate::app::MonitorAddSubmenu::EnterPid { input } => {
             vec![
-                Line::from(Span::styled("按 PID 监控", Style::default().add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(
+                    "按 PID 监控",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
                 Line::from(""),
                 Line::from(format!("  PID: {}", input)),
                 Line::from(""),
-                Line::from(Span::styled("  Enter 确认 | Esc 取消", theme::style_muted())),
+                Line::from(Span::styled(
+                    "  Enter 确认 | Esc 取消",
+                    theme::style_muted(),
+                )),
             ]
         }
         crate::app::MonitorAddSubmenu::EnterPort { input } => {
             vec![
-                Line::from(Span::styled("按端口监控", Style::default().add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(
+                    "按端口监控",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
                 Line::from(""),
                 Line::from(format!("  端口号: {}", input)),
                 Line::from(""),
-                Line::from(Span::styled("  Enter 确认 | Esc 取消", theme::style_muted())),
+                Line::from(Span::styled(
+                    "  Enter 确认 | Esc 取消",
+                    theme::style_muted(),
+                )),
             ]
         }
-        crate::app::MonitorAddSubmenu::EnterCommand { cmd_input, args_input, cwd_input, retries_input } => {
+        crate::app::MonitorAddSubmenu::EnterCommand {
+            cmd_input,
+            args_input,
+            cwd_input,
+            retries_input,
+        } => {
             vec![
-                Line::from(Span::styled("按命令监控（自动重启）", Style::default().add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(
+                    "按命令监控（自动重启）",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
                 Line::from(""),
                 Line::from(format!("  命令: {}", cmd_input)),
                 Line::from(format!("  参数: {}", args_input)),
                 Line::from(format!("  工作目录: {}", cwd_input)),
                 Line::from(format!("  最大重试: {}", retries_input)),
                 Line::from(""),
-                Line::from(Span::styled("  Enter 确认 | Esc 取消", theme::style_muted())),
+                Line::from(Span::styled(
+                    "  Enter 确认 | Esc 取消",
+                    theme::style_muted(),
+                )),
             ]
         }
     };
 
     let paragraph = Paragraph::new(content)
-        .block(Block::default().borders(Borders::ALL).style(theme::style_normal()))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .style(theme::style_normal()),
+        )
         .wrap(Wrap { trim: true });
 
     f.render_widget(paragraph, popup_area);

@@ -1,5 +1,5 @@
-use ratatui::text::Span;
 use ratatui::style::{Color, Style};
+use ratatui::text::Span;
 
 use crate::app::App;
 use crate::security::SecurityScore;

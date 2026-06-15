@@ -6,8 +6,8 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use crate::app::App;
 use crate::classify;
 use crate::port_map;
-use crate::tui::theme;
 use crate::tui::security_badge;
+use crate::tui::theme;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let proc = match &app.detail_process {
@@ -35,19 +35,61 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             theme::style_normal(),
         )),
         Line::from(Span::raw("")),
-        Line::from(Span::styled(format!("  分类:     {}", class.label()), theme::style_normal())),
-        Line::from(Span::styled(format!("  父进程:   {}", proc.parent_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string())), theme::style_normal())),
-        Line::from(Span::styled(format!("  状态:     {}", proc.status), theme::style_normal())),
-        Line::from(Span::styled(format!("  CPU:      {:.1}%", proc.cpu_usage), theme::style_normal())),
-        Line::from(Span::styled(format!("  内存:     {} (物理) / {} (虚拟)", format_bytes(proc.memory), format_bytes(proc.virtual_memory)), theme::style_normal())),
-        Line::from(Span::styled(format!("  磁盘:     读 {} / 写 {}", disk_read, disk_write), theme::style_normal())),
-        Line::from(Span::styled(format!("  运行时长: {}h {}m {}s", hours, mins, secs), theme::style_normal())),
+        Line::from(Span::styled(
+            format!("  分类:     {}", class.label()),
+            theme::style_normal(),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "  父进程:   {}",
+                proc.parent_pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            theme::style_normal(),
+        )),
+        Line::from(Span::styled(
+            format!("  状态:     {}", proc.status),
+            theme::style_normal(),
+        )),
+        Line::from(Span::styled(
+            format!("  CPU:      {:.1}%", proc.cpu_usage),
+            theme::style_normal(),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "  内存:     {} (物理) / {} (虚拟)",
+                format_bytes(proc.memory),
+                format_bytes(proc.virtual_memory)
+            ),
+            theme::style_normal(),
+        )),
+        Line::from(Span::styled(
+            format!("  磁盘:     读 {} / 写 {}", disk_read, disk_write),
+            theme::style_normal(),
+        )),
+        Line::from(Span::styled(
+            format!("  运行时长: {}h {}m {}s", hours, mins, secs),
+            theme::style_normal(),
+        )),
         Line::from(Span::raw("")),
-        Line::from(Span::styled(format!("  可执行:   {}", proc.exe.as_deref().unwrap_or("-")), theme::style_normal())),
-        Line::from(Span::styled(format!("  命令行:   {}", proc.cmd.join(" ")), theme::style_normal())),
-        Line::from(Span::styled(format!("  工作目录: {}", proc.cwd.as_deref().unwrap_or("-")), theme::style_normal())),
+        Line::from(Span::styled(
+            format!("  可执行:   {}", proc.exe.as_deref().unwrap_or("-")),
+            theme::style_normal(),
+        )),
+        Line::from(Span::styled(
+            format!("  命令行:   {}", proc.cmd.join(" ")),
+            theme::style_normal(),
+        )),
+        Line::from(Span::styled(
+            format!("  工作目录: {}", proc.cwd.as_deref().unwrap_or("-")),
+            theme::style_normal(),
+        )),
         Line::from(Span::raw("")),
-        Line::from(Span::styled(format!("  占用端口: {}", app.detail_port_info), theme::style_normal())),
+        Line::from(Span::styled(
+            format!("  占用端口: {}", app.detail_port_info),
+            theme::style_normal(),
+        )),
     ];
 
     if net_summary.tcp_connections > 0 || net_summary.udp_connections > 0 {
@@ -62,11 +104,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         let cw = net_summary.close_wait;
         let base_net = format!(
             "  网络:     TCP {} (监听 {} / 建立 {} / CLOSE_WAIT ",
-            net_summary.tcp_connections,
-            net_summary.listening,
-            net_summary.established,
+            net_summary.tcp_connections, net_summary.listening, net_summary.established,
         );
-        let cw_str = format!("{}{} / TIME_WAIT {}{}  UDP {}",
+        let cw_str = format!(
+            "{}{} / TIME_WAIT {}{}  UDP {}",
             if cw >= 3 { "⚠ " } else { "" },
             cw,
             net_summary.time_wait,
@@ -86,13 +127,16 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     // Security analysis section
     if let Some(score) = app.security_scores.get(&proc.pid) {
         lines.push(Line::from(Span::raw("")));
-        lines.push(Line::from(Span::styled("  ── 安全分析 ──", theme::style_selected())));
+        lines.push(Line::from(Span::styled(
+            "  ── 安全分析 ──",
+            theme::style_selected(),
+        )));
 
         let score_style = security_badge::score_style(score.score);
         lines.push(Line::from(vec![
             Span::styled("  安全分:   ", theme::style_muted()),
             Span::styled(format!("{}", score.score), score_style),
-            Span::styled(format!(" / 100"), theme::style_muted()),
+            Span::styled(" / 100".to_string(), theme::style_muted()),
         ]));
 
         lines.push(Line::from(vec![
@@ -102,21 +146,36 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
         if !score.factors.is_empty() {
             lines.push(Line::from(Span::raw("")));
-            lines.push(Line::from(Span::styled("  风险因子:", theme::style_warning())));
+            lines.push(Line::from(Span::styled(
+                "  风险因子:",
+                theme::style_warning(),
+            )));
             for factor in &score.factors {
                 lines.push(Line::from(vec![
-                    Span::styled(format!("    • {} ", factor.description), theme::style_normal()),
+                    Span::styled(
+                        format!("    • {} ", factor.description),
+                        theme::style_normal(),
+                    ),
                     Span::styled(format!("(-{})", factor.weight), theme::style_danger()),
                 ]));
             }
         } else {
-            lines.push(Line::from(Span::styled("  无风险因子", theme::style_info())));
+            lines.push(Line::from(Span::styled(
+                "  无风险因子",
+                theme::style_info(),
+            )));
         }
     }
 
     lines.push(Line::from(Span::raw("")));
-    lines.push(Line::from(Span::styled("  ── 快捷键 ──".to_string(), theme::style_normal())));
-    lines.push(Line::from(Span::styled("  k=终止  w=添加监控  c=复制  Enter/Esc=返回".to_string(), theme::style_normal())));
+    lines.push(Line::from(Span::styled(
+        "  ── 快捷键 ──".to_string(),
+        theme::style_normal(),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  k=终止  w=添加监控  c=复制  Enter/Esc=返回".to_string(),
+        theme::style_normal(),
+    )));
 
     let block = Block::default()
         .borders(Borders::ALL)

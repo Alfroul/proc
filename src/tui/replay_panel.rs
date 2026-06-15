@@ -1,7 +1,7 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 
 use crate::app::{App, AppMode, ReplaySpeed};
 use crate::tui::theme;
@@ -28,16 +28,14 @@ pub fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     let [main_area, timeline_area] = ratatui::layout::Layout::vertical([
         ratatui::layout::Constraint::Min(0),
         ratatui::layout::Constraint::Length(timeline_height),
-    ]).areas(area);
+    ])
+    .areas(area);
 
     // Render the panel that was active when the frame was recorded
     let frame_mode = app.replay_frame_mode();
     match frame_mode {
-        AppMode::ProcessList | AppMode::Menu => {
+        AppMode::ProcessList => {
             crate::tui::process_table::draw(f, main_area, app);
-        }
-        AppMode::ProcessTree => {
-            crate::tui::process_tree::draw(f, main_area, app);
         }
         AppMode::PortMap => {
             crate::tui::port_table::draw(f, main_area, app);
@@ -67,7 +65,8 @@ pub fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     let [info_area, gauge_area] = ratatui::layout::Layout::vertical([
         ratatui::layout::Constraint::Length(1),
         ratatui::layout::Constraint::Length(1),
-    ]).areas(inner);
+    ])
+    .areas(inner);
 
     let icon = if ts.playing {
         "\u{25B6}" // ▶
@@ -83,7 +82,10 @@ pub fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let (start_ts, end_ts) = player.time_range();
-    let current_ts = player.frame_at(current).map(|f| f.timestamp).unwrap_or(start_ts);
+    let current_ts = player
+        .frame_at(current)
+        .map(|f| f.timestamp)
+        .unwrap_or(start_ts);
     let _start_str = format_timestamp(start_ts);
     let current_str = format_timestamp(current_ts);
     let end_str = format_timestamp(end_ts);
@@ -100,7 +102,10 @@ pub fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     let info_line = Line::from(vec![
         Span::styled(format!(" {} ", icon), theme::style_selected()),
         Span::styled(format!("{} ", speed_label), theme::style_muted()),
-        Span::styled(format!("{} / {} ", current_str, end_str), theme::style_normal()),
+        Span::styled(
+            format!("{} / {} ", current_str, end_str),
+            theme::style_normal(),
+        ),
         Span::styled(format!("({})", duration), theme::style_muted()),
         Span::styled(
             format!("  帧 {}/{}", current + 1, total),
@@ -124,8 +129,7 @@ pub fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
 
 fn mode_display_name(mode: &AppMode) -> &'static str {
     match mode {
-        AppMode::ProcessList | AppMode::Menu => "进程列表",
-        AppMode::ProcessTree => "进程树",
+        AppMode::ProcessList => "进程",
         AppMode::PortMap => "端口",
         AppMode::UsbAssistant => "U盘",
         AppMode::MonitorPanel => "监控",

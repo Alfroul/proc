@@ -26,9 +26,9 @@ pub fn detect_removable_devices() -> Result<Vec<RemovableDevice>> {
 
         // SAFETY: root_wide is a stack-allocated, null-terminated UTF-16 buffer. The pointer is valid for the duration of this call.
         let drive_type = unsafe {
-            windows::Win32::Storage::FileSystem::GetDriveTypeW(
-                windows::core::PCWSTR(root_wide.as_ptr()),
-            )
+            windows::Win32::Storage::FileSystem::GetDriveTypeW(windows::core::PCWSTR(
+                root_wide.as_ptr(),
+            ))
         };
 
         if drive_type != 2u32 {
@@ -49,7 +49,11 @@ pub fn detect_removable_devices() -> Result<Vec<RemovableDevice>> {
             )
         };
 
-        let total_size = if free_space_ok.is_ok() { total_bytes } else { 0 };
+        let total_size = if free_space_ok.is_ok() {
+            total_bytes
+        } else {
+            0
+        };
         let used_size = total_size.saturating_sub(free_bytes);
 
         let mut volume_name_buf = [0u16; 256];

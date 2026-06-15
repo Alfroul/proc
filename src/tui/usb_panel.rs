@@ -1,7 +1,9 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::widgets::{Block, Borders, Cell, HighlightSpacing, Row, Table, TableState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap,
+};
 
 use crate::app::App;
 use crate::eject::device::format_size;
@@ -18,10 +20,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_device_list(f: &mut Frame, area: Rect, app: &App) {
-    let devices = &app.usb_devices;
+    let devices = &app.usb_panel.devices;
 
     let rows: Vec<Row> = if devices.is_empty() {
-        vec![Row::new(vec![Cell::from("未检测到可移除设备").style(theme::style_muted())])]
+        vec![Row::new(vec![
+            Cell::from("未检测到可移除设备").style(theme::style_muted()),
+        ])]
     } else {
         devices
             .iter()
@@ -33,11 +37,11 @@ fn draw_device_list(f: &mut Frame, area: Rect, app: &App) {
                     format_size(dev.total_size)
                 );
                 let status = if dev.is_occupied {
-                    "⚠ 占用"
+                    "⚠ 有占用"
                 } else {
                     "✓ 可弹出"
                 };
-                let style = if i == app.usb_device_cursor {
+                let style = if i == app.usb_panel.device_cursor {
                     theme::style_selected()
                 } else if dev.is_occupied {
                     theme::style_warning()
@@ -57,7 +61,13 @@ fn draw_device_list(f: &mut Frame, area: Rect, app: &App) {
 
     let table = Table::new(
         rows,
-        [Constraint::Length(3), Constraint::Min(10), Constraint::Length(16), Constraint::Length(6), Constraint::Length(10)],
+        [
+            Constraint::Length(3),
+            Constraint::Min(10),
+            Constraint::Length(16),
+            Constraint::Length(6),
+            Constraint::Length(10),
+        ],
     )
     .header(
         Row::new(vec![
@@ -77,29 +87,36 @@ fn draw_device_list(f: &mut Frame, area: Rect, app: &App) {
     .highlight_spacing(HighlightSpacing::Always);
 
     let mut state = TableState::default();
-    if !devices.is_empty() && app.usb_device_cursor < devices.len() {
-        state.select(Some(app.usb_device_cursor));
+    if !devices.is_empty() && app.usb_panel.device_cursor < devices.len() {
+        state.select(Some(app.usb_panel.device_cursor));
     }
     f.render_stateful_widget(table, area, &mut state);
 }
 
 fn draw_lock_list(f: &mut Frame, area: Rect, app: &App) {
-    let title_suffix = if let Some(dev) = app.usb_devices.get(app.usb_device_cursor) {
+    let title_suffix = if let Some(dev) = app.usb_panel.devices.get(app.usb_panel.device_cursor) {
         format!(" 占用进程 - {}:", dev.drive_letter)
     } else {
         " 占用进程".to_string()
     };
 
-    let locks = &app.usb_locks;
+    let locks = &app.usb_panel.locks;
 
     if locks.is_empty() {
-        let msg = if app.usb_devices.is_empty() {
-            "请先选择一个可移除设备"
+        let has_occupied = app.usb_panel.devices.iter().any(|d| d.is_occupied);
+        let msg = if app.usb_panel.devices.is_empty() {
+            "未检测到可移除设备"
+        } else if has_occupied {
+            "按 Enter 查看占用进程详情，按 k 终止选中进程"
+        } else if app.usb_panel.status_message.is_some() {
+            app.usb_panel.status_message.as_deref().unwrap_or("")
         } else {
-            "✅ 无占用进程，可以安全弹出 U 盘了（请手动在系统托盘或文件管理器中弹出）"
+            "✅ 所有设备无占用进程，可以安全弹出"
         };
-        let style = if app.usb_devices.is_empty() {
+        let style = if app.usb_panel.devices.is_empty() {
             theme::style_muted()
+        } else if has_occupied {
+            theme::style_warning()
         } else {
             theme::style_success()
         };
@@ -120,7 +137,7 @@ fn draw_lock_list(f: &mut Frame, area: Rect, app: &App) {
                 lock.port_info.join(", ")
             };
             let style = Style::default().fg(risk.color());
-            let cursor_style = if i == app.usb_lock_cursor {
+            let cursor_style = if i == app.usb_panel.lock_cursor {
                 theme::style_selected()
             } else {
                 style
@@ -155,20 +172,16 @@ fn draw_lock_list(f: &mut Frame, area: Rect, app: &App) {
         ])
         .style(theme::style_header()),
     )
-    .block(
-        Block::default()
-            .borders(Borders::TOP)
-            .title(title_suffix),
-    )
+    .block(Block::default().borders(Borders::TOP).title(title_suffix))
     .highlight_spacing(HighlightSpacing::Always);
 
     let mut state = TableState::default();
-    if !locks.is_empty() && app.usb_lock_cursor < locks.len() {
-        state.select(Some(app.usb_lock_cursor));
+    if !locks.is_empty() && app.usb_panel.lock_cursor < locks.len() {
+        state.select(Some(app.usb_panel.lock_cursor));
     }
     f.render_stateful_widget(table, area, &mut state);
 
-    if let Some(ref msg) = app.usb_status_message {
+    if let Some(ref msg) = app.usb_panel.status_message {
         let popup = Paragraph::new(msg.as_str())
             .style(theme::style_success())
             .wrap(Wrap { trim: true });

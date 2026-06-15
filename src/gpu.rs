@@ -44,9 +44,9 @@ struct DxgiAdapter {
 #[cfg(target_os = "windows")]
 fn collect_dxgi_adapters() -> Vec<DxgiAdapter> {
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, IDXGIAdapter1, IDXGIAdapter3, IDXGIFactory6,
-        DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE,
-        DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
+        CreateDXGIFactory1, DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE,
+        DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO, IDXGIAdapter1,
+        IDXGIAdapter3, IDXGIFactory6,
     };
     use windows::core::Interface;
 
@@ -76,7 +76,12 @@ fn collect_dxgi_adapters() -> Vec<DxgiAdapter> {
         }
 
         let name = String::from_utf16_lossy(
-            &desc.Description.iter().take_while(|&&c| c != 0).copied().collect::<Vec<u16>>()
+            &desc
+                .Description
+                .iter()
+                .take_while(|&&c| c != 0)
+                .copied()
+                .collect::<Vec<u16>>(),
         );
         let vendor = GpuVendor::from_vendor_id(desc.VendorId);
         let vram_total = desc.DedicatedVideoMemory as u64;
@@ -156,7 +161,7 @@ impl NvmlState {
                 let vram_total = mem.as_ref().map(|m| m.total);
 
                 return Some(NvmlGpuInfo {
-                    utilization_pct: util as u32,
+                    utilization_pct: util,
                     temperature: temp.map(|t| t as f32),
                     power_watts: power,
                     vram_used,
@@ -200,7 +205,9 @@ impl PdhState {
             }
 
             let mut counter: isize = 0;
-            let path: Vec<u16> = "\\GPU Engine(*)\\Utilization Percentage\0".encode_utf16().collect();
+            let path: Vec<u16> = "\\GPU Engine(*)\\Utilization Percentage\0"
+                .encode_utf16()
+                .collect();
             if PdhAddCounterW(query, PCWSTR(path.as_ptr()), 0, &mut counter) != 0 {
                 let _ = PdhCloseQuery(query);
                 return None;
@@ -270,7 +277,7 @@ impl PdhState {
                 }
             }
 
-            Some(max_util.min(100.0).max(0.0) as u32)
+            Some(max_util.clamp(0.0, 100.0) as u32)
         }
     }
 }
@@ -303,6 +310,12 @@ pub struct GpuCollector {
     pdh: Option<PdhState>,
 }
 
+impl Default for GpuCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GpuCollector {
     pub fn new() -> Self {
         let nvml = NvmlState::new();
@@ -317,7 +330,11 @@ impl GpuCollector {
         }
 
         // 按专用显存降序排列，独显（大VRAM）排前面
-        dxgi_adapters.sort_by(|a, b| b.vram_total.cmp(&a.vram_total));
+        dxgi_adapters.sort_by_key(|a| std::cmp::Reverse(a.vram_total));
+
+        // 按名称去重：DXGI 可能枚举到同一 GPU 的多个适配器实例
+        let mut seen = std::collections::HashSet::new();
+        dxgi_adapters.retain(|a| seen.insert(a.name.clone()));
 
         let pdh_util = self.pdh.as_mut().and_then(|p| p.collect_utilization());
 
@@ -341,8 +358,13 @@ impl GpuCollector {
                     .unwrap_or((None, None, None, None, None));
 
                 #[cfg(not(feature = "nvidia"))]
-                let (nvml_util, nvml_temp, nvml_power, nvml_vram_used, nvml_vram_total) =
-                    (None::<u32>, None::<f32>, None::<f64>, None::<u64>, None::<u64>);
+                let (nvml_util, nvml_temp, nvml_power, nvml_vram_used, nvml_vram_total) = (
+                    None::<u32>,
+                    None::<f32>,
+                    None::<f64>,
+                    None::<u64>,
+                    None::<u64>,
+                );
 
                 let utilization_pct = nvml_util.unwrap_or(pdh_util.unwrap_or(0));
                 // NVML VRAM 覆盖 DXGI（笔记本 Optimus 空闲时 DXGI 返回 0）

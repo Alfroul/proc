@@ -1,17 +1,19 @@
+pub mod alert_badge;
+pub mod app_group_view;
+pub mod detail_view;
+pub mod docker_panel;
+pub mod help_panel;
 pub mod layout;
-pub mod theme;
-pub mod sidebar;
-pub mod right_panel;
+pub mod monitor_panel;
+pub mod port_table;
 pub mod process_table;
 pub mod process_tree;
-pub mod port_table;
-pub mod usb_panel;
-pub mod monitor_panel;
-pub mod docker_panel;
-pub mod detail_view;
-pub mod alert_badge;
 pub mod replay_panel;
+pub mod right_panel;
 pub mod security_badge;
+pub mod sidebar;
+pub mod theme;
+pub mod usb_panel;
 
 use std::io::Stdout;
 use std::time::{Duration, Instant};
@@ -19,15 +21,15 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use ratatui::text::{Line, Span};
-use ratatui::Terminal;
+use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 
 use crate::app::{App, ReplaySpeed};
 use crate::error::Result;
-use crate::record::vt100::{VtPlayer, VtRecorder, VtFrameWidget};
+use crate::record::vt100::{VtFrameWidget, VtPlayer, VtRecorder};
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -50,6 +52,15 @@ pub fn setup_terminal() -> Result<Tui> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
     crossterm::execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+
+    // Install panic hook to restore terminal before printing panic info
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = terminal::disable_raw_mode();
+        let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
+        prev_hook(info);
+    }));
+
     Ok(terminal)
 }
 
@@ -64,6 +75,10 @@ pub fn run_app(terminal: &mut Tui, app: &mut App) -> Result<()> {
     let frame_time = Duration::from_millis(50);
 
     while !app.should_quit {
+        if crate::shutdown::requested() {
+            app.should_quit = true;
+        }
+
         let start = Instant::now();
 
         handle_events(app)?;
@@ -71,7 +86,9 @@ pub fn run_app(terminal: &mut Tui, app: &mut App) -> Result<()> {
 
         // Manage VT100 recorder lifecycle
         if app.recording_wanted() && vt_recorder.is_none() {
-            let size = terminal.size().unwrap_or(ratatui::layout::Size::new(80, 24));
+            let size = terminal
+                .size()
+                .unwrap_or(ratatui::layout::Size::new(80, 24));
             let path = default_vt_recording_path();
             match VtRecorder::start(path, size.width, size.height) {
                 Ok(rec) => {
@@ -83,12 +100,13 @@ pub fn run_app(terminal: &mut Tui, app: &mut App) -> Result<()> {
                     app.set_recording_wanted(false);
                 }
             }
-        } else if !app.recording_wanted() && vt_recorder.is_some() {
-            if let Some(rec) = vt_recorder.take() {
-                match rec.stop() {
-                    Ok(path) => app.set_status(format!("录制已保存: {}", path.display())),
-                    Err(e) => app.set_status(format!("录制保存失败: {}", e)),
-                }
+        } else if !app.recording_wanted()
+            && vt_recorder.is_some()
+            && let Some(rec) = vt_recorder.take()
+        {
+            match rec.stop() {
+                Ok(path) => app.set_status(format!("录制已保存: {}", path.display())),
+                Err(e) => app.set_status(format!("录制保存失败: {}", e)),
             }
         }
 
@@ -112,20 +130,24 @@ pub fn run_app(terminal: &mut Tui, app: &mut App) -> Result<()> {
         }
     }
 
+    // Ensure recorder is flushed even on Ctrl+C — its stop() joins the writer
+    // thread and flushes the underlying file.
     if let Some(rec) = vt_recorder.take() {
         rec.stop().ok();
     }
+
+    app.shutdown();
 
     Ok(())
 }
 
 fn handle_events(app: &mut App) -> Result<()> {
     let mut count = 0;
-    while event::poll(Duration::from_millis(0))? && count < 200 {
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                app.handle_key(key);
-            }
+    while event::poll(Duration::from_millis(0))? && count < 10 {
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            app.handle_key(key);
         }
         count += 1;
     }
@@ -164,12 +186,16 @@ pub fn run_vt_replay(terminal: &mut Tui, player: VtPlayer) -> Result<()> {
     let frame_time = Duration::from_millis(50);
 
     while !state.quit {
+        if crate::shutdown::requested() {
+            state.quit = true;
+        }
+
         // Handle key events
         while event::poll(Duration::from_millis(0))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    handle_vt_replay_key(&mut state, &player, key);
-                }
+            if let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                handle_vt_replay_key(&mut state, &player, key);
             }
         }
 
@@ -218,11 +244,9 @@ fn handle_vt_replay_key(state: &mut ReplayState, _player: &VtPlayer, key: KeyEve
         crossterm::event::KeyCode::Char('q') | crossterm::event::KeyCode::Esc => {
             state.quit = true;
         }
-        crossterm::event::KeyCode::Char(' ') => {
-            if state.total > 0 {
-                state.playing = !state.playing;
-                state.last_tick = Instant::now();
-            }
+        crossterm::event::KeyCode::Char(' ') if state.total > 0 => {
+            state.playing = !state.playing;
+            state.last_tick = Instant::now();
         }
         crossterm::event::KeyCode::Left => {
             let step = if key
@@ -304,7 +328,11 @@ fn draw_vt_timeline(f: &mut ratatui::Frame, area: Rect, state: &ReplayState, pla
     ])
     .areas(inner);
 
-    let icon = if state.playing { "\u{25B6}" } else { "\u{23F8}" };
+    let icon = if state.playing {
+        "\u{25B6}"
+    } else {
+        "\u{23F8}"
+    };
     let speed_label = match state.speed {
         ReplaySpeed::Half => "0.5x",
         ReplaySpeed::Normal => "1x",
@@ -324,12 +352,18 @@ fn draw_vt_timeline(f: &mut ratatui::Frame, area: Rect, state: &ReplayState, pla
 
     let info_line = Line::from(vec![
         Span::styled(format!(" {} ", icon), crate::tui::theme::style_selected()),
-        Span::styled(format!("{} ", speed_label), crate::tui::theme::style_muted()),
+        Span::styled(
+            format!("{} ", speed_label),
+            crate::tui::theme::style_muted(),
+        ),
         Span::styled(
             format!("{} / {} ", current_str, end_str),
             crate::tui::theme::style_normal(),
         ),
-        Span::styled(format!("({})", duration_str), crate::tui::theme::style_muted()),
+        Span::styled(
+            format!("({})", duration_str),
+            crate::tui::theme::style_muted(),
+        ),
         Span::styled(
             format!("  帧 {}/{}", state.current + 1, state.total),
             crate::tui::theme::style_muted(),
@@ -350,11 +384,13 @@ fn draw_vt_timeline(f: &mut ratatui::Frame, area: Rect, state: &ReplayState, pla
 
 fn format_timestamp(ms: u64) -> String {
     let secs = ms / 1000;
-    let local = secs + 8 * 3600;
+    let offset_secs = crate::local_offset_hours() * 3600;
+    let local = secs + offset_secs as u64;
+    let (_, month, day) = crate::epoch_secs_to_ymd(local);
     let h = ((local / 3600) % 24) as u8;
     let m = ((local / 60) % 60) as u8;
     let s = (local % 60) as u8;
-    format!("{:02}:{:02}:{:02}", h, m, s)
+    format!("{:02}-{:02} {:02}:{:02}:{:02}", month, day, h, m, s)
 }
 
 fn format_duration(secs: u64) -> String {
@@ -364,9 +400,7 @@ fn format_duration(secs: u64) -> String {
 }
 
 fn default_vt_recording_path() -> std::path::PathBuf {
-    let dir = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .join("prec");
+    let dir = crate::dirs_config_dir().join("recordings");
     std::fs::create_dir_all(&dir).ok();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
