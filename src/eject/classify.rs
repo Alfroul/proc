@@ -1,7 +1,8 @@
 use ratatui::style::Color;
 
 use crate::classify::ProcessClass;
-use crate::eject::locks::HandleLock;
+
+use super::HandleLock;
 
 /// 风险等级
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

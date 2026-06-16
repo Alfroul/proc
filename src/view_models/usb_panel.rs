@@ -2,8 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::app_panel::{KeyResult, Panel, PanelContext};
 use crate::eject::classify::HandleRisk;
-use crate::eject::device::RemovableDevice;
-use crate::eject::locks::HandleLock;
+use crate::eject::{HandleLock, RemovableDevice};
 
 pub struct UsbPanel {
     pub devices: Vec<RemovableDevice>,

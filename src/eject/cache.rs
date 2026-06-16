@@ -1,3 +1,5 @@
+//! Windows 卷写入缓存刷新（PowerShell Write-VolumeCache）。整个模块 cfg-gate 到 Windows（见 ADR-0002）。
+
 use std::process::Command;
 use std::thread;
 use std::time::Duration;

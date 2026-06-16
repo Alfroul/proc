@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::os::windows::ffi::OsStringExt;
 use std::sync::OnceLock;
 
 use crate::collect::ProcessInfo;
@@ -58,6 +57,7 @@ pub const EXPECTED_ORPHAN_NAMES: &[&str] = &["explorer.exe"];
 
 static SERVICE_CACHE: OnceLock<HashMap<u32, String>> = OnceLock::new();
 
+#[cfg(target_os = "windows")]
 fn build_service_cache() -> HashMap<u32, String> {
     let mut cache = HashMap::new();
 
@@ -125,7 +125,10 @@ fn build_service_cache() -> HashMap<u32, String> {
     cache
 }
 
+#[cfg(target_os = "windows")]
 fn widestring_to_string(ptr: windows::core::PWSTR) -> String {
+    use std::os::windows::ffi::OsStringExt;
+
     if ptr.is_null() {
         return String::new();
     }
@@ -146,10 +149,16 @@ fn widestring_to_string(ptr: windows::core::PWSTR) -> String {
         .into_owned()
 }
 
+#[cfg(not(target_os = "windows"))]
+fn build_service_cache() -> HashMap<u32, String> {
+    HashMap::new()
+}
+
 fn get_service_cache() -> &'static HashMap<u32, String> {
     SERVICE_CACHE.get_or_init(build_service_cache)
 }
 
+#[cfg(target_os = "windows")]
 pub fn classify_process(proc: &ProcessInfo) -> ProcessClass {
     if proc.pid == 4 || proc.pid == 0 {
         return ProcessClass::Kernel;
@@ -166,6 +175,38 @@ pub fn classify_process(proc: &ProcessInfo) -> ProcessClass {
     }
 
     ProcessClass::UserApp
+}
+
+/// 非 Windows 启发式分类：按 exe 路径前缀推断。
+/// - pid 0 → Kernel（idle/swapper）
+/// - `/init`、`/usr/`、`/sbin`、`/bin`、`/lib` → SystemProcess
+/// - `/home/`、`/root` → UserApp
+/// - 其他 → Unknown
+#[cfg(not(target_os = "windows"))]
+pub fn classify_process(proc: &ProcessInfo) -> ProcessClass {
+    if proc.pid == 0 {
+        return ProcessClass::Kernel;
+    }
+
+    let path = match proc.exe.as_deref() {
+        Some(p) => p,
+        None => return ProcessClass::Unknown,
+    };
+
+    if path.starts_with("/init")
+        || path.starts_with("/usr/")
+        || path.starts_with("/sbin")
+        || path.starts_with("/bin")
+        || path.starts_with("/lib")
+    {
+        return ProcessClass::SystemProcess;
+    }
+
+    if path.starts_with("/home/") || path.starts_with("/root") {
+        return ProcessClass::UserApp;
+    }
+
+    ProcessClass::Unknown
 }
 
 pub fn classify_batch(processes: &[ProcessInfo]) -> Vec<(ProcessClass, &ProcessInfo)> {

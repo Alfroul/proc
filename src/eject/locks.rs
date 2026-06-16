@@ -1,17 +1,7 @@
-use crate::classify;
-use crate::collect::ProcessInfo;
-use crate::error::Result;
-use crate::port_map;
+//! Windows 卷句柄占用扫描。整个模块 cfg-gate 到 Windows（见 ADR-0002）。
 
-/// 句柄占用信息
-#[derive(Debug, Clone)]
-pub struct HandleLock {
-    pub pid: u32,
-    pub process_name: String,
-    pub exe_path: Option<String>,
-    pub process_class: classify::ProcessClass,
-    pub port_info: Vec<String>,
-}
+use super::HandleLock;
+use crate::error::Result;
 
 pub fn find_volume_lockers(drive_letter: char) -> Result<Vec<HandleLock>> {
     find_volume_lockers_with_processes(drive_letter, &[])
@@ -69,7 +59,7 @@ pub fn find_volume_lockers_with_processes(
             .or_else(|| fallback_map.get(&pid).cloned())
             .unwrap_or_else(|| (format!("PID {}", pid), None));
 
-        let proc_info = ProcessInfo {
+        let proc_info = crate::collect::ProcessInfo {
             pid,
             name: name.clone(),
             cpu_usage: 0.0,
@@ -88,9 +78,9 @@ pub fn find_volume_lockers_with_processes(
             start_time: 0,
             run_time: 0,
         };
-        let process_class = classify::classify_process(&proc_info);
+        let process_class = crate::classify::classify_process(&proc_info);
 
-        let port_info = port_map::find_ports_by_pid(pid)
+        let port_info = crate::port_map::find_ports_by_pid(pid)
             .unwrap_or_default()
             .iter()
             .map(|e| format!("{}:{}", e.protocol, e.local_port))

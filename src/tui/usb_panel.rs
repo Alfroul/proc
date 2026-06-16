@@ -6,7 +6,7 @@ use ratatui::widgets::{
 };
 
 use crate::app::App;
-use crate::eject::device::format_size;
+use crate::eject::format_size;
 use crate::tui::theme;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {

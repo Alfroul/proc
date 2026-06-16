@@ -1,19 +1,7 @@
-use std::ffi::OsString;
-use std::os::windows::ffi::OsStringExt;
+//! Windows 可移除设备检测。整个模块 cfg-gate 到 Windows（见 ADR-0002）。
 
+use super::RemovableDevice;
 use crate::error::Result;
-
-/// 可移除设备信息
-#[derive(Debug, Clone)]
-pub struct RemovableDevice {
-    pub drive_letter: char,
-    pub label: String,
-    pub total_size: u64,
-    pub used_size: u64,
-    pub file_system: String,
-    pub is_occupied: bool,
-    pub device_path: String,
-}
 
 /// 使用 Windows API 检测所有可移除设备
 pub fn detect_removable_devices() -> Result<Vec<RemovableDevice>> {
@@ -93,16 +81,13 @@ pub fn detect_removable_devices() -> Result<Vec<RemovableDevice>> {
 
 /// 从宽字符缓冲区转换到 String
 fn wide_to_string(buf: &[u16]) -> String {
+    use std::os::windows::ffi::OsStringExt;
+
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     if len == 0 {
         return String::new();
     }
-    OsString::from_wide(&buf[..len])
+    std::ffi::OsString::from_wide(&buf[..len])
         .to_string_lossy()
         .into_owned()
-}
-
-/// 格式化字节为可读字符串
-pub fn format_size(bytes: u64) -> String {
-    crate::format::format_bytes(bytes)
 }

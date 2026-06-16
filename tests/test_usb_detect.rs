@@ -1,7 +1,6 @@
 use proc::classify::ProcessClass;
 use proc::eject::classify::{self, HandleRisk};
-use proc::eject::device::format_size;
-use proc::eject::locks::HandleLock;
+use proc::eject::{HandleLock, format_size};
 
 fn make_lock(pid: u32, name: &str, process_class: ProcessClass) -> HandleLock {
     HandleLock {
@@ -13,6 +12,7 @@ fn make_lock(pid: u32, name: &str, process_class: ProcessClass) -> HandleLock {
     }
 }
 
+#[cfg(target_os = "windows")]
 #[test]
 fn test_detect_removable_devices_no_panic() {
     let result = proc::eject::device::detect_removable_devices();
@@ -116,6 +116,7 @@ fn test_format_size() {
     assert_eq!(format_size(1024 * 1024 * 1024), "1.0GB");
 }
 
+#[cfg(target_os = "windows")]
 #[test]
 fn test_flush_write_cache_no_panic() {
     let result = proc::eject::cache::flush_write_cache('Z');

@@ -19,8 +19,7 @@ use crate::collect::{
 };
 use crate::docker::ContainerInfo;
 use crate::eject::classify::HandleRisk;
-use crate::eject::device::RemovableDevice;
-use crate::eject::locks::HandleLock;
+use crate::eject::{HandleLock, RemovableDevice};
 use crate::error::Result;
 use crate::port_map::{self, NetworkViewMode, PortEntry};
 use crate::record::Player;
@@ -151,7 +150,7 @@ impl App {
             None
         } else {
             Some(
-                "Linux/macOS 模式：以下功能已禁用 — 安全评分签名验证、降频检测、U盘句柄枚举、Toast 通知、EStats 带宽。详见 README。"
+                "Linux/macOS 模式：以下功能已降级 — 安全评分签名验证/DLL检查/特权检查、降频检测、U盘助手、Toast 通知、EStats 带宽、GPU；进程分类走启发式（按路径推断，无 Service Cache）。详见 README 平台支持表。"
                     .to_string(),
             )
         };

@@ -8,8 +8,7 @@ use crate::classify;
 use crate::collect::ProcessInfo;
 use crate::docker::{ContainerInfo, HealthStatus};
 use crate::eject::classify::HandleRisk;
-use crate::eject::device::RemovableDevice;
-use crate::eject::locks::HandleLock;
+use crate::eject::{HandleLock, RemovableDevice};
 use crate::port_map::{NetworkViewMode, PortEntry, Protocol};
 use crate::tree::TreeNode;
 
