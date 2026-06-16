@@ -41,7 +41,7 @@ pub fn draw_alert_badge(f: &mut Frame, area: Rect, app: &App) {
             format!(" {} ", icon),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("alerts: {}", total), Style::default().fg(color)),
+        Span::styled(format!("告警: {}", total), Style::default().fg(color)),
     ]);
 
     let p = Paragraph::new(line);
@@ -55,12 +55,12 @@ pub fn draw_alert_popup(f: &mut Frame, app: &App) {
     if alerts.is_empty() {
         let area = popup_area(f.area(), 40, 5);
         f.render_widget(Clear, area);
-        let p = Paragraph::new("  No active alerts")
+        let p = Paragraph::new("  无活跃告警")
             .style(theme::style_muted())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Alerts ")
+                    .title(" 告警 ")
                     .style(theme::style_header()),
             );
         f.render_widget(p, area);
@@ -81,9 +81,9 @@ pub fn draw_alert_popup(f: &mut Frame, app: &App) {
         .take(popup_height as usize - 4)
         .map(|alert| {
             let (icon, color) = match alert.severity {
-                crate::alert::AlertSeverity::Critical => ("[CRIT]", theme::danger()),
-                crate::alert::AlertSeverity::Warning => ("[WARN]", theme::warning()),
-                crate::alert::AlertSeverity::Info => ("[INFO]", theme::info()),
+                crate::alert::AlertSeverity::Critical => ("🔴 严重", theme::danger()),
+                crate::alert::AlertSeverity::Warning => ("⚠ 警告", theme::warning()),
+                crate::alert::AlertSeverity::Info => ("ℹ 提示", theme::info()),
             };
 
             let pid_str = alert
@@ -93,9 +93,9 @@ pub fn draw_alert_popup(f: &mut Frame, app: &App) {
 
             let elapsed = alert.triggered_at.elapsed();
             let time_str = if elapsed.as_secs() < 60 {
-                format!("{}s ago", elapsed.as_secs())
+                format!("{}秒前", elapsed.as_secs())
             } else {
-                format!("{}m ago", elapsed.as_secs() / 60)
+                format!("{}分前", elapsed.as_secs() / 60)
             };
 
             Line::from(vec![
@@ -115,10 +115,7 @@ pub fn draw_alert_popup(f: &mut Frame, app: &App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(
-            " Alerts ({}) - Shift+A toggle, Esc close ",
-            alerts.len()
-        ))
+        .title(format!(" 告警 ({}) - A 开关，Esc 关闭 ", alerts.len()))
         .style(theme::style_header());
 
     let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });

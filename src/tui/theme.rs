@@ -140,7 +140,7 @@ const THEMES: [ThemeColors; 10] = [
         warning: Color::Rgb(180, 120, 0),
         success: Color::Rgb(0, 140, 60),
         info: Color::Rgb(70, 110, 200),
-        muted: Color::Rgb(150, 150, 160),
+        muted: Color::Rgb(110, 110, 125),
     },
 ];
 

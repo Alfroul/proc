@@ -107,7 +107,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
             if let Some(ref safety) = node.kill_safety {
                 let (tag, color) = match safety {
-                    crate::tree::KillSafety::Safe => (" 可杀", Color::Green),
+                    crate::tree::KillSafety::Safe => (" 可终止", Color::Green),
                     crate::tree::KillSafety::Caution => (" 有子进程", Color::Yellow),
                 };
                 name_spans.push(Span::styled(

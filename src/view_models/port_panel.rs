@@ -414,7 +414,9 @@ impl PortPanel {
                 Some(format!("{} (PID {}) 已终止", name, pid))
             }
             Ok(kill::KillResult::AlreadyGone) => Some("进程已不存在".to_string()),
-            Ok(kill::KillResult::AccessDenied) => Some("权限不足".to_string()),
+            Ok(kill::KillResult::AccessDenied) => {
+                Some("权限不足 — 请以管理员身份重启 proc".to_string())
+            }
             Ok(kill::KillResult::Failed(e)) => Some(format!("终止失败: {}", e)),
             Err(e) => Some(format!("错误: {}", e)),
         }
@@ -470,7 +472,9 @@ impl PortPanel {
                 Some(format!("{} (PID {}) 已终止", group.process_name, pid))
             }
             Ok(kill::KillResult::AlreadyGone) => Some("进程已不存在".to_string()),
-            Ok(kill::KillResult::AccessDenied) => Some("权限不足".to_string()),
+            Ok(kill::KillResult::AccessDenied) => {
+                Some("权限不足 — 请以管理员身份重启 proc".to_string())
+            }
             Ok(kill::KillResult::Failed(e)) => Some(format!("终止失败: {}", e)),
             Err(e) => Some(format!("错误: {}", e)),
         }

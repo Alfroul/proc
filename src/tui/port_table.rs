@@ -1162,7 +1162,7 @@ fn draw_diagnostic_result(f: &mut Frame, area: Rect, app: &App) {
         .unwrap_or("未知");
 
     let status = match diag.phase {
-        crate::diag::DiagnosticPhase::Running => "Running...",
+        crate::diag::DiagnosticPhase::Running => "运行中...",
         crate::diag::DiagnosticPhase::Completed => "完成",
         crate::diag::DiagnosticPhase::Failed => "失败",
         crate::diag::DiagnosticPhase::Menu => unreachable!(),

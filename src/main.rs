@@ -774,7 +774,7 @@ fn run_legacy_replay(file: &Path) {
     let total = player.total_frames();
     println!(
         "{}",
-        format!("加载录制: {} ({} 帧)", file.display(), total).cyan()
+        format!("加载 VT100 录制: {} ({} 帧)", file.display(), total).cyan()
     );
 
     let mut app = match app::App::new() {

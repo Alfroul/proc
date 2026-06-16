@@ -339,7 +339,7 @@ impl ProcessPanel {
             })
             .count();
         Some(format!(
-            "{}个孤儿 | 可直接杀:{} | 共{} | Space取消 | k终止",
+            "{}个孤儿 | 可直接终止:{} | 共{} | Space取消 | k终止",
             self.tree_selected_pids.len(),
             safe_count,
             crate::format::format_bytes(total_mem)
@@ -371,7 +371,7 @@ impl ProcessPanel {
             })
             .count();
         Some(format!(
-            "{}个残存 | 可直接杀:{} | 共{} | Space取消 | k终止",
+            "{}个残存 | 可直接终止:{} | 共{} | Space取消 | k终止",
             self.tree_selected_pids.len(),
             safe_count,
             crate::format::format_bytes(total_mem)

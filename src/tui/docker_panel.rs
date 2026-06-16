@@ -14,6 +14,16 @@ const COL_PORTS: usize = 14;
 const COL_STATUS: usize = 8;
 const COL_UPTIME: usize = 8;
 
+/// 把 HealthStatus::Display 输出的英文短词翻译成中文（list 与 detail 复用）。
+fn translate_health(s: &str) -> &str {
+    match s {
+        "healthy" => "健康",
+        "unhealthy" => "不健康",
+        "starting" => "启动中",
+        _ => "-",
+    }
+}
+
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -101,9 +111,9 @@ fn draw_container_list(f: &mut Frame, area: Rect, app: &App) {
                 };
 
                 let _ = match c.health {
-                    HealthStatus::Healthy => ("healthy", theme::style_success()),
-                    HealthStatus::Unhealthy => ("unhealthy", theme::style_danger()),
-                    HealthStatus::Starting => ("starting", theme::style_warning()),
+                    HealthStatus::Healthy => ("健康", theme::style_success()),
+                    HealthStatus::Unhealthy => ("不健康", theme::style_danger()),
+                    HealthStatus::Starting => ("启动中", theme::style_warning()),
                     HealthStatus::NotConfigured => ("-", theme::style_muted()),
                 };
 
@@ -228,7 +238,8 @@ fn draw_detail_popup(f: &mut Frame, area: Rect, app: &App) {
         _ => ("■ 未知", theme::style_muted()),
     };
 
-    let health_display = container.health.to_string();
+    let health_raw = container.health.to_string();
+    let health_display = translate_health(&health_raw);
 
     let content = vec![
         Line::from(Span::styled(
@@ -246,7 +257,7 @@ fn draw_detail_popup(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(status_icon.to_string(), status_style),
         ]),
         Line::from(format!("  健康:   {}", health_display)),
-        Line::from(format!("  状态:   {}", container.status)),
+        Line::from(format!("  Docker: {}", container.status)),
         Line::from(""),
         Line::from(Span::styled(
             " 资源使用:",

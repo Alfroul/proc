@@ -147,6 +147,8 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 
 **配置文件在哪？** `~/.config/proc/` 下：`theme.txt`（主题索引）、`ui.toml`（排序偏好）、`alerts.toml`（告警规则）、`proc.log`（运行日志）、`recordings/`（默认录制路径）。
 
+**LICENSE 何时添加？** 已在 0.2.0 添加 MIT，文件位于仓库根目录。
+
 ## License
 
 MIT

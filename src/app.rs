@@ -480,7 +480,9 @@ impl App {
                             self.mode = AppMode::ProcessList;
                         }
                         Ok(crate::kill::KillResult::AccessDenied) => {
-                            self.status_message = Some("权限不足，无法终止进程".to_string());
+                            self.status_message = Some(
+                                "权限不足，无法终止进程 — 请以管理员身份重启 proc".to_string(),
+                            );
                         }
                         Ok(crate::kill::KillResult::Failed(e)) => {
                             self.status_message = Some(format!("终止失败: {}", e));
@@ -750,9 +752,10 @@ impl App {
                             Ok(crate::kill::KillResult::AlreadyGone) => {
                                 results.push(format!("{} (PID {}) 已不存在", name, pid))
                             }
-                            Ok(crate::kill::KillResult::AccessDenied) => {
-                                results.push(format!("{} (PID {}) 权限不足", name, pid))
-                            }
+                            Ok(crate::kill::KillResult::AccessDenied) => results.push(format!(
+                                "{} (PID {}) 权限不足 — 请以管理员身份重启 proc",
+                                name, pid
+                            )),
                             Ok(crate::kill::KillResult::Failed(e)) => {
                                 results.push(format!("{} (PID {}) 失败: {}", name, pid, e))
                             }
