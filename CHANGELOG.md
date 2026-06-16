@@ -12,6 +12,55 @@
 - **进程列表排序字段持久化**：`←`/`→`/`S` 切换排序时写入 `~/.config/proc/ui.toml`，下次启动恢复上次选择（解决"每次打开都要手动切内存"的痛点）。新增 `src/ui_state.rs` 模块 + 4 个单元测试。
 - **3 个新主题**：Gruvbox（暖色复古）、One Dark（Atom 默认配色）、Rose Pine（柔和现代）。`THEMES` 从 7 个扩展到 10 个，`t` 循环切换。
 
+## [0.2.1] - 2026-06-16
+
+Patch 版本，三阶段累积修复：跨平台编译（阶段 2 cfg-gate）+ 文案一致性（阶段 3 纯文案 10 项）+ 鲁棒性（阶段 4 鲁棒性 10 项）。无 API 破坏；行为上有几处错误从"静默吞没"改为"显式提示 / 返回 Result"。
+
+### 阶段 2 — cfg-gate 跨平台降级（Linux 编译修复）
+
+- Fixed: `src/classify.rs` 和 `src/eject/{device,locks,cache,classify}.rs` 在顶级 `use windows::Win32::*` 但无 `#[cfg(target_os="windows")]` gate —— Linux 编译失败、`check-linux` CI 为红。改用**模块级 cfg gate**（详见 ADR-0002）。
+- Changed: `src/eject/mod.rs` 顶层暴露跨平台结构体 `RemovableDevice` / `HandleLock` / `UsbScanResult`，原 Windows 实现下沉到 `windows_impl`，非 Windows 走 `stub_impl`（全部返回 `Err(ProcError::UsbDetect)`）。
+- Changed: `format_size` 上移到 `eject/mod.rs`，避免循环依赖。
+- Changed: `Cargo.toml` `filelocksmith` 依赖移至 `[target.'cfg(windows)'.dependencies]`。
+- Changed: `App::new` 启动 `status_message`（非 Windows）补全完整降级清单。
+
+### 阶段 3 — 纯文案一致性（10 项）
+
+- Changed: TUI 文案与 README 快捷键表对齐 —— `A`/`R`/`Shift+←→` 等此前未公开的快捷键全部补到 README。
+- Changed: 启动时降级提示文案统一（之前零散）。
+- Changed: 杂项中英混排、错别字、过期路径修正（10 项，详见 git log）。
+
+### 阶段 4 — 鲁棒性（10 项）
+
+- Fixed (P1.20): `init_tracing` 静默忽略 `create_dir_all` / `File::create` / `set_global_default` 错误 —— 改为 `eprintln!` 显式提示用户"日志不可用"。
+- Changed (P1.21): `AlertManager::load_or_default` 改为 `try_load` 返回 `Result`，调用方决定 fallback；新增 `Default` impl 给 `AlertManager`。
+- Fixed (P1.22): `record::reader::Player::open` 不再对恶意 / 损坏的录制文件无限信任 header_len —— 上限 64 KB，超出立即 `bail!`，避免 OOM。新增 `test_player_rejects_oversized_header` 回归测试。
+- Fixed (P1.23): `security::hash_cache::HashReputation::hash_file` 从 `std::fs::read` 改为 `BufReader` 流式 + 64 MB 上限 —— 多 GB 安装器 / 敌意文件不再能撑爆内存。新增 2 个单元测试（80 MB 大文件不爆 + 超 cap 字节不影响摘要）。
+- Fixed (P1.24): `local_offset_hours` 中 `-(bias + ...) as i64 / 60` 触发 `-(i32::MIN)` UB（Rust 一元 `-` 优先级高于 `as`）。抽出 `bias_minutes_to_offset_hours(i32) -> i64` 纯函数，先 `as i64` 再取负。新增针对 `i32::MIN` 的回归测试。
+- Fixed (P1.10): `monitor::watchdog` 收到 Ctrl+C 时 `child.kill()` 静默忽略错误 —— 改为 `tracing::warn!` 记录。
+- Fixed (#8): CHANGELOG 引用本 plan 重新编号前的 `docs/adr/0002-...` / `0003-...` / `0004-...` / `0005-...` / `docs/dirty-rect-analysis.md` 全部失效 —— 改为泛指（"详见 ADR-0001" / "详见 CHANGELOG 阶段记录"）。
+- Added (#10): tracing 补 6 处关键路径观测点 —— `tick_light_refresh` 重刷失败 warn（已有，保留）、`BackgroundScorer` 评分耗时 debug、`scan_ports` 耗时 debug、`find_volume_lockers` 耗时 debug、`record::writer` 每 100 帧写入字节数 debug、`docker::events` 断线重连 warn + 上限 10 次放弃。
+- Changed (#12): `init_tracing` 补注释说明 `File::create` 默认 truncate 行为 —— 启动时覆盖旧日志，防止长期运行后 `proc.log` 无限增长。如需保留历史请走 `tracing-appender`（ADR-0006 已规划）。
+- Added (#13): `init_tracing` 接入 `EnvFilter::try_from_default_env()`，默认级别 `info`，`RUST_LOG=proc=debug` 等环境变量生效（之前因缺 `env-filter` feature 不生效）。`tracing-subscriber` 启用 `env-filter` feature。README FAQ 增 RUST_LOG 用法说明。
+
+### 验证矩阵
+
+- `cargo fmt --all -- --check` ✅
+- `cargo clippy --all-targets -- -D warnings` ✅
+- `cargo test --release` ✅ 283 passed / 0 failed / 2 ignored（阶段 3 baseline 279 → +4：1 record header cap + 2 hash streaming + 1 bias_minutes UB 回归）
+- `cargo build --release --no-default-features` ✅
+
+Linux 端仍由 GitHub Actions `check-linux` job 验证；本机 WSL vhdx 仍损坏。
+
+### ADR 状态
+
+- ADR-0002（cfg gate）Status: **Accepted**（阶段 2 落地，2026-06-15，本次随 0.2.1 一起发布）
+
+
+
+- **进程列表排序字段持久化**：`←`/`→`/`S` 切换排序时写入 `~/.config/proc/ui.toml`，下次启动恢复上次选择（解决"每次打开都要手动切内存"的痛点）。新增 `src/ui_state.rs` 模块 + 4 个单元测试。
+- **3 个新主题**：Gruvbox（暖色复古）、One Dark（Atom 默认配色）、Rose Pine（柔和现代）。`THEMES` 从 7 个扩展到 10 个，`t` 循环切换。
+
 ## [0.2.0] - 2026-06-15
 
 本次发布聚焦于代码质量、性能优化和用户体验打磨。共修复 6 个真实 Bug，完成 6 项架构整洁，新增 9 项 UX 改进，4 项跨平台与文档增强，5 项测试覆盖，3 项性能优化。
@@ -20,14 +69,14 @@
 
 - 全局代码审查通过：`cargo test --release`（297 个测试，0 失败）、`cargo clippy --all-targets -- -D warnings`（0 警告）、`cargo fmt --all -- --check`（无 diff）、`cargo build --release --no-default-features`（通过）。
 - 33 项问题逐一核对：#1 VT100 RGB、#2 跨平台时区、#3 watchdog try_wait、#4 sysinfo 散落、#5 排序 O(N²)、#6 Arc<Vec> 共享、#7 panels/tui 重命名、#8 AppMode 死代码、#9 tick ≤ 50 行（实测 33 行）、#10 replay ≤ 50 行（实测 24 行）、#11 deprecated 删除、#12 scan_ports 不再 new_all、#13 help_panel.rs、#14 主题持久化、#15 Ctrl+C handler、#16 时间格式含月-日、#17 README 隐藏快捷键公开、#18 THEMES 长度 = 7、#19 Command::Export、#20 read_line 已废弃、#21 Command::Pkill、#22 README 平台支持、#23 LICENSE/CHANGELOG、#24 CI workflow、#25 README GPU 路线图、#26 test_record_color、#27 test_scorer_concurrency、#28 test_kill_tree、#29 skeleton 合并、#30 test_platform_compat、#31 select_nth_unstable、#32 脏区域（见下方"性能优化"）、#33 tick_history_sample 抽离 —— **全部落地**。
-- Performance: 脏区域优化经真实测量后决定**不动代码** —— ratatui 内置 buffer diff 已实现 Cell 级增量传输，`App::tick` 已用 `needs_draw` 判断避免无谓重绘，每帧 draw 调用成本 < 15ms（20 fps 预算 50ms）。激进 dirty rect 优化的复杂度收益比差，且引入回归风险。完整分析见 [`docs/dirty-rect-analysis.md`](docs/dirty-rect-analysis.md)。
+- Performance: 脏区域优化经真实测量后决定**不动代码** —— ratatui 内置 buffer diff 已实现 Cell 级增量传输，`App::tick` 已用 `needs_draw` 判断避免无谓重绘，每帧 draw 调用成本 < 15ms（20 fps 预算 50ms）。激进 dirty rect 优化的复杂度收益比差，且引入回归风险。完整分析见 CHANGELOG 阶段 8 记录。
 - Performance 基线回归（500 进程基准，见 `tests/test_stage8_perf_regress.rs`）：`rebuild_sorted_cache` **38.2 µs**（< 5ms 目标，130× 裕量）、top-N `select_nth_unstable` + 局部排序 **6.1 µs**（< 1ms 目标，160× 裕量）。无回退。
 - Removed: `SystemSnapshot` 中未使用的 `prev_process_disk` / `prev_process_disk_time` 字段（被 `App` 同名字段独立实现，注释明确标记 `#[allow(dead_code)]` "used via App, not directly in SystemSnapshot"），同时移除 `per_disk_io_speed` 上过时的 TODO 注释（功能已实现）。
 - Pedantic 现状：`cargo clippy -- -W clippy::pedantic` 共 ~287 个 `format!` 风格建议、~119 个 `#[must_use]` 缺失、~63 个 cast 精度提示等，全部为风格偏好而非 bug。`-D warnings` 等级 0 警告。本阶段不修 pedantic，留作未来风格统一批次。
 
 
 
-本次打磨按 8 个阶段组织，预期产出如下（细节见 `docs/stages/`）。
+本次打磨按 8 个阶段组织，预期产出如下（细节见 `docs/stages/`，新阶段编号体系）。
 
 ### 阶段 1 — Spike：工程化基线 + 死代码清理
 
@@ -45,7 +94,7 @@
 - Added: Ctrl+C 优雅退出（全局 `shutdown` 模块，TUI、回放、`monitor`、`docker watch` 均响应），确保录制文件正常 flush。
 - Added: `tests/test_record_color.rs`（7 个测试），覆盖 Reset / 16 基本色 / RGB / Indexed 的 roundtrip，以及完整 `Buffer → VtFrame → bincode → Buffer` 颜色一致性。
 - Changed: `VT100_VERSION` 提升到 2，旧版本 v1 文件回放时给出友好错误（详见 ADR 0003）。
-- Added: `docs/adr/0003-VT100-RGB-颜色编码方案.md`。
+- Added: `docs/adr/` 中新增 VT100 RGB 颜色编码方案决策记录（旧编号 0003，新 plan 重新编号后请见 CHANGELOG 阶段记录）。
 
 ### 阶段 3 — Slice：跨平台基础
 
@@ -64,12 +113,12 @@
 - Fixed: `proc monitor add --pid` 不再使用阻塞的 `stdin().read_line()`，改为 `shutdown::requested()` 200ms 轮询，Ctrl+C 立即退出。
 - Added: `proc pkill <name>` 子命令，按进程名（精确匹配、大小写不敏感）批量终止进程；`--force` 走 `kill_process_tree`，`--dry-run` 仅列出匹配项不终止。`src/kill.rs` 新增 `find_processes_by_name` / `kill_by_name` 公共 API。
 - Added: `tests/test_kill_tree.rs`（8 个测试）— 覆盖 `AlreadyGone` / `AccessDenied`（PID 4 System）/ 无匹配 / spawn 出来的进程能被 find / dry_run 不实际 kill / 结果结构契约。
-- Added: `docs/adr/0005-Ctrl+C-优雅退出设计.md`。
+- Added: `docs/adr/` 中新增 Ctrl+C 优雅退出设计决策记录（旧编号 0005，新 plan 重新编号后请见 CHANGELOG 阶段记录）。
 - Updated: `README.md` 命令行章节补充 `proc pkill` 示例。
 
 ### 阶段 5 — Slice：性能优化
 
-- Performance: 引入 `SysinfoRegistry` 全局单例（`src/collect.rs` 顶部 `SYSINFO_REGISTRY` + `sysinfo_with`），消除 5 处散落的 `sysinfo::System::new_all()` 调用 —— `port_map::scan_ports`、`eject::locks::find_volume_lockers_with_processes`（原循环内每个未命中 PID `new_all` 一次，最差 O(N × 200ms)）、`kill::kill_single` 非 Windows 分支、`kill::find_processes_by_name` 全部改为只读访问 SysinfoRegistry 快照。详见 `docs/adr/0004-sysinfo-单例收敛方案.md`。
+- Performance: 引入 `SysinfoRegistry` 全局单例（`src/collect.rs` 顶部 `SYSINFO_REGISTRY` + `sysinfo_with`），消除 5 处散落的 `sysinfo::System::new_all()` 调用 —— `port_map::scan_ports`、`eject::locks::find_volume_lockers_with_processes`（原循环内每个未命中 PID `new_all` 一次，最差 O(N × 200ms)）、`kill::kill_single` 非 Windows 分支、`kill::find_processes_by_name` 全部改为只读访问 SysinfoRegistry 快照。详见 CHANGELOG 阶段 5 记录。
 - Removed: `SystemSnapshot::processes()` 老 deprecated 方法（被 `cached_processes_vec` 替代），同步迁移 `tests/test_alert.rs`、`tests/test_process_list.rs`、`tests/test_skeleton.rs` 中 9 处调用，删除已无意义的 `test_incremental_refresh_consistent_with_full`。
 - Performance: `App::rebuild_sorted_cache` 从 O(N²) 改为 O(N) —— 一次性构造 `PID → idx` HashMap 替代循环内 `Vec::position` 查找，同时把内部 `Vec<(class, ProcessInfo)>` 改为 `Vec<(class, &ProcessInfo)>` 借引用，省去每帧全字段深拷贝。
 - Performance: top-N 进程排序使用 `slice::select_nth_unstable_by` —— 500 进程时比较次数从 ~4500 (O(N log N)) 降到 ~786 (O(N) + O(K log K))，sparkline 历史采样路径受益。
@@ -78,7 +127,7 @@
 
 ### 阶段 6 — Slice：架构整洁
 
-- Refactor: `src/panels/` 重命名为 `src/view_models/`，避免与 `src/tui/`（纯渲染层）在目录名层面混淆 —— 前者持有面板状态 + 业务逻辑（MVVM 中的 ViewModel 角色），后者无状态。`ProcessPanel` 等类型名保持不变，避免改名风暴；外部 import 路径由 `crate::panels::*` 改为 `crate::view_models::*`（涉及 `src/lib.rs` 和 `src/app.rs`）。详见 `docs/adr/0002-panels-vs-tui-命名重构决策.md`。
+- Refactor: `src/panels/` 重命名为 `src/view_models/`，避免与 `src/tui/`（纯渲染层）在目录名层面混淆 —— 前者持有面板状态 + 业务逻辑（MVVM 中的 ViewModel 角色），后者无状态。`ProcessPanel` 等类型名保持不变，避免改名风暴；外部 import 路径由 `crate::panels::*` 改为 `crate::view_models::*`（涉及 `src/lib.rs` 和 `src/app.rs`）。详见 ADR-0001。
 - Refactor: `App::tick` 从 170+ 行拆分为 8 个职责清晰的方法（`tick_replay` / `tick_light_refresh` / `tick_throttle_check` / `tick_history_sample` / `tick_alert_evaluate` / `tick_panels` / `tick_usb_monitor_docker` / `clamp_cursors` + 配套 `update_disk_speeds`），主 `tick` 方法体降到 33 行。每个方法 30-60 行，单一职责。
 - Refactor: `App::replay_load_current_frame` 从 100+ 行字段一一映射改为基于 `From<&Frame*>` trait 的转换 —— 新增 `src/record/conversions.rs` 集中 7 个 `From` 实现（`FrameProcess` / `FrameTreeNode` / `FramePortEntry` / `FrameUsbDevice` / `FrameUsbLock → HandleLock + HandleRisk` / `FrameContainer` / `FrameOpRecord`）以及 `NetworkViewMode::from_frame_code` 辅助函数；调用站点降至 24 行。`replay_load_current_frame` 进一步拆出 `restore_replay_panel_data` / `restore_replay_nav` / `restore_replay_metrics` / `restore_replay_view_mode` 4 个辅助方法。
 - Refactor: `App::replay_tick` half/normal/double/quad 步进逻辑从嵌套 `let step = { ... }` 块简化为单层 match；at_end 检测使用块作用域自动释放 timeline 不可变借用。

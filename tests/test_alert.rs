@@ -293,7 +293,7 @@ severity = "Info"
 
 #[test]
 fn test_default_rules() {
-    let mgr = AlertManager::load_or_default();
+    let mgr = AlertManager::default();
     let rules = mgr.rules();
     assert!(!rules.is_empty(), "Should have default rules");
     // Check the 4 default rules
@@ -306,14 +306,14 @@ fn test_default_rules() {
 
 #[test]
 fn test_manager_evaluate() {
-    let mgr = AlertManager::load_or_default();
+    let mgr = AlertManager::default();
     // Verify manager can be created and has active_alerts initially empty
     assert!(mgr.active_alerts().is_empty());
 }
 
 #[test]
 fn test_manager_full_flow() {
-    let mut mgr = AlertManager::load_or_default();
+    let mut mgr = AlertManager::default();
     let mut snapshot = proc::collect::SystemSnapshot::new().expect("snapshot");
     let _ = snapshot.refresh_heavy_incremental();
     let procs = snapshot.cached_processes_vec();

@@ -11,18 +11,22 @@ use std::path::PathBuf;
 
 use crate::collect::{ProcessInfo, SystemSnapshot};
 
+#[derive(Default)]
 pub struct AlertManager {
     config: ThresholdConfig,
     active_alerts: HashMap<String, Alert>,
 }
 
 impl AlertManager {
-    pub fn load_or_default() -> Self {
-        let config = Self::load_config().unwrap_or_default();
-        Self {
+    /// Load `alerts.toml`. Errors propagate to the caller so they can decide
+    /// whether to log, alert, or fall back to defaults. Use `.unwrap_or_default()`
+    /// at the call site to recover silently.
+    pub fn try_load() -> anyhow::Result<Self> {
+        let config = Self::load_config()?;
+        Ok(Self {
             config,
             active_alerts: HashMap::new(),
-        }
+        })
     }
 
     pub fn evaluate(

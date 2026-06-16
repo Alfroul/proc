@@ -11,9 +11,11 @@ pub fn find_volume_lockers_with_processes(
     drive_letter: char,
     processes: &[crate::collect::ProcessInfo],
 ) -> Result<Vec<HandleLock>> {
+    let started = std::time::Instant::now();
     let drive_root = format!("{}:\\", drive_letter);
 
     let pids = filelocksmith::find_processes_locking_path(&drive_root);
+    let raw_pid_count = pids.len();
 
     // 缓存里命不中的 PID 才需要查 sysinfo；一次性在循环外构造 fallback map，
     // 避免每个未命中 PID 都触发一次 sysinfo::System::new_all()（50-200ms）。
@@ -97,6 +99,13 @@ pub fn find_volume_lockers_with_processes(
 
     locks.sort_by_key(|l| l.pid);
     locks.dedup_by_key(|l| l.pid);
+
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        raw_pids = raw_pid_count,
+        locks = locks.len(),
+        "find_volume_lockers 完成",
+    );
 
     Ok(locks)
 }

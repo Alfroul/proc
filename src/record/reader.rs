@@ -23,6 +23,18 @@ impl Player {
         reader.read_exact(&mut len_buf)?;
         let header_len = u64::from_le_bytes(len_buf) as usize;
 
+        // Sanity cap: real recording headers are < 1 KB. A claimed multi-MB
+        // header is almost certainly a corrupt or hostile file; reject before
+        // the allocation to avoid OOM.
+        const MAX_HEADER_LEN: usize = 64 * 1024;
+        if header_len > MAX_HEADER_LEN {
+            anyhow::bail!(
+                "录制文件 header 异常大: {} bytes (上限 {})",
+                header_len,
+                MAX_HEADER_LEN
+            );
+        }
+
         let mut header_buf = vec![0u8; header_len];
         reader.read_exact(&mut header_buf)?;
         let header: RecordingHeader = bincode::deserialize(&header_buf)?;

@@ -182,7 +182,10 @@ impl App {
             scoring_pending: false,
             cached_sorted: Vec::new(),
             data_dirty: true,
-            alert_manager: AlertManager::load_or_default(),
+            alert_manager: AlertManager::try_load().unwrap_or_else(|e| {
+                tracing::warn!("加载告警配置失败，使用默认规则: {}", e);
+                AlertManager::default()
+            }),
             alert_popup_open: false,
             alert_scroll: 0,
             help_scroll: 0,

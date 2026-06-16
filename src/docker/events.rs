@@ -24,7 +24,8 @@ impl DockerEventReceiver {
 /// 启动后台事件监听线程
 ///
 /// 使用独立的 tokio runtime，避免与 TUI 主循环冲突。
-/// 线程在连接断开或接收端被 drop 时自动退出。
+/// 连接断开时尝试重连（指数退避，上限 60s），超过 10 次放弃。
+/// 接收端被 drop 时线程自动退出。
 pub fn spawn_event_watcher(docker: bollard::Docker) -> DockerEventReceiver {
     let (tx, rx) = mpsc::channel();
 
@@ -56,32 +57,64 @@ pub fn spawn_event_watcher(docker: bollard::Docker) -> DockerEventReceiver {
                 ..Default::default()
             };
 
-            let mut stream = docker.events(Some(options));
+            const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+            let mut attempts: u32 = 0;
 
-            while let Ok(Some(event)) = stream.try_next().await {
-                let container_id = event
-                    .actor
-                    .as_ref()
-                    .and_then(|a| a.id.clone())
-                    .unwrap_or_default();
+            'outer: loop {
+                let mut stream = docker.events(Some(options.clone()));
+                loop {
+                    match stream.try_next().await {
+                        Ok(Some(event)) => {
+                            let container_id = event
+                                .actor
+                                .as_ref()
+                                .and_then(|a| a.id.clone())
+                                .unwrap_or_default();
 
-                let container_name = event
-                    .actor
-                    .as_ref()
-                    .and_then(|a| a.attributes.as_ref())
-                    .and_then(|attrs| attrs.get("name"))
-                    .cloned();
+                            let container_name = event
+                                .actor
+                                .as_ref()
+                                .and_then(|a| a.attributes.as_ref())
+                                .and_then(|attrs| attrs.get("name"))
+                                .cloned();
 
-                let docker_event = DockerEvent {
-                    action: event.action.unwrap_or_default(),
-                    container_id,
-                    container_name,
-                    timestamp: SystemTime::now(),
-                };
+                            let docker_event = DockerEvent {
+                                action: event.action.unwrap_or_default(),
+                                container_id,
+                                container_name,
+                                timestamp: SystemTime::now(),
+                            };
 
-                if tx.send(docker_event).is_err() {
-                    break;
+                            if tx.send(docker_event).is_err() {
+                                break 'outer;
+                            }
+                        }
+                        Ok(None) => break, // stream ended cleanly — try reconnect
+                        Err(e) => {
+                            attempts += 1;
+                            tracing::warn!(
+                                attempt = attempts,
+                                error = %e,
+                                "Docker 事件流断开，尝试重连",
+                            );
+                            if attempts >= MAX_RECONNECT_ATTEMPTS {
+                                tracing::warn!(
+                                    attempts = attempts,
+                                    "Docker 事件流重连失败超过上限，停止监听",
+                                );
+                                break 'outer;
+                            }
+                            // 指数退避：1, 2, 4, ..., 上限 60s
+                            let backoff_secs = std::cmp::min(1u64 << (attempts - 1).min(6), 60);
+                            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                            break; // re-create stream
+                        }
+                    }
                 }
+
+                // 接收端 drop 时，下一次 tx.send 业务事件会返回 Err → break 'outer。
+                // 这里无需主动探测：重连 + 退避循环本身有限（最多 MAX_RECONNECT_ATTEMPTS），
+                // 即便消费者已死也只会浪费几次退避时间，不会泄漏线程。
             }
         });
     });

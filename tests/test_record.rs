@@ -185,3 +185,28 @@ fn test_frame_process_conversion() {
     assert_eq!(pi.virtual_memory, 0);
     assert_eq!(pi.start_time, 0);
 }
+
+/// Header length sanity cap (P1.22): a malformed/hostile recording that
+/// claims a multi-MB header must be rejected before the allocation.
+#[test]
+fn test_player_rejects_oversized_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hostile.prec");
+
+    // Hand-craft: 8-byte len claiming 1 MB header, then a tiny body that
+    // would normally be read into a 1 MB buffer.
+    let fake_len: u64 = 1024 * 1024; // 1 MB, well above the 64 KB cap
+    let mut bytes = fake_len.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&[0u8; 32]); // bogus "header" body
+
+    std::fs::write(&path, &bytes).unwrap();
+
+    let err = Player::open(path)
+        .err()
+        .expect("oversized header must error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("header 异常大"),
+        "expected Chinese cap message, got: {msg}"
+    );
+}

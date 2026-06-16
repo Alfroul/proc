@@ -411,8 +411,8 @@ fn test_frame_process_view_mode_default_zero() {
 // --- Stage 1 skeleton tests ---
 
 #[test]
-fn test_alert_manager_load_or_default() {
-    let mgr = AlertManager::load_or_default();
+fn test_alert_manager_default() {
+    let mgr = AlertManager::default();
     assert!(mgr.active_alerts().is_empty());
 }
 

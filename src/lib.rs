@@ -35,17 +35,27 @@ pub fn local_offset_hours() -> i64 {
     unsafe {
         let mut tz: TIME_ZONE_INFORMATION = std::mem::zeroed();
         let result = GetTimeZoneInformation(&mut tz);
-        // Bias is in minutes, negative = east of UTC
-        let bias = tz.Bias;
-        // result: 0=unknown, 1=standard, 2=daylight
-        if result == 2 {
-            // Daylight time: total bias = StandardBias + DaylightBias
-            -(bias + tz.StandardBias + tz.DaylightBias) as i64 / 60
+        // Bias fields are i32 minutes (negative = east of UTC). result:
+        // 0=unknown, 1=standard, 2=daylight.
+        let bias_total = if result == 2 {
+            tz.Bias
+                .wrapping_add(tz.StandardBias)
+                .wrapping_add(tz.DaylightBias)
         } else {
-            // Standard time (or unknown)
-            -(bias + tz.StandardBias) as i64 / 60
-        }
+            tz.Bias.wrapping_add(tz.StandardBias)
+        };
+        bias_minutes_to_offset_hours(bias_total)
     }
+}
+
+/// Pure conversion from Win32 bias minutes to UTC-offset hours. Separated so
+/// we can unit-test the i32::MIN corner case without going through Win32.
+///
+/// Bias convention: `bias_total` is `UTC − local` in minutes, so the offset
+/// we want (east-positive, e.g. +8 for CST) is `-bias_total / 60`. We promote
+/// to i64 *before* negating — `-(i32::MIN)` is UB in release Rust.
+pub fn bias_minutes_to_offset_hours(bias_total: i32) -> i64 {
+    -(bias_total as i64) / 60
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -112,5 +122,22 @@ mod tests {
         // 30 years * 365 + 7 leap days (1972..1996 inclusive of every 4 except 1900)
         // = 10957 days => 946_684_800 seconds
         assert_eq!(epoch_secs_to_ymd(951_782_400), (2000, 2, 29));
+    }
+
+    /// P1.24 regression: `-(i32::MIN)` is UB in release Rust. The Win32 path
+    /// now routes through `bias_minutes_to_offset_hours`, which casts to i64
+    /// before negation. We can't easily inject i32::MIN via `local_offset_hours`
+    /// (it reads the real OS timezone), so the regression is anchored here
+    /// against the pure helper. If this test triggers UB, Miri / sanitizers
+    /// catch it; if it triggers a panic, debug assertions catch it.
+    #[test]
+    fn bias_minutes_to_offset_hours_survives_i32_min() {
+        // i32::MIN as minutes is ~ -4084 years — nonsense in practice, but
+        // the arithmetic must be defined.
+        let _ = bias_minutes_to_offset_hours(i32::MIN);
+        // Sanity: a CST-like bias of -480 min gives +8 hours.
+        assert_eq!(bias_minutes_to_offset_hours(-480), 8);
+        // And UTC (bias 0) gives 0.
+        assert_eq!(bias_minutes_to_offset_hours(0), 0);
     }
 }

@@ -105,7 +105,10 @@ pub fn spawn_watchdog(
             let status = loop {
                 if shutdown_rx.try_recv().is_ok() {
                     // 收到 Ctrl+C：必须显式 kill child，否则子进程会变孤儿。
-                    let _ = child.kill();
+                    let pid = child.id();
+                    if let Err(e) = child.kill() {
+                        tracing::warn!("watchdog kill PID {} 失败: {}", pid, e);
+                    }
                     let _ = child.wait();
                     let _ = event_tx.send(WatchdogEvent::Stopped {
                         monitor_id,

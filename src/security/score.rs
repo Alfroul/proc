@@ -345,6 +345,7 @@ impl BackgroundScorer {
 
                     match req {
                         ScoringRequest::Score { processes, ports } => {
+                            let started = std::time::Instant::now();
                             let alive_pids: HashSet<u32> =
                                 processes.iter().map(|p| p.pid).collect();
                             scorer.invalidate_dead(&alive_pids);
@@ -359,6 +360,11 @@ impl BackgroundScorer {
                                 scores.insert(proc.pid, score);
                             }
                             scorer.flush();
+                            tracing::debug!(
+                                elapsed_ms = started.elapsed().as_millis() as u64,
+                                procs = procs_slice.len(),
+                                "BackgroundScorer 评分完成",
+                            );
                             let _ = res_tx.send(scores);
                         }
                         ScoringRequest::Shutdown => break,

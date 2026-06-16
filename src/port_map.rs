@@ -169,6 +169,7 @@ pub struct PortEntry {
 }
 
 pub fn scan_ports() -> Result<Vec<PortEntry>> {
+    let started = std::time::Instant::now();
     let af_flags = netstat2::AddressFamilyFlags::IPV4 | netstat2::AddressFamilyFlags::IPV6;
     let proto_flags = netstat2::ProtocolFlags::TCP | netstat2::ProtocolFlags::UDP;
 
@@ -182,7 +183,13 @@ pub fn scan_ports() -> Result<Vec<PortEntry>> {
         }
         map
     });
-    scan_ports_with_names(&sockets_info, &name_map)
+    let result = scan_ports_with_names(&sockets_info, &name_map);
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        entries = result.as_ref().map(|v| v.len()).unwrap_or(0),
+        "scan_ports 完成",
+    );
+    result
 }
 
 pub fn scan_ports_with_names(

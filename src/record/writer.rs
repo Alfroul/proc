@@ -42,6 +42,8 @@ impl Recorder {
             .name("recorder".to_string())
             .spawn(move || {
                 let mut file = file;
+                let mut frames_since_log: u64 = 0;
+                let mut bytes_since_log: u64 = 0;
                 while let Ok(msg) = rx.recv() {
                     match msg {
                         WriterMsg::Frame(frame) => {
@@ -54,6 +56,17 @@ impl Recorder {
                                     break;
                                 }
                                 let _ = file.flush();
+                                frames_since_log += 1;
+                                bytes_since_log += 8 + bytes.len() as u64;
+                                if frames_since_log >= 100 {
+                                    tracing::debug!(
+                                        frames = frames_since_log,
+                                        bytes = bytes_since_log,
+                                        "recorder 写入进度",
+                                    );
+                                    frames_since_log = 0;
+                                    bytes_since_log = 0;
+                                }
                             }
                         }
                         WriterMsg::Stop => {

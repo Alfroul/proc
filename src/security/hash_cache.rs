@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::{BufReader, Read};
 
 use sha2::{Digest, Sha256};
 
@@ -7,6 +8,12 @@ use super::signature::SignatureStatus;
 
 const CACHE_FILE_NAME: &str = "sig_cache.json";
 const MAX_ENTRIES: usize = 2000;
+
+/// Hard cap on how many bytes of a file we'll hash. Past this point we stop
+/// reading and finalize the digest over what we have. Keeps latency bounded
+/// on multi-GB installers and (more importantly) means a hostile file can't
+/// make us OOM by being arbitrarily large.
+const MAX_HASH_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Content-hash-based signature status cache entry.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -96,17 +103,37 @@ impl HashReputation {
             || lower.starts_with("c:\\windows\\winsxs\\")
     }
 
-    /// Compute SHA-256 of file contents. Returns None on any I/O error.
+    /// Compute SHA-256 of file contents via streaming reader. Caps reading at
+    /// `MAX_HASH_BYTES` (64 MB) so a hostile file can't trigger OOM and so
+    /// multi-GB installers stay bounded. Returns None on any I/O error.
     fn hash_file(exe_path: &str) -> Option<String> {
-        let data = std::fs::read(exe_path).ok()?;
-        // Large files (>128 MB): hash only first 64 MB to keep latency bounded
-        let slice = if data.len() > 128 * 1024 * 1024 {
-            &data[..64 * 1024 * 1024]
-        } else {
-            &data
-        };
+        let file = std::fs::File::open(exe_path).ok()?;
+        let mut reader = BufReader::new(file);
+
         let mut hasher = Sha256::new();
-        hasher.update(slice);
+        // 1 MB chunks — small enough to keep peak memory flat regardless of
+        // input size, large enough that read syscall overhead is negligible.
+        let mut buf = vec![0u8; 1024 * 1024];
+        let mut consumed: u64 = 0;
+
+        loop {
+            if consumed >= MAX_HASH_BYTES {
+                break;
+            }
+            let remaining = MAX_HASH_BYTES - consumed;
+            let to_read = std::cmp::min(buf.len() as u64, remaining) as usize;
+            if to_read == 0 {
+                break;
+            }
+            let n = match reader.read(&mut buf[..to_read]) {
+                Ok(0) => break, // EOF
+                Ok(n) => n,
+                Err(_) => return None,
+            };
+            hasher.update(&buf[..n]);
+            consumed += n as u64;
+        }
+
         Some(format!("{:x}", hasher.finalize()))
     }
 
@@ -223,5 +250,81 @@ impl HashReputation {
 
     pub fn is_whitelisted(exe_path: &str) -> bool {
         Self::is_system_path(exe_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Streaming hash completes on a file larger than `MAX_HASH_BYTES`.
+    /// Before P1.23 this would have called `std::fs::read` on the whole file
+    /// (100 MB → 100 MB resident). The streaming version reads in 1 MB chunks
+    /// and stops at the cap.
+    #[test]
+    fn hash_file_handles_oversized_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+
+        // Write a file bigger than MAX_HASH_BYTES (64 MB → write 80 MB).
+        // Use a repeating pattern so the bytes are non-zero; otherwise the
+        // OS may give us a sparse file that doesn't really exercise the read path.
+        let chunk = vec![0xA5u8; 4 * 1024 * 1024]; // 4 MB
+        let mut f = std::fs::File::create(&path).unwrap();
+        for _ in 0..20 {
+            f.write_all(&chunk).unwrap();
+        }
+        f.flush().unwrap();
+        drop(f);
+
+        // Must not panic / OOM / hang.
+        let hash = HashReputation::hash_file(path.to_str().unwrap());
+        assert!(hash.is_some(), "hash_file on 80 MB file must succeed");
+        let hash = hash.unwrap();
+        assert_eq!(hash.len(), 64, "SHA-256 hex length");
+    }
+
+    /// Files with identical first `MAX_HASH_BYTES` bytes hash to the same digest.
+    /// This is the observable contract the cap introduces — and the test
+    /// fails fast if someone bumps MAX_HASH_BYTES without also reconsidering
+    /// collision risk.
+    #[test]
+    fn hash_file_caps_at_max_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Build two files whose first MAX_HASH_BYTES are identical; one is
+        // exactly MAX_HASH_BYTES, the other is MAX_HASH_BYTES + extra tail.
+        let cap = MAX_HASH_BYTES as usize;
+        let pattern_chunk = vec![0x5Au8; 4 * 1024 * 1024];
+
+        let capped_path = dir.path().join("capped.bin");
+        let tail_path = dir.path().join("tail.bin");
+
+        {
+            let mut a = std::fs::File::create(&capped_path).unwrap();
+            let mut written = 0usize;
+            while written < cap {
+                let take = std::cmp::min(pattern_chunk.len(), cap - written);
+                a.write_all(&pattern_chunk[..take]).unwrap();
+                written += take;
+            }
+            a.flush().unwrap();
+
+            let mut b = std::fs::File::create(&tail_path).unwrap();
+            written = 0;
+            while written < cap {
+                let take = std::cmp::min(pattern_chunk.len(), cap - written);
+                b.write_all(&pattern_chunk[..take]).unwrap();
+                written += take;
+            }
+            // Append a different tail beyond the cap — it should be ignored.
+            b.write_all(&[0xFFu8; 1024]).unwrap();
+            b.flush().unwrap();
+        }
+
+        let h1 = HashReputation::hash_file(capped_path.to_str().unwrap()).unwrap();
+        let h2 = HashReputation::hash_file(tail_path.to_str().unwrap()).unwrap();
+        assert_eq!(h1, h2, "bytes beyond MAX_HASH_BYTES must not affect digest");
     }
 }

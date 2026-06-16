@@ -61,16 +61,30 @@ fn main() {
 
 fn init_tracing() {
     let config_dir = proc::dirs_config_dir();
-    std::fs::create_dir_all(&config_dir).ok();
+    if let Err(e) = std::fs::create_dir_all(&config_dir) {
+        eprintln!("警告: 创建配置目录失败: {} (日志不可用)", e);
+        return;
+    }
+    // File::create 默认 truncate，启动时覆盖旧日志 —— 防止长期运行后 proc.log 无限增长。
+    // 如需保留历史，请用 RUST_LOG + 外部 logrotate 或改接 tracing-appender（见 ADR-0006）。
     let log_path = config_dir.join("proc.log");
-
-    let file = std::fs::File::create(&log_path).ok();
-    if let Some(file) = file {
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(file)
-            .with_ansi(false)
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).ok();
+    match std::fs::File::create(&log_path) {
+        Ok(file) => {
+            // 默认 info 级别；用户可用 RUST_LOG=proc=debug 提级。
+            // from_default_env 在 RUST_LOG 未设置时返回空 filter → with_env_filter
+            // 退回到我们给的 default。
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+            let subscriber = tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_writer(file)
+                .with_ansi(false)
+                .finish();
+            if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
+                eprintln!("警告: 初始化日志失败: {} (日志不可用)", e);
+            }
+        }
+        Err(e) => eprintln!("警告: 创建日志文件失败: {} (日志不可用)", e),
     }
 }
 
