@@ -13,6 +13,7 @@ pub mod error;
 pub mod estats;
 pub mod format;
 pub mod gpu;
+pub mod inspect;
 pub mod kill;
 pub mod monitor;
 pub mod port_map;

@@ -19,6 +19,66 @@ pub enum AppMode {
     Help,
 }
 
+/// Inspector 内部 Tab（阶段 13，ADR-0004）。
+///
+/// v1 范围：Summary / Env / Network / Dlls（4 个）。
+/// v2 计划追加 Handles / Windows（在 0.5.0+）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InspectionTab {
+    #[default]
+    Summary,
+    Env,
+    Network,
+    Dlls,
+}
+
+impl InspectionTab {
+    /// Tab 栏上的中文显示文字（也是测试的稳定 anchor）。
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Summary => "概要",
+            Self::Env => "环境",
+            Self::Network => "网络",
+            Self::Dlls => "DLL",
+        }
+    }
+
+    /// `Tab` 键正向切换。next 是循环的：Dlls → Summary。
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Summary => Self::Env,
+            Self::Env => Self::Network,
+            Self::Network => Self::Dlls,
+            Self::Dlls => Self::Summary,
+        }
+    }
+
+    /// `Shift+Tab`（BackTab）逆向切换。prev 也是循环的：Summary → Dlls。
+    #[must_use]
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Summary => Self::Dlls,
+            Self::Env => Self::Summary,
+            Self::Network => Self::Env,
+            Self::Dlls => Self::Network,
+        }
+    }
+
+    /// 列举全部 v1 Tab —— Tab 栏渲染用。
+    #[must_use]
+    pub fn all() -> &'static [InspectionTab] {
+        const ALL: &[InspectionTab] = &[
+            InspectionTab::Summary,
+            InspectionTab::Env,
+            InspectionTab::Network,
+            InspectionTab::Dlls,
+        ];
+        ALL
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppGroupSortField {
     Cpu,

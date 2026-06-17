@@ -1,6 +1,6 @@
 [package]
 name = "proc"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
 description = "交互式 TUI 系统进程管理器，集成进程/网络/USB/Docker/安全评分/录屏"
@@ -46,6 +46,7 @@ windows = { version = "0.57", features = [
     "Win32_System_Threading",
     "Win32_System_Services",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Diagnostics_Debug",
     "Win32_Security",
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",
@@ -55,6 +56,7 @@ windows = { version = "0.57", features = [
     "Win32_Security_WinTrust",
     "Win32_System_Power",
     "Win32_System_Time",
+    "Wdk_System_Threading",
 ] }
 filelocksmith = "2"
 

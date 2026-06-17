@@ -8,7 +8,9 @@ const MAX_TRACKED: usize = 50;
 const MAX_OP_HISTORY: usize = 100;
 
 // Re-export types that moved to app_panel
-pub use crate::app_panel::{AppGroupSortField, AppMode, KillRequest, MonitorAddSubmenu, OpRecord};
+pub use crate::app_panel::{
+    AppGroupSortField, AppMode, InspectionTab, KillRequest, MonitorAddSubmenu, OpRecord,
+};
 
 use crate::alert::AlertManager;
 use crate::app_panel::{KeyResult, Panel, PanelContext};
@@ -21,8 +23,10 @@ use crate::docker::ContainerInfo;
 use crate::eject::classify::HandleRisk;
 use crate::eject::{HandleLock, RemovableDevice};
 use crate::error::Result;
+use crate::inspect::InspectionData;
 use crate::port_map::{self, NetworkViewMode, PortEntry};
 use crate::record::Player;
+use crate::search::SearchState;
 use crate::security::{BackgroundScorer, SecurityScore};
 use crate::tree::TreeNode;
 use crate::view_models::DockerPanel;
@@ -82,6 +86,12 @@ pub struct App {
     pub status_message: Option<String>,
     pub kill_confirm: bool,
     pub pending_kill: Option<KillRequest>,
+
+    // Inspector (阶段 13，ADR-0004)：详情页顶部 Tab 栏 + 采集快照
+    pub inspection_tab: InspectionTab,
+    pub inspection_data: Option<InspectionData>,
+    pub inspection_search: SearchState,
+    pub inspection_scroll: usize,
 
     // History tracking
     pub proc_history: HashMap<u32, ProcHistory>,
@@ -182,6 +192,10 @@ impl App {
             status_message,
             kill_confirm: false,
             pending_kill: None,
+            inspection_tab: InspectionTab::Summary,
+            inspection_data: None,
+            inspection_search: SearchState::new(),
+            inspection_scroll: 0,
             proc_history: HashMap::new(),
             global_cpu_history: VecDeque::new(),
             global_mem_history: VecDeque::new(),
@@ -345,7 +359,8 @@ impl App {
         let any_search = self.process_panel.search.is_active()
             || self.process_panel.tree_search.is_active()
             || self.process_panel.app_group_search.is_active()
-            || self.port_panel.port_search.is_active();
+            || self.port_panel.port_search.is_active()
+            || self.inspection_search.is_active();
         if !any_search
             && !self.kill_confirm
             && self.monitor_panel.add_submenu.is_none()
@@ -441,6 +456,17 @@ impl App {
                 self.docker_panel.start_watching();
             }
         }
+        // 进入详情页时预加载 Inspector 数据：env/dlls/net 一次采集（同步）。
+        // 失败的子项会退化为空 Vec，TUI 层在 Tab 内显示「无数据」。
+        if mode == AppMode::ProcessDetail {
+            self.inspection_tab = InspectionTab::Summary;
+            self.inspection_scroll = 0;
+            self.inspection_search.clear();
+            self.inspection_data = self
+                .detail_process
+                .as_ref()
+                .map(|p| crate::inspect::inspect(p.pid));
+        }
         self.mode = mode;
         self.process_panel.search.clear();
         self.status_message = None;
@@ -475,10 +501,69 @@ impl App {
     }
 
     fn handle_detail_key(&mut self, key: KeyEvent) {
+        // Search active → 优先吃输入；只有 Esc/Enter 走 SearchState 自带的退出。
+        if self.inspection_search.is_active() {
+            // SearchState 用 Esc 退出搜索并清空 query；这里我们让 Esc 只退出
+            // 搜索（保留 detail 视图），用户再按一次 Esc 才回 ProcessList。
+            let consumed = self.inspection_search.handle_input(key);
+            if consumed {
+                self.inspection_scroll = 0;
+                return;
+            }
+            // 搜索时 Tab/BackTab 切 Tab 无意义 → 吞掉，避免误触丢搜索内容。
+            if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+                return;
+            }
+            // 其它键（Up/Down/PageUp/...）继续走常规分支，方便在过滤结果里滚动。
+        }
+
         match key.code {
+            // Tab / Shift+Tab 切换 Inspector 内部 Tab（避开 1-6 主面板切换）。
+            // crossterm 把 Shift+Tab 编码成 KeyCode::BackTab。
+            KeyCode::Tab => {
+                self.inspection_tab = self.inspection_tab.next();
+                self.inspection_scroll = 0;
+            }
+            KeyCode::BackTab => {
+                self.inspection_tab = self.inspection_tab.prev();
+                self.inspection_scroll = 0;
+            }
+            // `r` 强制重新采集（用户怀疑数据过期 / 权限变化时）。
+            KeyCode::Char('r') => {
+                if let Some(proc) = &self.detail_process {
+                    self.inspection_data = Some(crate::inspect::inspect(proc.pid));
+                    self.inspection_scroll = 0;
+                    self.status_message = Some(format!("已刷新 Inspector 数据 (PID {})", proc.pid));
+                }
+            }
+            // `/` 进入搜索（Env/Dlls 数据量大时必须）。
+            KeyCode::Char('/') => {
+                self.inspection_search.active = true;
+                self.inspection_scroll = 0;
+            }
+            // 上下滚动：Summary 走整页滚动；Env/Dlls/Network 在 Tab 内部滚动。
+            KeyCode::Up => {
+                self.inspection_scroll = self.inspection_scroll.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                self.inspection_scroll = self.inspection_scroll.saturating_add(1);
+            }
+            KeyCode::PageUp => {
+                self.inspection_scroll = self.inspection_scroll.saturating_sub(10);
+            }
+            KeyCode::PageDown => {
+                self.inspection_scroll = self.inspection_scroll.saturating_add(10);
+            }
+            KeyCode::Home => {
+                self.inspection_scroll = 0;
+            }
+            KeyCode::End => {
+                self.inspection_scroll = usize::MAX / 2;
+            }
             KeyCode::Enter | KeyCode::Esc => {
                 self.process_panel.process_view_mode = ProcessViewMode::List;
                 self.mode = AppMode::ProcessList;
+                self.inspection_search.clear();
             }
             KeyCode::Char('k') => {
                 if let Some(ref proc) = self.detail_process {

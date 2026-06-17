@@ -5,6 +5,56 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-06-17
+
+本次发布聚焦于 Inspector：进程详情页升级为多 Tab 深挖视图（环境变量 / 网络连接 / 已加载模块）。阶段 12（数据层）+ 阶段 13（TUI）共 2 个阶段，5 modified + 3 new，核心 +482 / -13。无 API 破坏；详情页原有快捷键全部保留（向后兼容）。
+
+实测数据（来自 `docs/reviews/REVIEW-14.md`）：
+
+- 测试 **325 passed / 0 failed / 2 ignored**（baseline 291 → +34）
+- pedantic `must_use_candidate`：**0**
+- ADR-0004 落地一致性：✅ B2 方案无偏差
+
+### 阶段 12 — Inspector v1 数据层 / Round 8
+
+- Added (ADR-0004): `src/inspect/` 新模块 + 3 个子模块（`env` / `dlls` / `net`），顶层 `inspect::inspect(pid)` 聚合成 `InspectionData { env, dlls, net }`。
+- Added: Windows 环境变量采集 —— `OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION)` + `NtQueryInformationProcess(ProcessBasicInformation)` 走 PEB → ProcessParameters → Environment。x64 上偏移 0x20 / 0x80 / 0x3F0 注释完整；32-bit 显式拒绝（避免错误偏移）。
+- Added: Windows 模块列表 —— `CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32)` + `MODULEENTRY32W`，与 `security/dll_check.rs` 同源。
+- Added: Linux 环境变量 —— 读 `/proc/<pid>/environ`，NUL 分隔 + `=` 分隔。
+- Added: Linux 模块列表 —— 解析 `/proc/<pid>/maps`，BTreeMap 合并同 path 的多段映射（r-xp / r--p / rw-p），取最低 base + span 求和。
+- Added: `Cargo.toml` 新增 Windows feature `Win32_System_Diagnostics_Debug`（ReadProcessMemory）+ `Wdk_System_Threading`（NtQueryInformationProcess）。
+- Added: 跨平台降级 —— 非 Win/Linux 平台 env/dlls 返回 `ProcError::PermissionDenied`，由 TUI 层显示降级提示。
+- Added: `tests/test_inspect.rs` 7 个集成测试 + `src/inspect/*.rs` 内嵌单元测试（self env/dlls/net 数据正确性 + unknown PID + Linux proc_maps 解析）。
+
+### 阶段 13 — Inspector v1 TUI / Round 9
+
+- Added (ADR-0004): `InspectionTab` 枚举（Summary / Env / Network / Dlls），`label()` / `next()` / `prev()` / `all()` 4 个方法全部 `#[must_use]`，`#[derive(Default)]` 保证 Summary 为默认 Tab。
+- Added: `App` 结构体新增 4 字段（`inspection_tab` / `inspection_data` / `inspection_search` / `inspection_scroll`），集中在「Inspector」分组；`App::new()` 默认值正确。
+- Added: `switch_mode(ProcessDetail)` 预加载 `inspection_data` + 重置 tab/scroll/search —— 进入详情页立即可见数据。
+- Added: `handle_detail_key` 重写 —— 搜索 active 时优先吃输入且吞掉 Tab/BackTab（避免误触丢搜索内容）；Tab 切换重置 scroll；`r` 重新 `inspect()` + status_message 提示；Esc 双层（先退搜索，再退页面）。
+- Added: `src/tui/detail_view.rs` 整体重写 —— Tab 栏（当前 Tab `accent + Bold + Underlined`）+ 主体内容区，4 个 Tab 分别渲染，每个 Tab 处理 empty / no-match / data-None 三态降级提示。
+- Changed: Summary Tab 保留原详情页全部内容（分类 / 父进程 / 状态 / CPU / 内存 / 磁盘 / 运行时长 / exe / cmd / cwd / 端口 / 网络摘要 / 安全分 / 风险因子 / 快捷键）—— **零回归**。
+- Changed: Dlls Tab 按 path 字母排序；Network Tab 不接搜索（数据量通常小）。
+- Added: `tests/test_inspector.rs` 22 个集成测试 —— InspectionTab 枚举行为 + App state 默认 + Tab/BackTab 切换 + 搜索 + 刷新 + 滚动 + 跨平台 smoke。
+
+### 验证矩阵
+
+- `cargo fmt --all -- --check` ✅
+- `cargo clippy --all-targets -- -D warnings` ✅
+- `cargo test --release` ✅ 325 passed / 0 failed / 2 ignored（baseline 291 → +34：7 inspect 数据层 + 22 inspector TUI + 5 inspect 内嵌单元测试）
+- `cargo build --release --no-default-features` ✅
+- `cargo clippy ... -W clippy::pedantic | grep must_use_candidate` ✅ 0
+
+### ADR 状态
+
+- ADR-0004（Inspector B2 升级详情页）Status: **Accepted**（阶段 12-13 落地，2026-06-17）
+
+### P2 改善建议（归档到 `docs/tech-debt.md`）
+
+- P2-6：`detail_view::draw_summary` 每帧重扫端口 → 0.5.0+ 复用 `inspection_data.net`
+- P2-7：`parse_utf16_env` 双 NUL 截断改 `find` → 0.5.0+ 可选
+- P2-8：`End` 设为 `usize::MAX / 2` 加注释 → 0.5.0+ 可选
+
 ## [0.3.0] - 2026-06-17
 
 本次发布聚焦于资源生命周期治理、性能优化、CI 加固、文档/帮助打磨、错误链完善，并伴随二进制体积优化。阶段 5-9 共 5 个 Round 累积：69 文件，+1043 / -249。无 API 破坏；错误类型 `ProcError` 转 struct form 含 source chain（ADR-0005）。
