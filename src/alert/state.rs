@@ -48,6 +48,7 @@ pub struct AlertEvent {
 }
 
 impl Alert {
+    #[must_use]
     pub fn new(
         rule_id: String,
         severity: AlertSeverity,
@@ -156,6 +157,7 @@ impl Alert {
         }
     }
 
+    #[must_use]
     pub fn severity_label(&self) -> &'static str {
         match self.severity {
             AlertSeverity::Info => "INFO",
@@ -165,6 +167,7 @@ impl Alert {
     }
 
     /// Check if this alert is currently active (firing or silenced)
+    #[must_use]
     pub fn is_active(&self) -> bool {
         matches!(self.state, AlertState::Firing | AlertState::Silenced)
     }

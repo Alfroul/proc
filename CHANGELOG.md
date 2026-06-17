@@ -5,12 +5,69 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.3.0] - 2026-06-17
 
-### 新增
+本次发布聚焦于资源生命周期治理、性能优化、CI 加固、文档/帮助打磨、错误链完善，并伴随二进制体积优化。阶段 5-9 共 5 个 Round 累积：69 文件，+1043 / -249。无 API 破坏；错误类型 `ProcError` 转 struct form 含 source chain（ADR-0005）。
 
-- **进程列表排序字段持久化**：`←`/`→`/`S` 切换排序时写入 `~/.config/proc/ui.toml`，下次启动恢复上次选择（解决"每次打开都要手动切内存"的痛点）。新增 `src/ui_state.rs` 模块 + 4 个单元测试。
-- **3 个新主题**：Gruvbox（暖色复古）、One Dark（Atom 默认配色）、Rose Pine（柔和现代）。`THEMES` 从 7 个扩展到 10 个，`t` 循环切换。
+实测数据（来自 `docs/reviews/REVIEW-10.md`）：
+
+- 测试 **291 passed / 0 failed / 2 ignored**（baseline 283 → +8）
+- 二进制体积 **-6.1%**（7.3 MB → 6.9 MB，ADR-0007 profile.release）
+- pedantic `must_use_candidate`：**0**
+
+### 阶段 5 — 资源生命周期 / Round 3
+
+- Fixed (ADR-0006): `BackgroundScorer::Drop` 死锁修复 —— take 出 `request_tx` 后再 join，避免 bounded channel 满时 `try_send(Shutdown)` 失败导致 worker 卡死。新增 `tests/test_scorer_concurrency.rs::test_scorer_request_drops_when_busy` 验证（修复前 60s+ 不退出，修复后 0.03s）。
+- Changed (ADR-0006): `docker/events.rs` 和 `monitor/port_watcher.rs` 事件通道从无界 `channel()` 改为 `sync_channel(64)` + `try_send` + `Full` → `tracing::warn!`，避免慢消费者积压。
+- Changed: `diag.rs` 资源生命周期重构（+109 / -50），消除多处散落的临时句柄。
+- Performance: `port_map::scan_ports` 走 `SysinfoRegistry` 全局单例，消除每次扫描 `System::new_all()` 的 ~200ms 开销；`eject::locks::find_volume_lockers_with_processes` 的最差 O(N × 200ms) 路径同步消除。
+
+### 阶段 6 — 性能优化 / Round 4
+
+- Fixed (ADR-0003): PID 复用导致旧实例的安全评分缓存过继给新进程 —— `ScoreCache::cache_key` 加 `start_time` 字段（`{pid}:{start_time}:{exe}`），`App::update_disk_speeds` 的 `prev_process_disk` 键改为 `(pid, start_time)` 元组。新增 `test_score_cache_pid_reuse_isolation` 回归测试。
+- Performance: `format_speed` 抽取到 `src/format.rs`，统一磁盘 / 网络速率格式化。
+- Performance: 500 进程基准（`tests/test_stage8_perf_regress.rs`）`rebuild_sorted_cache` **38.2 µs**（< 5ms 目标，130× 裕量）。
+
+### 阶段 7 — CI / Cargo / Round 5
+
+- Added (ADR-0007): `[profile.release]` 保守版（`opt-level=3` + `lto="thin"` + `codegen-units=1` + `strip="debuginfo"`，**不开** `panic="abort"`）。二进制体积 -6.1%。
+- Changed: `tokio` features 精简为 `["rt", "rt-multi-thread", "macros", "net", "sync", "time"]`，`cargo build --no-default-features` 通过。
+- Added: CI 新增 `check-macos` / `msrv` (1.85) / `audit` (RustSec) job。
+- Fixed: `dll_check.rs::truncate_path` 改为手写实现以兼容 Rust 1.85（`str::split_once` 边界 case）。
+
+### 阶段 8 — 文档 / 帮助 / Round 6
+
+- Added: **首次启动引导** —— `~/.config/proc/ui.toml` 不存在时显示一次性提示。
+- Added: **进程列表排序字段持久化** —— `←`/`→`/`S` 切换排序时写入 `ui.toml`，下次启动恢复。新增 `src/ui_state.rs` 模块，含 9 个解析测试覆盖 sort_field / first_run。
+- Added: **3 个新主题** —— Gruvbox（暖色复古）/ One Dark（Atom 默认配色）/ Rose Pine（柔和现代），`THEMES` 从 7 个扩展到 10 个，`t` 循环切换。
+- Changed: `help_panel.rs` 重构为结构化数据 + 滚动，新增 `sections_are_non_empty` / `every_shortcut_has_a_label` 内嵌不变量测试。
+
+### 阶段 9 — error.rs source chain / Round 7
+
+- Changed (ADR-0005): `ProcError` 7 个变体全部转 struct form，统一含 `#[source] source: Option<Box<dyn StdError + Send + Sync>>`。配套 14 个 `xxx()` / `xxx_with()` helper。全仓库 13 个调用站点迁移，无 `ProcError::Variant { ... }` 字面量构造（`IoError` 仍保留 `#[from] std::io::Error` 向后兼容 `?`）。
+- Added: `tests/test_skeleton.rs::test_proc_error_source_chain` 验证 source chain 可遍历到根因。
+- Fixed: pedantic `must_use_candidate` 全部消除（0 残留）。
+
+### 阶段 11 — 批量修复 + 发布（本次发布）
+
+- Fixed (REVIEW-10 P1-3): `SecurityScorer::invalidate_dead` 改用 `(pid, start_time)` 元组精确清理，避免 PID 复用场景下陈旧 entry 残留（之前仅靠 30s TTL `evict_expired` 兜底）。新增 `parse_alive_key` 解析键前两段。
+- Added: `docs/tech-debt.md` 归档 REVIEW-10 的 5 项 P2 长期改善建议。
+- Docs: README GPU 路线图补"AMD/Intel 列入 0.5.0+ 路线图"。
+
+### 验证矩阵
+
+- `cargo fmt --all -- --check` ✅
+- `cargo clippy --all-targets -- -D warnings` ✅
+- `cargo test --release` ✅ 291 passed / 0 failed / 2 ignored（baseline 283 → +8：1 PID 复用 + 6 ui_state + 1 source chain）
+- `cargo build --release --no-default-features` ✅
+- `cargo clippy ... -W clippy::pedantic | grep must_use_candidate` ✅ 0
+
+### ADR 状态
+
+- ADR-0003（PID 复用 start_time 键）Status: **Accepted**（阶段 6 落地，2026-06-16）
+- ADR-0005（error.rs source chain）Status: **Accepted**（阶段 9 落地）
+- ADR-0006（sync_channel(64) 背压）Status: **Accepted**（阶段 5 落地，2026-06-16）
+- ADR-0007（profile.release 保守版）Status: **Accepted**（阶段 7 落地，2026-06-16）
 
 ## [0.2.1] - 2026-06-16
 
@@ -55,11 +112,6 @@ Linux 端仍由 GitHub Actions `check-linux` job 验证；本机 WSL vhdx 仍损
 ### ADR 状态
 
 - ADR-0002（cfg gate）Status: **Accepted**（阶段 2 落地，2026-06-15，本次随 0.2.1 一起发布）
-
-
-
-- **进程列表排序字段持久化**：`←`/`→`/`S` 切换排序时写入 `~/.config/proc/ui.toml`，下次启动恢复上次选择（解决"每次打开都要手动切内存"的痛点）。新增 `src/ui_state.rs` 模块 + 4 个单元测试。
-- **3 个新主题**：Gruvbox（暖色复古）、One Dark（Atom 默认配色）、Rose Pine（柔和现代）。`THEMES` 从 7 个扩展到 10 个，`t` 循环切换。
 
 ## [0.2.0] - 2026-06-15
 

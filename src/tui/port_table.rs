@@ -277,7 +277,7 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
             };
 
             Row::new(vec![
-                Cell::from(row.protocol.map(|p| p.to_string()).unwrap_or_default())
+                Cell::from(row.protocol.map(|p| format!("[{}]", p)).unwrap_or_default())
                     .style(proto_style),
                 Cell::from(row.local_addr.clone()),
                 Cell::from(row.remote_addr.clone()),
@@ -709,9 +709,9 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
                             Cell::from(group.close_wait.to_string())
                                 .style(Style::default().fg(cw_color)),
                             Cell::from(group.unique_remote_addrs.len().to_string()),
-                            Cell::from(format_speed(group.up_speed))
+                            Cell::from(crate::format::format_speed(group.up_speed))
                                 .style(Style::default().fg(up_style)),
-                            Cell::from(format_speed(group.down_speed))
+                            Cell::from(crate::format::format_speed(group.down_speed))
                                 .style(Style::default().fg(down_style)),
                             Cell::from(total_str),
                         ])
@@ -762,7 +762,7 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
                         Row::new(vec![
                             Cell::from(format!("{} {}", prefix, remote)),
                             Cell::from(""),
-                            Cell::from(conn.protocol.to_string()).style(proto_style),
+                            Cell::from(format!("[{}]", conn.protocol)).style(proto_style),
                             Cell::from(""),
                             Cell::from(state_str.to_string()),
                             Cell::from(""),
@@ -778,7 +778,7 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
                         Row::new(vec![
                             Cell::from(format!("{} {}", prefix, remote)),
                             Cell::from(""),
-                            Cell::from(conn.protocol.to_string()).style(proto_style),
+                            Cell::from(format!("[{}]", conn.protocol)).style(proto_style),
                             Cell::from(""),
                             Cell::from(state_str.to_string()),
                             Cell::from(""),
@@ -864,33 +864,38 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(table, table_area, &mut state);
 }
 
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
-        format!("{}…", truncated)
+/// 按显示宽度截断字符串（汉字宽度按 2 计算），超出加 `…` 后缀。
+fn truncate_str(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
     }
+    let total_width = unicode_width::UnicodeWidthStr::width(s);
+    if total_width <= max_width {
+        return s.to_string();
+    }
+    // 截断情形：留 1 列给 …
+    let budget = max_width.saturating_sub(1);
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in s.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w > budget {
+            break;
+        }
+        out.push(ch);
+        width += w;
+    }
+    out.push('…');
+    out
 }
 
+#[must_use]
 pub fn draw_placeholder(_area: Rect) -> String {
     "端口映射（开发中）".to_string()
 }
 
 const KB: u64 = 1024;
 const MB: u64 = KB * 1024;
-
-fn format_speed(bytes_per_sec: u64) -> String {
-    if bytes_per_sec >= MB {
-        format!("{:.1}MB/s", bytes_per_sec as f64 / MB as f64)
-    } else if bytes_per_sec >= KB {
-        format!("{:.0}KB/s", bytes_per_sec as f64 / KB as f64)
-    } else if bytes_per_sec > 0 {
-        format!("{}B/s", bytes_per_sec)
-    } else {
-        "-".to_string()
-    }
-}
 
 fn bandwidth_style(bytes_per_sec: u64) -> Color {
     if bytes_per_sec >= MB {
@@ -1200,4 +1205,24 @@ fn draw_diagnostic_result(f: &mut Frame, area: Rect, app: &App) {
         1,
     );
     f.render_widget(Paragraph::new(footer), footer_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 中文路径不再按"字符数"而是按"显示宽度"截断 —— 汉字宽度按 2。
+    #[test]
+    fn truncate_str_respects_wide_chars() {
+        // 6 个汉字 = 12 列宽，max_width=10 应截断为 4 个汉字 + …（4*2 + 1 = 9 列）
+        assert_eq!(truncate_str("汉字测试路径", 10), "汉字测试…");
+        // max_width=12 时整串恰好放得下，不加 …
+        assert_eq!(truncate_str("汉字测试路径", 12), "汉字测试路径");
+        // ASCII + 中文混合
+        assert_eq!(truncate_str("abc汉字", 7), "abc汉字");
+        assert_eq!(truncate_str("abc汉字", 6), "abc汉…");
+        // 边界
+        assert_eq!(truncate_str("short", 24), "short");
+        assert_eq!(truncate_str("abcdefghijklmnopqrstuvwxyz", 5), "abcd…");
+    }
 }

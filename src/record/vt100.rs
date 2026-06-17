@@ -48,6 +48,7 @@ pub struct VtFrame {
 }
 
 impl VtFrame {
+    #[must_use]
     pub fn from_buffer(buffer: &Buffer, area: Rect, timestamp_ms: u64) -> Self {
         let mut rle: Vec<(u16, CellDump)> = Vec::new();
 
@@ -89,6 +90,7 @@ pub struct VtFrameWidget<'a> {
 }
 
 impl<'a> VtFrameWidget<'a> {
+    #[must_use]
     pub fn new(frame: &'a VtFrame) -> Self {
         Self { frame }
     }
@@ -135,6 +137,7 @@ impl Widget for VtFrameWidget<'_> {
 
 const RGB_MARKER: u32 = 0x8000_0000;
 
+#[must_use]
 pub fn pack_color(color: Color) -> u32 {
     match color {
         Color::Reset => 0,
@@ -159,6 +162,7 @@ pub fn pack_color(color: Color) -> u32 {
     }
 }
 
+#[must_use]
 pub fn unpack_color(packed: u32) -> Color {
     if packed & RGB_MARKER != 0 {
         let r = ((packed >> 16) & 0xFF) as u8;
@@ -206,6 +210,7 @@ fn pack_modifier(modifier: Modifier) -> u8 {
     bits
 }
 
+#[must_use]
 pub fn unpack_modifier(bits: u8) -> Modifier {
     let mut m = Modifier::empty();
     if bits & 1 != 0 {
@@ -236,6 +241,7 @@ pub struct VtRecorder {
     start_time: Instant,
     last_capture: Instant,
     path: PathBuf,
+    stopped: bool,
 }
 
 impl VtRecorder {
@@ -289,6 +295,7 @@ impl VtRecorder {
             start_time: Instant::now(),
             last_capture: Instant::now() - std::time::Duration::from_millis(MIN_CAPTURE_MS),
             path,
+            stopped: false,
         })
     }
 
@@ -303,19 +310,41 @@ impl VtRecorder {
     }
 
     pub fn stop(mut self) -> anyhow::Result<PathBuf> {
+        self.stop_internal();
+        // Clone the path so we don't move out of `self` (Drop needs an intact
+        // value to destruct). The path is short and a single allocation, so
+        // the clone is negligible compared to the file join below.
+        Ok(self.path.clone())
+    }
+
+    fn stop_internal(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
         let _ = self.tx.send(RecorderMsg::Stop);
         if let Some(thread) = self.thread.take() {
             thread.join().ok();
         }
-        Ok(self.path)
     }
 
+    #[must_use]
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
 
+    #[must_use]
     pub fn elapsed_secs(&self) -> u64 {
         self.start_time.elapsed().as_secs()
+    }
+}
+
+impl Drop for VtRecorder {
+    fn drop(&mut self) {
+        // If `stop()` was already called this is a no-op. Otherwise flush
+        // any buffered frames via Stop + join so we never leak a thread
+        // or lose the final frames when the caller drops without stopping.
+        self.stop_internal();
     }
 }
 
@@ -375,14 +404,17 @@ impl VtPlayer {
         })
     }
 
+    #[must_use]
     pub fn total_frames(&self) -> usize {
         self.frames.len()
     }
 
+    #[must_use]
     pub fn frame_at(&self, index: usize) -> Option<&VtFrame> {
         self.frames.get(index)
     }
 
+    #[must_use]
     pub fn time_range_ms(&self) -> (u64, u64) {
         if self.frames.is_empty() {
             (0, 0)
@@ -394,14 +426,17 @@ impl VtPlayer {
         }
     }
 
+    #[must_use]
     pub fn width(&self) -> u16 {
         self.header.width
     }
 
+    #[must_use]
     pub fn height(&self) -> u16 {
         self.header.height
     }
 
+    #[must_use]
     pub fn header(&self) -> &VtHeader {
         &self.header
     }
@@ -409,6 +444,7 @@ impl VtPlayer {
 
 // ── Detect VT100 format ──
 
+#[must_use]
 pub fn is_vt100_file(path: &std::path::Path) -> bool {
     let Ok(file) = File::open(path) else {
         return false;

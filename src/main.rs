@@ -145,18 +145,7 @@ fn run_ls(sort: &str, limit: &Option<usize>) {
         _ => SortField::Cpu,
     };
 
-    processes.sort_by(|a, b| match sort_field {
-        SortField::Cpu => b
-            .cpu_usage
-            .partial_cmp(&a.cpu_usage)
-            .unwrap_or(std::cmp::Ordering::Equal),
-        SortField::Memory => b.memory.cmp(&a.memory),
-        SortField::Pid => a.pid.cmp(&b.pid),
-        SortField::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        SortField::Security => std::cmp::Ordering::Equal,
-        SortField::DiskRead => b.disk_read_speed.cmp(&a.disk_read_speed),
-        SortField::DiskWrite => b.disk_write_speed.cmp(&a.disk_write_speed),
-    });
+    crate::collect::sort_processes(&mut processes, sort_field);
 
     if let Some(n) = limit {
         processes.truncate(*n);
@@ -295,7 +284,8 @@ fn run_pkill(name: &str, force: bool, dry_run: bool) {
     );
 
     if failed > 0 {
-        std::process::exit(1);
+        // 部分成功 → exit(2)，便于脚本区分"全失败 (1)"与"部分成功 (2)"。
+        std::process::exit(if killed > 0 { 2 } else { 1 });
     }
 }
 
@@ -693,18 +683,7 @@ fn run_export(
         "pid" => SortField::Pid,
         _ => SortField::Cpu,
     };
-    processes.sort_by(|a, b| match sort_field {
-        SortField::Cpu => b
-            .cpu_usage
-            .partial_cmp(&a.cpu_usage)
-            .unwrap_or(std::cmp::Ordering::Equal),
-        SortField::Memory => b.memory.cmp(&a.memory),
-        SortField::Pid => a.pid.cmp(&b.pid),
-        SortField::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        SortField::Security => std::cmp::Ordering::Equal,
-        SortField::DiskRead => b.disk_read_speed.cmp(&a.disk_read_speed),
-        SortField::DiskWrite => b.disk_write_speed.cmp(&a.disk_write_speed),
-    });
+    crate::collect::sort_processes(&mut processes, sort_field);
 
     if let Some(n) = limit {
         processes.truncate(*n);

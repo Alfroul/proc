@@ -57,6 +57,7 @@ pub fn query_processor_power_info() -> Option<Vec<()>> {
 }
 
 /// Compute throttle info from raw per-core data (max_mhz, current_mhz, mhz_limit).
+#[must_use]
 pub fn detect_throttle_from_raw(cores: &[(u32, u32, u32)]) -> Option<ThrottleInfo> {
     if cores.is_empty() {
         return None;
@@ -113,6 +114,7 @@ pub fn detect_throttle(info: &[impl CorePowerInfo]) -> Option<ThrottleInfo> {
     })
 }
 
+#[must_use]
 pub fn classify_throttle(
     throttle: &ThrottleInfo,
     cpu_usage: f32,

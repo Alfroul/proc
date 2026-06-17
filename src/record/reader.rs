@@ -89,14 +89,17 @@ impl Player {
         })
     }
 
+    #[must_use]
     pub fn total_frames(&self) -> usize {
         self.frames.len()
     }
 
+    #[must_use]
     pub fn frame_at(&self, index: usize) -> Option<&UiFrame> {
         self.frames.get(index)
     }
 
+    #[must_use]
     pub fn time_range(&self) -> (u64, u64) {
         if self.frames.is_empty() {
             (self.header.start_time, self.header.start_time)
@@ -108,6 +111,7 @@ impl Player {
         }
     }
 
+    #[must_use]
     pub fn frame_near_timestamp(&self, ts: u64) -> usize {
         if self.frames.is_empty() {
             return 0;
@@ -133,6 +137,7 @@ impl Player {
         if diff_prev <= diff_lo { lo - 1 } else { lo }
     }
 
+    #[must_use]
     pub fn header(&self) -> &RecordingHeader {
         &self.header
     }
@@ -179,6 +184,7 @@ fn legacy_to_v2(legacy: LegacySystemFrame) -> UiFrame {
 
 /// Legacy entry point kept for test compatibility. Delegates to the
 /// `From<&FrameProcess>` impl in `super::conversions`.
+#[must_use]
 pub fn frame_process_to_process_info(fp: &super::frame::FrameProcess) -> ProcessInfo {
     ProcessInfo::from(fp)
 }

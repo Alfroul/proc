@@ -13,7 +13,7 @@ pub fn flush_write_cache(drive_letter: char) -> Result<()> {
     let output = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
-        .map_err(|e| ProcError::UsbDetect(format!("执行 Write-VolumeCache 失败: {}", e)))?;
+        .map_err(|e| ProcError::usb_detect_with("执行 Write-VolumeCache 失败", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

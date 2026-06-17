@@ -43,11 +43,6 @@ pub struct HandleLock {
     pub port_info: Vec<String>,
 }
 
-/// 字节格式化为可读字符串（跨平台薄包装，转发到 `format::format_bytes`）
-pub fn format_size(bytes: u64) -> String {
-    crate::format::format_bytes(bytes)
-}
-
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::{HandleLock, RemovableDevice};
@@ -141,8 +136,8 @@ mod windows_impl {
         for dev in &devices {
             let size_info = format!(
                 "{} / {} ({})",
-                super::format_size(dev.used_size),
-                super::format_size(dev.total_size),
+                crate::format::format_bytes(dev.used_size),
+                crate::format::format_bytes(dev.total_size),
                 dev.file_system
             );
             let status = if dev.is_occupied {
@@ -248,24 +243,24 @@ mod stub_impl {
     const UNSUPPORTED: &str = "Linux/macOS 不支持 USB 助手，详见 README 平台支持表";
 
     pub fn scan_all_devices() -> Result<Vec<RemovableDevice>> {
-        Err(ProcError::UsbDetect(UNSUPPORTED.into()))
+        Err(ProcError::usb_detect(UNSUPPORTED))
     }
 
     pub fn scan_device_locks(
         _drive_letter: char,
     ) -> Result<Vec<(HandleLock, super::classify::HandleRisk)>> {
-        Err(ProcError::UsbDetect(UNSUPPORTED.into()))
+        Err(ProcError::usb_detect(UNSUPPORTED))
     }
 
     pub fn scan_device_locks_with_processes(
         _drive_letter: char,
         _processes: &[crate::collect::ProcessInfo],
     ) -> Result<Vec<(HandleLock, super::classify::HandleRisk)>> {
-        Err(ProcError::UsbDetect(UNSUPPORTED.into()))
+        Err(ProcError::usb_detect(UNSUPPORTED))
     }
 
     pub fn kill_safe_processes(_drive_letter: char) -> Result<(u32, u32, Vec<String>)> {
-        Err(ProcError::UsbDetect(UNSUPPORTED.into()))
+        Err(ProcError::usb_detect(UNSUPPORTED))
     }
 
     pub fn cli_list_devices() -> Result<()> {
@@ -274,7 +269,7 @@ mod stub_impl {
     }
 
     pub fn cli_check_drive(_drive_str: &str, _find_locks_only: bool) -> Result<()> {
-        Err(ProcError::UsbDetect(UNSUPPORTED.into()))
+        Err(ProcError::usb_detect(UNSUPPORTED))
     }
 }
 
@@ -295,8 +290,7 @@ fn parse_drive_letter(drive_str: &str) -> Result<char> {
             return Ok(c.to_ascii_uppercase());
         }
     }
-    Err(ProcError::UsbDetect(format!(
-        "无效的驱动器号: '{}'，请使用如 'E:' 格式",
-        drive_str
+    Err(ProcError::usb_detect(format!(
+        "无效的驱动器号: '{drive_str}'，请使用如 'E:' 格式"
     )))
 }

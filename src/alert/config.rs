@@ -15,6 +15,7 @@ pub struct ThresholdRule {
 }
 
 impl ThresholdRule {
+    #[must_use]
     pub fn evaluate(&self, value: f64) -> bool {
         self.op.compare(value, self.threshold)
     }

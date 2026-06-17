@@ -189,69 +189,89 @@ pub fn cycle_theme() {
     save_theme(new);
 }
 
+#[must_use]
 pub fn theme_name() -> &'static str {
     current().name
 }
 
+#[must_use]
 pub fn theme_count() -> usize {
     THEMES.len()
 }
 
+#[must_use]
 pub fn bg_primary() -> Color {
     current().bg_primary
 }
+#[must_use]
 pub fn bg_sidebar() -> Color {
     current().bg_sidebar
 }
+#[must_use]
 pub fn text_primary() -> Color {
     current().text_primary
 }
+#[must_use]
 pub fn accent() -> Color {
     current().accent
 }
+#[must_use]
 pub fn danger() -> Color {
     current().danger
 }
+#[must_use]
 pub fn warning() -> Color {
     current().warning
 }
+#[must_use]
 pub fn success() -> Color {
     current().success
 }
+#[must_use]
 pub fn info() -> Color {
     current().info
 }
+#[must_use]
 pub fn muted() -> Color {
     current().muted
 }
 
+#[must_use]
 pub fn style_selected() -> Style {
     Style::new().fg(accent()).add_modifier(Modifier::BOLD)
 }
+#[must_use]
 pub fn style_header() -> Style {
     Style::new()
         .fg(current().text_primary)
         .add_modifier(Modifier::BOLD)
 }
+#[must_use]
 pub fn style_normal() -> Style {
     Style::new().fg(current().text_primary)
 }
+#[must_use]
 pub fn style_muted() -> Style {
     Style::new().fg(current().muted)
 }
+#[must_use]
 pub fn style_danger() -> Style {
     Style::new().fg(danger())
 }
+#[must_use]
 pub fn style_warning() -> Style {
     Style::new().fg(warning())
 }
+#[must_use]
 pub fn style_success() -> Style {
     Style::new().fg(success())
 }
+#[must_use]
 pub fn style_info() -> Style {
     Style::new().fg(info())
 }
 
+#[must_use]
 pub fn risk_color(level: &str) -> Color {
     match level {
         "critical" => danger(),

@@ -1,6 +1,6 @@
 use proc::classify::ProcessClass;
+use proc::eject::HandleLock;
 use proc::eject::classify::{self, HandleRisk};
-use proc::eject::{HandleLock, format_size};
 
 fn make_lock(pid: u32, name: &str, process_class: ProcessClass) -> HandleLock {
     HandleLock {
@@ -105,15 +105,6 @@ fn test_risk_weight_ordering() {
     );
     assert!(classify::risk_weight(HandleRisk::Warning) > classify::risk_weight(HandleRisk::Safe));
     assert!(classify::risk_weight(HandleRisk::Safe) > classify::risk_weight(HandleRisk::Harmless));
-}
-
-#[test]
-fn test_format_size() {
-    assert_eq!(format_size(500), "500B");
-    assert_eq!(format_size(1024), "1KB");
-    assert_eq!(format_size(1024 * 512), "512KB");
-    assert_eq!(format_size(1024 * 1024), "1MB");
-    assert_eq!(format_size(1024 * 1024 * 1024), "1.0GB");
 }
 
 #[cfg(target_os = "windows")]

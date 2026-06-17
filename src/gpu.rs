@@ -317,6 +317,7 @@ impl Default for GpuCollector {
 }
 
 impl GpuCollector {
+    #[must_use]
     pub fn new() -> Self {
         let nvml = NvmlState::new();
         let pdh = PdhState::new();

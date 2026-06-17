@@ -25,6 +25,7 @@ impl Default for DockerPanel {
 }
 
 impl DockerPanel {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             monitor: None,

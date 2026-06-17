@@ -59,6 +59,7 @@ const COMMON_ORPHANS: &[&str] = &[
     "startmenuexperiencehost.exe",
 ];
 
+#[must_use]
 pub fn analyze_parent_chain(proc: &ProcessInfo, all_procs: &[ProcessInfo]) -> Vec<RiskFactor> {
     let mut factors = Vec::new();
 

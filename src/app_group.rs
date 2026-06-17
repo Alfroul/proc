@@ -34,6 +34,7 @@ pub enum AppGroupItem {
 }
 
 /// Build the flat visual item list from groups and expanded state.
+#[must_use]
 pub fn build_visual_items(groups: &[AppGroup], expanded: Option<usize>) -> Vec<AppGroupItem> {
     let mut items = Vec::new();
     for (gi, group) in groups.iter().enumerate() {
@@ -53,6 +54,7 @@ pub fn build_visual_items(groups: &[AppGroup], expanded: Option<usize>) -> Vec<A
 // ── Version info query ──
 
 #[cfg(target_os = "windows")]
+#[must_use]
 pub fn query_version_info(exe_path: &str) -> Option<VersionInfo> {
     use windows::Win32::Foundation::BOOL;
     use windows::Win32::Storage::FileSystem::{

@@ -13,6 +13,7 @@ pub enum ProcessClass {
 }
 
 impl ProcessClass {
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::UserApp => "用户",
@@ -159,6 +160,7 @@ fn get_service_cache() -> &'static HashMap<u32, String> {
 }
 
 #[cfg(target_os = "windows")]
+#[must_use]
 pub fn classify_process(proc: &ProcessInfo) -> ProcessClass {
     if proc.pid == 4 || proc.pid == 0 {
         return ProcessClass::Kernel;
@@ -209,10 +211,12 @@ pub fn classify_process(proc: &ProcessInfo) -> ProcessClass {
     ProcessClass::Unknown
 }
 
+#[must_use]
 pub fn classify_batch(processes: &[ProcessInfo]) -> Vec<(ProcessClass, &ProcessInfo)> {
     processes.iter().map(|p| (classify_process(p), p)).collect()
 }
 
+#[must_use]
 pub fn classify_count(processes: &[ProcessInfo]) -> ClassifyCount {
     let mut count = ClassifyCount::default();
     for p in processes {

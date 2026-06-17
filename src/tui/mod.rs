@@ -33,6 +33,7 @@ use crate::record::vt100::{VtFrameWidget, VtPlayer, VtRecorder};
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
+#[must_use]
 pub fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
     let popup_width = r.width * percent_x / 100;
     let x = r.width.saturating_sub(popup_width) / 2;

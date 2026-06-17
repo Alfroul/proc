@@ -37,6 +37,7 @@ pub struct WatchdogHandle {
 }
 
 impl WatchdogHandle {
+    #[must_use]
     pub fn try_recv(&self) -> Option<WatchdogEvent> {
         self.events.try_recv().ok()
     }
@@ -47,6 +48,7 @@ impl WatchdogHandle {
 }
 
 /// 启动 watchdog 后台线程
+#[must_use]
 pub fn spawn_watchdog(
     monitor_id: u32,
     cmd: &str,

@@ -188,26 +188,41 @@ fn test_cli_docker_parsing() {
 
 #[test]
 fn test_proc_error_display() {
-    let err = ProcError::NotFound("test process".to_string());
+    let err = ProcError::not_found("test process");
     assert!(err.to_string().contains("test process"));
 
-    let err = ProcError::PermissionDenied("kill PID 4".to_string());
+    let err = ProcError::permission_denied("kill PID 4");
     assert!(err.to_string().contains("kill PID 4"));
 
-    let err = ProcError::Sysinfo("init failed".to_string());
+    let err = ProcError::sysinfo("init failed");
     assert!(err.to_string().contains("init failed"));
 
-    let err = ProcError::PortScan("scan failed".to_string());
+    let err = ProcError::port_scan("scan failed");
     assert!(err.to_string().contains("scan failed"));
 
-    let err = ProcError::UsbDetect("no device".to_string());
+    let err = ProcError::usb_detect("no device");
     assert!(err.to_string().contains("no device"));
 
-    let err = ProcError::Monitor("watch failed".to_string());
+    let err = ProcError::monitor("watch failed");
     assert!(err.to_string().contains("watch failed"));
 
-    let err = ProcError::Docker("not running".to_string());
+    let err = ProcError::docker("not running");
     assert!(err.to_string().contains("not running"));
+}
+
+#[test]
+fn test_proc_error_source_chain() {
+    use std::error::Error;
+    use std::io;
+
+    let root = io::Error::other("boom");
+    let err = ProcError::sysinfo_with("sysinfo init failed", root);
+
+    assert!(err.to_string().contains("sysinfo init failed"));
+    let source = err
+        .source()
+        .expect("source chain should preserve root cause");
+    assert_eq!(source.to_string(), "boom");
 }
 
 #[test]

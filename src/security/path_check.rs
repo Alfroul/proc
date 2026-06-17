@@ -1,5 +1,6 @@
 use super::score::{RiskCategory, RiskFactor};
 
+#[must_use]
 pub fn check_path_risk(exe: Option<&str>) -> Vec<RiskFactor> {
     let Some(exe_path) = exe else {
         return Vec::new();

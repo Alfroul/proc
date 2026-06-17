@@ -8,6 +8,7 @@ pub struct DllInfo {
 
 /// Enumerate loaded DLLs for a process and check for suspicious modules.
 /// Returns a list of suspicious DLL risk factors (empty if none found).
+#[must_use]
 pub fn check_loaded_dlls(pid: u32) -> Vec<RiskFactor> {
     #[cfg(target_os = "windows")]
     {
@@ -118,7 +119,12 @@ fn truncate_path(path: &str, max_len: usize) -> String {
     if path.len() <= max_len {
         path.to_string()
     } else {
-        let start = path.floor_char_boundary(path.len().saturating_sub(max_len).saturating_sub(3));
+        let target = path.len().saturating_sub(max_len).saturating_sub(3);
+        // floor_char_boundary 1.91 才稳定，MSRV=1.85 故手写等价实现。
+        let mut start = target.min(path.len());
+        while start > 0 && !path.is_char_boundary(start) {
+            start -= 1;
+        }
         format!("...{}", &path[start..])
     }
 }

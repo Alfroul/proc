@@ -40,6 +40,7 @@ pub enum TreeFilter {
 }
 
 /// 构建进程树
+#[must_use]
 pub fn build_process_tree(processes: &[ProcessInfo], total_mem: u64) -> Vec<TreeNode> {
     // 构建 parent_pid → children PIDs 映射
     let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -173,6 +174,7 @@ fn build_node(
     })
 }
 
+#[must_use]
 pub fn count_anomalies(tree: &[TreeNode]) -> (usize, usize) {
     let mut orphans = 0;
     let mut zombies = 0;
@@ -193,6 +195,7 @@ fn count_anomalies_recursive(tree: &[TreeNode], orphans: &mut usize, zombies: &m
 }
 
 /// 按分类过滤进程树
+#[must_use]
 pub fn filter_tree(tree: &[TreeNode], filter: TreeFilter) -> Vec<TreeNode> {
     match filter {
         TreeFilter::All => tree.to_vec(),
@@ -230,6 +233,7 @@ where
 }
 
 /// 将树扁平化为可见行（根据展开状态）
+#[must_use]
 pub fn flatten_visible(tree: &[TreeNode]) -> Vec<&TreeNode> {
     let mut result = Vec::new();
     for node in tree {
@@ -248,6 +252,7 @@ fn flatten_node<'a>(node: &'a TreeNode, result: &mut Vec<&'a TreeNode>) {
 }
 
 /// 搜索树中匹配的节点（模糊匹配名称或 PID）
+#[must_use]
 pub fn search_tree<'a>(tree: &'a [TreeNode], query: &str) -> Vec<&'a TreeNode> {
     let query_lower = query.to_lowercase();
     let mut result = Vec::new();
@@ -267,6 +272,7 @@ fn search_node<'a>(node: &'a TreeNode, query: &str, result: &mut Vec<&'a TreeNod
 }
 
 /// 文本格式化输出树（CLI 模式）
+#[must_use]
 pub fn format_tree_text(tree: &[TreeNode]) -> String {
     let mut lines = Vec::new();
     for (i, node) in tree.iter().enumerate() {
@@ -300,6 +306,7 @@ fn format_node_text(node: &TreeNode, prefix: &str, is_last: bool, lines: &mut Ve
 use crate::format::format_bytes;
 
 /// 格式化进程信息为可读文本（剪贴板复制用）
+#[must_use]
 pub fn format_process_info(proc: &ProcessInfo) -> String {
     format!(
         "PID: {}\n名称: {}\nCPU: {:.1}%\n内存: {} bytes\n虚拟内存: {} bytes\n状态: {}\n命令: {}\n工作目录: {}\n可执行: {}",
@@ -330,6 +337,7 @@ pub fn toggle_node_by_pid(nodes: &mut [TreeNode], target_pid: u32) -> bool {
 }
 
 /// 收集当前已展开的节点 PID 集合
+#[must_use]
 pub fn collect_expanded_pids(nodes: &[TreeNode]) -> std::collections::HashSet<u32> {
     let mut pids = std::collections::HashSet::new();
     for node in nodes {
@@ -358,6 +366,7 @@ pub enum TreeSortField {
 }
 
 impl TreeSortField {
+    #[must_use]
     pub fn next(&self) -> Self {
         match self {
             Self::Cpu => Self::Memory,
@@ -366,6 +375,7 @@ impl TreeSortField {
         }
     }
 
+    #[must_use]
     pub fn prev(&self) -> Self {
         match self {
             Self::Cpu => Self::Pid,
@@ -374,6 +384,7 @@ impl TreeSortField {
         }
     }
 
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::Cpu => "CPU%",

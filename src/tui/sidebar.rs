@@ -311,6 +311,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         counts.system,
         counts.service
     )));
+    // proc 自身 cpu/mem — 每帧从 cached_processes 按 PID 取（找不到时不显示）
+    if let Some(p) = &app.self_proc {
+        lines.push(Line::from(format!(
+            "proc: {:.1}% / {}",
+            p.cpu_usage,
+            format_bytes(p.memory)
+        )));
+    }
     lines.push(Line::from(format!("\u{8FD0}\u{884C} {}", uptime)));
     lines.push(Line::from(format!("U\u{76D8}: {}", usb_info)));
 

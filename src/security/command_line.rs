@@ -1,5 +1,6 @@
 use super::score::{RiskCategory, RiskFactor};
 
+#[must_use]
 pub fn check_command_line(cmd: &[String]) -> Vec<RiskFactor> {
     if cmd.is_empty() {
         return Vec::new();

@@ -1,7 +1,14 @@
 [package]
 name = "proc"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
+rust-version = "1.85"
+description = "交互式 TUI 系统进程管理器，集成进程/网络/USB/Docker/安全评分/录屏"
+license = "MIT"
+repository = "https://github.com/Alfroul/proc"
+keywords = ["tui", "process-manager", "sysinfo", "monitoring", "terminal"]
+categories = ["command-line-utilities", "os::windows-apis"]
+authors = ["Alfroul"]
 
 [dependencies]
 ratatui = "0.29"
@@ -16,7 +23,7 @@ colored = "2"
 comfy-table = "7"
 netstat2 = "0.11"
 bollard = { version = "0.18", features = ["http"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time"] }
 futures-util = "0.3"
 arboard = "3"
 dns-lookup = "2"
@@ -27,6 +34,7 @@ bincode = "1"
 toml = "0.8"
 sha2 = "0.10"
 ctrlc = "3"
+unicode-width = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.57", features = [
@@ -63,3 +71,9 @@ nvidia = ["nvml-wrapper"]
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

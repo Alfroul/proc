@@ -130,12 +130,12 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 
 ## GPU 路线图
 
-当前仅支持 NVIDIA NVML（可选 feature `nvidia`，`cargo build --no-default-features` 可禁用）。AMD/Intel 暂未支持：
+当前仅支持 NVIDIA NVML（可选 feature `nvidia`，`cargo build --no-default-features` 可禁用）。AMD/Intel 暂未支持，列入 **0.5.0+** 路线图（0.3.0 / 0.4.0 聚焦 Inspector 与稳定性，暂不动 GPU）：
 
 - **AMD**：Linux sysfs DRM 已有清晰路径；Windows 需 ADL SDK
 - **Intel**：Linux sysfs i915 已有清晰路径；Windows 待评估
 
-核心需求是 GPU 温度 + 显存使用率，对齐现有 NVML 路径。时间表未定，如需优先支持请提 issue。
+核心需求是 GPU 温度 + 显存使用率，对齐现有 NVML 路径。如需优先支持请提 issue。
 
 ## FAQ
 

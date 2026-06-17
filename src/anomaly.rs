@@ -30,6 +30,7 @@ pub struct Anomaly {
 
 /// 唯一标识，用于去重和忽略
 impl Anomaly {
+    #[must_use]
     pub fn id(&self) -> String {
         // rule_id + 附加标识（PID 或 IP）构成唯一键
         match (self.affected_pid, self.affected_ip) {
@@ -60,6 +61,7 @@ impl Default for AnomalyDetector {
 }
 
 impl AnomalyDetector {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             connection_history: VecDeque::new(),
@@ -111,6 +113,7 @@ impl AnomalyDetector {
     }
 
     /// 返回本次新增的 Critical 异常（用于 Toast 通知）
+    #[must_use]
     pub fn new_critical<'a>(&self, current: &'a [Anomaly]) -> Vec<&'a Anomaly> {
         current
             .iter()

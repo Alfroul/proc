@@ -13,6 +13,7 @@ pub fn draw_score(app: &App, pid: u32) -> Span<'static> {
     score_span(score)
 }
 
+#[must_use]
 pub fn score_span(score: &SecurityScore) -> Span<'static> {
     if score.score >= 90 {
         // Default safe, reduce noise
@@ -35,6 +36,7 @@ pub fn score_span(score: &SecurityScore) -> Span<'static> {
     }
 }
 
+#[must_use]
 pub fn score_style(score: u32) -> Style {
     if score >= 90 {
         Style::default()

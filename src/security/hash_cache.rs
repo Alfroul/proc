@@ -44,6 +44,7 @@ impl Default for HashReputation {
 }
 
 impl HashReputation {
+    #[must_use]
     pub fn new() -> Self {
         let mut rep = Self {
             verified: HashMap::new(),
@@ -248,6 +249,7 @@ impl HashReputation {
         }
     }
 
+    #[must_use]
     pub fn is_whitelisted(exe_path: &str) -> bool {
         Self::is_system_path(exe_path)
     }

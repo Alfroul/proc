@@ -32,6 +32,7 @@ const TRUSTED_SIGNERS: &[&str] = &[
     "NVIDIA Corporation",
 ];
 
+#[must_use]
 pub fn is_trusted_signer(subject: &str) -> bool {
     let subject_lower = subject.to_lowercase();
     TRUSTED_SIGNERS
@@ -161,6 +162,7 @@ fn get_file_company_name(exe_path: &str) -> Option<String> {
     }
 }
 
+#[must_use]
 pub fn signature_risk_factor(status: SignatureStatus) -> Option<RiskFactor> {
     match status {
         SignatureStatus::Unsigned => Some(RiskFactor {

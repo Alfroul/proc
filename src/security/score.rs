@@ -47,6 +47,15 @@ struct CacheEntry {
     signature_cached: bool,
 }
 
+/// 解析 `cache_key`（`{pid}:{start_time}:{exe}`）的前两段为 `(pid, start_time)`。
+/// 失败时返回 `None`（保留该条目不动），保证键格式漂移时不会误清整个缓存。
+fn parse_alive_key(key: &str) -> Option<(u32, u64)> {
+    let mut parts = key.splitn(3, ':');
+    let pid = parts.next()?.parse::<u32>().ok()?;
+    let start_time = parts.next()?.parse::<u64>().ok()?;
+    Some((pid, start_time))
+}
+
 pub struct CachedScore {
     entries: HashMap<String, CacheEntry>,
     access_order: Vec<String>,
@@ -60,6 +69,7 @@ impl Default for CachedScore {
 }
 
 impl CachedScore {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
@@ -140,6 +150,7 @@ impl Default for SecurityScorer {
 }
 
 impl SecurityScorer {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             cache: CachedScore::new(),
@@ -163,7 +174,13 @@ impl SecurityScorer {
         port_entries: &[crate::port_map::PortEntry],
     ) -> SecurityScore {
         let exe_path = proc.exe.as_deref().unwrap_or("");
-        let cache_key = format!("{}:{}", proc.pid, exe_path.to_lowercase());
+        // ADR-0003：键加 start_time，PID 复用后旧实例的签名缓存不会过继给新进程。
+        let cache_key = format!(
+            "{}:{}:{}",
+            proc.pid,
+            proc.start_time,
+            exe_path.to_lowercase()
+        );
 
         if let Some(cached) = self.cache.get(&cache_key) {
             return cached.clone();
@@ -276,15 +293,15 @@ impl SecurityScorer {
         self.cache.evict_expired(std::time::Duration::from_secs(30));
     }
 
-    pub fn invalidate_dead(&mut self, alive_pids: &HashSet<u32>) {
-        self.cache.entries.retain(|key, _| {
-            if let Some(pid_str) = key.split(':').next()
-                && let Ok(pid) = pid_str.parse::<u32>()
-            {
-                return alive_pids.contains(&pid);
-            }
-            true
-        });
+    /// 精确清理死亡进程的缓存条目。
+    ///
+    /// `alive` 以 `(pid, start_time)` 元组传入 —— 即使 PID 被复用（A 死亡 → B 接管同 PID），
+    /// 仅 B 在 `alive` 中时，A 的陈旧 entry 也会被清掉。键格式 `{pid}:{start_time}:{exe}`
+    /// 见 `score()` 的 `cache_key` 构造。
+    pub fn invalidate_dead(&mut self, alive: &HashSet<(u32, u64)>) {
+        self.cache
+            .entries
+            .retain(|key, _| parse_alive_key(key).is_none_or(|k| alive.contains(&k)));
         self.cache
             .access_order
             .retain(|k| self.cache.entries.contains_key(k));
@@ -307,8 +324,9 @@ enum ScoringRequest {
 /// Security scoring in a background thread.
 /// Main thread sends data via `request()`, receives results via `poll_results()`.
 pub struct BackgroundScorer {
-    request_tx: std::sync::mpsc::SyncSender<ScoringRequest>,
+    request_tx: Option<std::sync::mpsc::SyncSender<ScoringRequest>>,
     result_rx: std::sync::mpsc::Receiver<HashMap<u32, SecurityScore>>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Default for BackgroundScorer {
@@ -319,20 +337,33 @@ impl Default for BackgroundScorer {
 
 impl Drop for BackgroundScorer {
     fn drop(&mut self) {
-        // Best-effort shutdown signal. If the worker is mid-scoring, the
-        // queued Shutdown waits in the channel; the thread will process it
-        // after the current batch and exit. try_send avoids blocking Drop
-        // when the channel is already full.
-        let _ = self.request_tx.try_send(ScoringRequest::Shutdown);
+        // Drop the sender BEFORE joining so the worker's `recv()` returns
+        // Disconnected after draining the queue. If we kept request_tx
+        // alive while joining, and the bounded channel was full (worker
+        // busy + a queued request), the try_send Shutdown would fail with
+        // Full and the worker would block on `recv()` forever → deadlock.
+        if let Some(tx) = self.request_tx.take() {
+            // Best-effort shutdown hint. Even if this fails (channel full),
+            // dropping `tx` below disconnects the channel and the worker
+            // exits on its next `recv()`.
+            let _ = tx.try_send(ScoringRequest::Shutdown);
+        }
+        // Wait for the worker to exit so we never leak a thread. The worker
+        // also polls `shutdown::requested()` between processes, so Ctrl+C
+        // during a long pass unblocks this join promptly.
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 
 impl BackgroundScorer {
+    #[must_use]
     pub fn new() -> Self {
         let (req_tx, req_rx) = std::sync::mpsc::sync_channel(1);
         let (res_tx, res_rx) = std::sync::mpsc::channel();
 
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("security-scorer".into())
             .spawn(move || {
                 let mut scorer = SecurityScorer::new();
@@ -346,9 +377,9 @@ impl BackgroundScorer {
                     match req {
                         ScoringRequest::Score { processes, ports } => {
                             let started = std::time::Instant::now();
-                            let alive_pids: HashSet<u32> =
-                                processes.iter().map(|p| p.pid).collect();
-                            scorer.invalidate_dead(&alive_pids);
+                            let alive: HashSet<(u32, u64)> =
+                                processes.iter().map(|p| (p.pid, p.start_time)).collect();
+                            scorer.invalidate_dead(&alive);
                             scorer.evict_expired();
                             scorer.reset_budget();
 
@@ -356,6 +387,12 @@ impl BackgroundScorer {
                             let ports_slice: &[crate::port_map::PortEntry] = ports.as_ref();
                             let mut scores = HashMap::new();
                             for proc in procs_slice {
+                                // Honor global Ctrl+C so a long pass can be
+                                // aborted between processes — keeps the Drop
+                                // join bounded when the user is trying to quit.
+                                if crate::shutdown::requested() {
+                                    break;
+                                }
                                 let score = scorer.score(proc, procs_slice, ports_slice);
                                 scores.insert(proc.pid, score);
                             }
@@ -374,8 +411,9 @@ impl BackgroundScorer {
             .expect("failed to spawn security scorer thread");
 
         BackgroundScorer {
-            request_tx: req_tx,
+            request_tx: Some(req_tx),
             result_rx: res_rx,
+            thread: Some(handle),
         }
     }
 
@@ -386,12 +424,13 @@ impl BackgroundScorer {
         processes: Arc<Vec<ProcessInfo>>,
         ports: Arc<Vec<crate::port_map::PortEntry>>,
     ) {
-        let _ = self
-            .request_tx
-            .try_send(ScoringRequest::Score { processes, ports });
+        if let Some(tx) = &self.request_tx {
+            let _ = tx.try_send(ScoringRequest::Score { processes, ports });
+        }
     }
 
     /// Non-blocking poll for completed scoring results.
+    #[must_use]
     pub fn poll_results(&self) -> Option<HashMap<u32, SecurityScore>> {
         self.result_rx.try_recv().ok()
     }

@@ -28,6 +28,7 @@ impl std::fmt::Display for HealthStatus {
 
 impl HealthStatus {
     /// 从 Docker ContainerSummary.Status 字符串解析健康状态
+    #[must_use]
     pub fn from_status(status: &str) -> Self {
         if status.contains("(healthy)") {
             Self::Healthy
@@ -69,7 +70,7 @@ impl DockerMonitor {
     /// 用 list_containers API 调用验证连接真实可用。
     pub fn connect() -> Result<Self> {
         let runtime = tokio::runtime::Runtime::new()
-            .map_err(|e| ProcError::Docker(format!("无法创建 tokio 运行时: {}", e)))?;
+            .map_err(|e| ProcError::docker_with("无法创建 tokio 运行时", e))?;
 
         let mut last_err = String::new();
 
@@ -93,7 +94,7 @@ impl DockerMonitor {
             }
         }
 
-        Err(ProcError::Docker(format!(
+        Err(ProcError::docker(format!(
             "Docker 未运行或未安装 (已尝试命名管道和 TCP 连接{})",
             if last_err.is_empty() {
                 String::new()
@@ -138,7 +139,7 @@ impl DockerMonitor {
         let containers = self
             .runtime
             .block_on(async { self.docker.list_containers(Some(options)).await })
-            .map_err(|e| ProcError::Docker(format!("获取容器列表失败: {}", e)))?;
+            .map_err(|e| ProcError::docker_with("获取容器列表失败", e))?;
 
         let mut result = Vec::new();
         for c in containers {
@@ -206,7 +207,7 @@ impl DockerMonitor {
     pub fn restart_container(&self, name: &str) -> Result<()> {
         self.runtime
             .block_on(async { self.docker.restart_container(name, None).await })
-            .map_err(|e| ProcError::Docker(format!("重启容器 {} 失败: {}", name, e)))?;
+            .map_err(|e| ProcError::docker_with(format!("重启容器 {name} 失败"), e))?;
         Ok(())
     }
 
@@ -214,7 +215,7 @@ impl DockerMonitor {
     pub fn stop_container(&self, name: &str) -> Result<()> {
         self.runtime
             .block_on(async { self.docker.stop_container(name, None).await })
-            .map_err(|e| ProcError::Docker(format!("停止容器 {} 失败: {}", name, e)))?;
+            .map_err(|e| ProcError::docker_with(format!("停止容器 {name} 失败"), e))?;
         Ok(())
     }
 

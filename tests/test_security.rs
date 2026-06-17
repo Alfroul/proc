@@ -430,17 +430,56 @@ fn test_score_cache_hit() {
 #[test]
 fn test_score_cache_invalidation() {
     let mut scorer = SecurityScorer::new();
-    let proc = make_proc(1, "test.exe", Some("C:\\test.exe"), vec![], None);
+    let mut proc = make_proc(1, "test.exe", Some("C:\\test.exe"), vec![], None);
+    proc.start_time = 100;
     let all_procs = vec![proc.clone()];
 
     let _score1 = scorer.score(&proc, &all_procs, &[]);
 
+    // 仅 (pid=2, _) 存活 —— (1, 100) 应被清掉。
     let mut alive = std::collections::HashSet::new();
-    alive.insert(2);
+    alive.insert((2, 0));
     scorer.invalidate_dead(&alive);
 
     let score2 = scorer.score(&proc, &all_procs, &[]);
     assert!(score2.score <= 100);
+}
+
+/// ADR-0003：同一 PID 不同 start_time 应被认为是两个不同的进程实例，
+/// 互不命中缓存。模拟 PID 复用：A 死亡 → OS 把同 PID 分给 B（start_time 不同）。
+#[test]
+fn test_score_cache_pid_reuse_isolation() {
+    let mut scorer = SecurityScorer::new();
+
+    // A: pid=1234, start_time=1000
+    let mut proc_a = make_proc(1234, "test.exe", Some("C:\\test.exe"), vec![], None);
+    proc_a.start_time = 1000;
+    let all_a = vec![proc_a.clone()];
+    let score_a = scorer.score(&proc_a, &all_a, &[]);
+
+    // B: 同 PID, 同 exe, 不同 start_time —— 模拟 OS 复用 PID
+    let mut proc_b = make_proc(1234, "test.exe", Some("C:\\test.exe"), vec![], None);
+    proc_b.start_time = 5000;
+    let all_b = vec![proc_b.clone()];
+
+    // 缓存里 A 的 entry 不应该被 B 命中：score() 必须重新跑一遍签名检查等。
+    // 用 factors 数量间接验证 —— 重新评分与首次评分的 factors 长度一致。
+    let score_b = scorer.score(&proc_b, &all_b, &[]);
+    assert_eq!(
+        score_b.factors.len(),
+        score_a.factors.len(),
+        "PID 复用后 B 必须重新评分，而不是命中 A 的缓存"
+    );
+
+    // 仅 B 存活（start_time=5000）—— A 的 entry（start_time=1000）应被精确清掉，
+    // B 的 entry 保留。PID-only 校验在此场景会误留 A。
+    let mut alive = std::collections::HashSet::new();
+    alive.insert((1234, 5000));
+    scorer.invalidate_dead(&alive);
+
+    // 再次评 B：B 还在 alive 集合里，缓存应命中，得分不变。
+    let score_b_cached = scorer.score(&proc_b, &all_b, &[]);
+    assert_eq!(score_b.score, score_b_cached.score);
 }
 
 #[test]

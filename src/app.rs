@@ -40,6 +40,7 @@ pub enum ReplaySpeed {
 }
 
 impl ReplaySpeed {
+    #[must_use]
     pub fn as_f32(&self) -> f32 {
         match self {
             Self::Half => 0.5,
@@ -118,8 +119,12 @@ pub struct App {
     pub throttle_reason: crate::throttle::ThrottleReason,
 
     // Per-process disk speed
-    prev_process_disk: HashMap<u32, (u64, u64)>,
+    // 键 = (pid, start_time)：避免 PID 复用后把死进程的累计 IO 算到新进程头上（ADR-0003）。
+    prev_process_disk: HashMap<(u32, u64), (u64, u64)>,
     prev_process_disk_time: Instant,
+
+    // Self-monitoring：proc 自身的 ProcessInfo 快照（从 cached_processes 按 PID 找）
+    pub self_proc: Option<ProcessInfo>,
 
     // Platform
     pub is_windows: bool,
@@ -146,7 +151,11 @@ impl App {
         port_panel.port_entries = port_entries;
 
         let is_windows = cfg!(target_os = "windows");
-        let status_message = if is_windows {
+        let status_message = if crate::ui_state::load_first_run() {
+            // 首次启动（ui.toml 缺失或 first_run=true）：优先提示帮助入口，
+            // 覆盖 Linux/macOS 的降级清单。按 ? 后立即写盘 first_run=false，下次启动不再提示。
+            Some("首次使用？按 ? 查看快捷键".to_string())
+        } else if is_windows {
             None
         } else {
             Some(
@@ -197,6 +206,7 @@ impl App {
             throttle_reason: crate::throttle::ThrottleReason::None,
             prev_process_disk: HashMap::new(),
             prev_process_disk_time: Instant::now(),
+            self_proc: None,
             is_windows,
         })
     }
@@ -306,6 +316,8 @@ impl App {
                 true
             }
             KeyCode::Char('?') => {
+                // 进入 Help 视为"看过帮助"，立即写盘 first_run=false，下次启动不再显示引导。
+                crate::ui_state::mark_first_run_done();
                 self.mode = AppMode::Help;
                 self.help_scroll = 0;
                 true
@@ -944,6 +956,7 @@ impl App {
             self.tick_alert_evaluate();
             self.tick_panels();
             self.tick_usb_monitor_docker();
+            self.tick_self_monitor();
             needs_draw = true;
         }
 
@@ -1028,7 +1041,8 @@ impl App {
             .as_secs_f64()
             .max(0.001);
         for proc in &mut self.cached_processes {
-            if let Some(&(prev_r, prev_w)) = self.prev_process_disk.get(&proc.pid) {
+            let key = (proc.pid, proc.start_time);
+            if let Some(&(prev_r, prev_w)) = self.prev_process_disk.get(&key) {
                 proc.disk_read_speed =
                     ((proc.disk_usage.0.saturating_sub(prev_r)) as f64 / elapsed) as u64;
                 proc.disk_write_speed =
@@ -1038,7 +1052,7 @@ impl App {
         self.prev_process_disk = self
             .cached_processes
             .iter()
-            .map(|p| (p.pid, p.disk_usage))
+            .map(|p| ((p.pid, p.start_time), p.disk_usage))
             .collect();
         self.prev_process_disk_time = now;
     }
@@ -1051,6 +1065,16 @@ impl App {
         } else {
             crate::throttle::ThrottleReason::None
         };
+    }
+
+    /// 从 cached_processes 按 PID 取 proc 自身的 ProcessInfo 快照，供 sidebar 显示。
+    fn tick_self_monitor(&mut self) {
+        let self_pid = std::process::id();
+        self.self_proc = self
+            .cached_processes
+            .iter()
+            .find(|p| p.pid == self_pid)
+            .cloned();
     }
 
     /// Sample global CPU/mem sparkline every tick; sample proc_history only on heavy frames.
@@ -1183,15 +1207,34 @@ impl App {
             .collect();
 
         let sort_field = self.process_panel.sort_field;
+        // P1.1/P1.2: tie-breaker 加 pid 防止同分进程顺序抖动；
+        // Name 路径单独预建 lower-case Vec 后 sort_by_key（见下方），
+        // 所以这里只覆盖非 Name 分支。
+        if sort_field == SortField::Name {
+            // P1.2: 预建 lower-case Vec，避免每个比较对调用一次 to_lowercase（N log N → N）
+            let mut keyed: Vec<(String, classify::ProcessClass, &ProcessInfo)> = result
+                .into_iter()
+                .map(|(class, p)| (p.name.to_lowercase(), class, p))
+                .collect();
+            keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.pid.cmp(&b.2.pid)));
+            self.cached_sorted = keyed
+                .iter()
+                .map(|(_, class, p)| (*pid_to_idx.get(&p.pid).unwrap_or(&0), *class))
+                .collect();
+            self.data_dirty = false;
+            return;
+        }
+
         result.sort_by(|a, b| match sort_field {
             SortField::Cpu => {
                 b.1.cpu_usage
                     .partial_cmp(&a.1.cpu_usage)
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.pid.cmp(&b.1.pid))
             }
-            SortField::Memory => b.1.memory.cmp(&a.1.memory),
+            SortField::Memory => b.1.memory.cmp(&a.1.memory).then(a.1.pid.cmp(&b.1.pid)),
             SortField::Pid => a.1.pid.cmp(&b.1.pid),
-            SortField::Name => a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()),
+            SortField::Name => unreachable!("Name 路径在 sort_field 分支前已处理"),
             SortField::Security => {
                 let sa = self
                     .security_scores
@@ -1203,17 +1246,17 @@ impl App {
                     .get(&b.1.pid)
                     .map(|s| s.score)
                     .unwrap_or(100);
-                sa.cmp(&sb)
+                sa.cmp(&sb).then(a.1.pid.cmp(&b.1.pid))
             }
             SortField::DiskRead => {
                 let sa = a.1.disk_read_speed;
                 let sb = b.1.disk_read_speed;
-                sb.cmp(&sa)
+                sb.cmp(&sa).then(a.1.pid.cmp(&b.1.pid))
             }
             SortField::DiskWrite => {
                 let sa = a.1.disk_write_speed;
                 let sb = b.1.disk_write_speed;
-                sb.cmp(&sa)
+                sb.cmp(&sa).then(a.1.pid.cmp(&b.1.pid))
             }
         });
 

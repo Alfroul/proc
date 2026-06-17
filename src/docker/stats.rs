@@ -26,7 +26,7 @@ pub fn get_container_stats(
 
     let stat = runtime
         .block_on(async { docker.stats(name, Some(options)).try_next().await })
-        .map_err(|e| ProcError::Docker(format!("获取容器 {} 统计失败: {}", name, e)))?;
+        .map_err(|e| ProcError::docker_with(format!("获取容器 {name} 统计失败"), e))?;
 
     let stat = match stat {
         Some(s) => s,

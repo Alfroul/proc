@@ -145,6 +145,7 @@ fn kill_process_tree(pid: u32) -> Result<KillResult> {
 
 /// 枚举所有进程，返回 `name`（大小写不敏感，精确匹配）相同的进程列表。
 /// 不支持通配符 — 仅精确匹配，避免误终止。
+#[must_use]
 pub fn find_processes_by_name(name: &str) -> Vec<KillByNameMatch> {
     let target = name.to_lowercase();
     crate::collect::sysinfo_with(|sys| {

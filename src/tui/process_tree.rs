@@ -211,6 +211,7 @@ fn class_style(class: &ProcessClass) -> Style {
     }
 }
 
+#[must_use]
 pub fn draw_placeholder(_area: Rect) -> String {
     "进程树（开发中）".to_string()
 }

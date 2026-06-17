@@ -236,6 +236,7 @@ mod win32 {
             self.last_time = Instant::now();
         }
 
+        #[must_use]
         pub fn connection_speed(&self, local_port: u16, remote_addr: &IpAddr) -> (u64, u64) {
             let elapsed = self.last_time.elapsed().as_secs_f64();
             if elapsed < 0.1 {
@@ -268,6 +269,7 @@ mod win32 {
             )
         }
 
+        #[must_use]
         pub fn process_speed(&self, _pid: u32, entries: &[PortEntry]) -> (u64, u64, u64, u64) {
             let elapsed = self.last_time.elapsed().as_secs_f64();
             if elapsed < 0.1 {

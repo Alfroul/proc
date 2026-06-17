@@ -43,6 +43,7 @@ pub struct ProcessPanel {
 }
 
 impl ProcessPanel {
+    #[must_use]
     pub fn new(_processes: &[ProcessInfo]) -> Self {
         let (_, _mem_total) = (0u64, 0u64); // caller provides this in App::new
         Self {
@@ -73,16 +74,19 @@ impl ProcessPanel {
         self.tree_nodes = tree::build_process_tree(processes, total_mem);
     }
 
+    #[must_use]
     pub fn filtered_count(&self, cached_sorted: &[(usize, classify::ProcessClass)]) -> usize {
         cached_sorted.len()
     }
 
+    #[must_use]
     pub fn get_selected_pids(&self) -> Vec<u32> {
         self.selected_pids.iter().copied().collect()
     }
 
     // --- AppGroup helpers ---
 
+    #[must_use]
     pub fn app_group_filtered_visual_items(&self) -> Vec<AppGroupItem> {
         if self.app_group_search.query().is_empty() {
             return build_visual_items(&self.app_groups, self.app_group_expanded);
@@ -231,6 +235,7 @@ impl ProcessPanel {
 
     // --- Tree view actions ---
 
+    #[must_use]
     pub fn get_filtered_tree_visible(&self) -> Vec<TreeNode> {
         let filtered = tree::filter_tree(&self.tree_nodes, self.tree_filter);
         let visible = tree::flatten_visible(&filtered);
@@ -733,6 +738,7 @@ impl ProcessPanel {
     }
 
     /// Format port info for a PID (used when entering detail view).
+    #[must_use]
     pub fn format_port_info(pid: u32) -> String {
         match port_map::find_ports_by_pid(pid) {
             Ok(ports) if ports.is_empty() => "无".to_string(),

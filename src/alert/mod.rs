@@ -73,6 +73,7 @@ impl AlertManager {
         events
     }
 
+    #[must_use]
     pub fn active_alerts(&self) -> Vec<&Alert> {
         self.active_alerts
             .values()
@@ -80,11 +81,13 @@ impl AlertManager {
             .collect()
     }
 
+    #[must_use]
     pub fn all_alerts(&self) -> Vec<&Alert> {
         self.active_alerts.values().collect()
     }
 
     /// Count of firing (non-silenced) alerts by severity
+    #[must_use]
     pub fn firing_counts(&self) -> (usize, usize, usize) {
         let mut info = 0;
         let mut warning = 0;
@@ -114,6 +117,7 @@ impl AlertManager {
         Ok(config)
     }
 
+    #[must_use]
     pub fn rules(&self) -> &[ThresholdRule] {
         &self.config.rules
     }

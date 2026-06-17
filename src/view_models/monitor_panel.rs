@@ -20,6 +20,7 @@ impl Default for MonitorPanel {
 }
 
 impl MonitorPanel {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             manager: MonitorManager::new(),

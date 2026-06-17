@@ -12,6 +12,7 @@ const DANGEROUS_LUIDS: &[(u32, u32, &str)] = &[
 
 /// Check if a process holds dangerous privilege tokens.
 /// Only meaningful for non-system processes — system processes naturally hold these.
+#[must_use]
 pub fn check_privilege_tokens(pid: u32, user_id: Option<&str>) -> Option<RiskFactor> {
     // If running as SYSTEM/service, these privileges are expected
     if let Some(user) = user_id {

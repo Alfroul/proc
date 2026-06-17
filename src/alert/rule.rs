@@ -33,6 +33,7 @@ pub enum AlertSeverity {
 }
 
 impl ComparisonOp {
+    #[must_use]
     pub fn compare(&self, value: f64, threshold: f64) -> bool {
         match self {
             ComparisonOp::GT => value > threshold,
@@ -47,6 +48,7 @@ impl ComparisonOp {
 impl MetricName {
     /// Extract metric values from system data. Returns (pid, value) pairs.
     /// Global metrics use pid=0; process-level metrics use actual PIDs.
+    #[must_use]
     pub fn extract(&self, snapshot: &SystemSnapshot, procs: &[ProcessInfo]) -> Vec<(u32, f64)> {
         match self {
             MetricName::CpuUsage => {

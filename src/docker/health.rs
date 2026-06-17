@@ -44,7 +44,7 @@ pub fn inspect_container_health(
 
     let inspect = runtime
         .block_on(async { docker.inspect_container(name, Some(options)).await })
-        .map_err(|e| ProcError::Docker(format!("检查容器 {} 健康状态失败: {}", name, e)))?;
+        .map_err(|e| ProcError::docker_with(format!("检查容器 {name} 健康状态失败"), e))?;
 
     let state = match inspect.state {
         Some(s) => s,

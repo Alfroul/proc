@@ -20,6 +20,7 @@ impl Default for UsbPanel {
 }
 
 impl UsbPanel {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             devices: Vec::new(),

@@ -27,6 +27,7 @@ pub enum AppGroupSortField {
 }
 
 impl AppGroupSortField {
+    #[must_use]
     pub fn next(&self) -> Self {
         match self {
             Self::Cpu => Self::Memory,
@@ -35,6 +36,7 @@ impl AppGroupSortField {
         }
     }
 
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::Cpu => "CPU",

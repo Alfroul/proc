@@ -1,4 +1,5 @@
 /// Format bytes as human-readable string (e.g., "1.5GB", "200MB", "50KB", "128B")
+#[must_use]
 pub fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -14,6 +15,7 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+#[must_use]
 pub fn format_uptime(seconds: u64) -> String {
     let days = seconds / 86400;
     let hours = (seconds % 86400) / 3600;
@@ -27,6 +29,24 @@ pub fn format_uptime(seconds: u64) -> String {
     }
 }
 
+/// Format throughput as a 1-decimal-place string with SI units (decimal, not binary).
+/// Mirrors the convention used in port/process tables: 1.5GB/s, 200MB/s, 50KB/s, 128B/s.
+#[must_use]
+pub fn format_speed(bytes_per_sec: u64) -> String {
+    const UNITS: &[(&str, u64)] = &[
+        ("GB/s", 1_000_000_000),
+        ("MB/s", 1_000_000),
+        ("KB/s", 1_000),
+    ];
+    for (unit, threshold) in UNITS {
+        if bytes_per_sec >= *threshold {
+            return format!("{:.1}{}", bytes_per_sec as f64 / *threshold as f64, unit);
+        }
+    }
+    format!("{}B/s", bytes_per_sec)
+}
+
+#[must_use]
 pub fn format_run_time(seconds: u64) -> String {
     let days = seconds / 86400;
     let hours = (seconds % 86400) / 3600;
@@ -47,6 +67,7 @@ pub fn format_run_time(seconds: u64) -> String {
 
 /// ISO-8601 timestamp with local offset (e.g. "2026-06-13T10:23:45+08:00").
 /// Uses `local_offset_hours` + `epoch_secs_to_ymd` so we don't pull in chrono.
+#[must_use]
 pub fn local_iso_timestamp(epoch_secs: u64) -> String {
     let offset_hours = crate::local_offset_hours();
     let local_secs = (epoch_secs as i64 + offset_hours * 3600).max(0) as u64;
@@ -72,6 +93,7 @@ fn csv_escape(field: &str) -> String {
 }
 
 /// Export a sorted slice of processes as JSON (curated fields, ISO-8601 timestamp).
+#[must_use]
 pub fn export_processes_as_json(procs: &[crate::collect::ProcessInfo], epoch_secs: u64) -> String {
     let mut out = String::new();
     out.push_str("{\n");
@@ -101,6 +123,7 @@ pub fn export_processes_as_json(procs: &[crate::collect::ProcessInfo], epoch_sec
 }
 
 /// Export a sorted slice of processes as CSV with the columns pid,name,cpu_usage,memory_bytes,exe.
+#[must_use]
 pub fn export_processes_as_csv(procs: &[crate::collect::ProcessInfo]) -> String {
     let mut out = String::new();
     out.push_str("pid,name,cpu_usage,memory_bytes,exe\n");

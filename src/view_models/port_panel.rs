@@ -137,18 +137,22 @@ impl PortPanel {
         }
     }
 
+    #[must_use]
     pub fn filtered_ports(&self) -> &[PortEntry] {
         &self.cached_filtered_ports
     }
 
+    #[must_use]
     pub fn filtered_process_groups(&self) -> &[ProcessNetGroup] {
         &self.cached_filtered_process_groups
     }
 
+    #[must_use]
     pub fn filtered_remote_groups(&self) -> &[RemoteGroup] {
         &self.cached_filtered_remote_groups
     }
 
+    #[must_use]
     pub fn anomaly_count(&self) -> usize {
         self.active_anomalies
             .iter()
@@ -156,6 +160,7 @@ impl PortPanel {
             .count()
     }
 
+    #[must_use]
     pub fn visible_anomalies(&self) -> Vec<&Anomaly> {
         self.active_anomalies
             .iter()
@@ -167,6 +172,7 @@ impl PortPanel {
         self.anomaly_dismissed.insert(id.to_string());
     }
 
+    #[must_use]
     pub fn visible_port_count(&self) -> usize {
         match self.port_view_mode {
             NetworkViewMode::Port => self.filtered_ports().len(),
@@ -260,6 +266,7 @@ impl PortPanel {
         self.port_filter_dirty = false;
     }
 
+    #[must_use]
     pub fn compute_group_visual_positions(
         groups: &[ProcessNetGroup],
         expanded_pid: Option<u32>,

@@ -25,6 +25,7 @@ const KNOWN_TYPOS: &[&str] = &[
     "svchost.exc",
 ];
 
+#[must_use]
 pub fn check_name_spoofing(name: &str) -> Option<RiskFactor> {
     let name_lower = name.to_lowercase();
 
@@ -90,6 +91,7 @@ fn is_near_match(a: &str, b: &str) -> bool {
     diff + (longer.len() - li) + (shorter.len() - si) <= 1
 }
 
+#[must_use]
 pub fn check_resource_anomaly(proc: &ProcessInfo) -> Option<RiskFactor> {
     let cpu = proc.cpu_usage;
     let mem_mb = proc.memory as f64 / (1024.0 * 1024.0);
@@ -124,6 +126,7 @@ pub fn check_resource_anomaly(proc: &ProcessInfo) -> Option<RiskFactor> {
     None
 }
 
+#[must_use]
 pub fn check_child_explosion(proc: &ProcessInfo, all_procs: &[ProcessInfo]) -> Option<RiskFactor> {
     let child_count = all_procs
         .iter()
@@ -157,6 +160,7 @@ pub fn check_child_explosion(proc: &ProcessInfo, all_procs: &[ProcessInfo]) -> O
     None
 }
 
+#[must_use]
 pub fn check_privilege_escalation(proc: &ProcessInfo) -> Option<RiskFactor> {
     let user = proc.user_id.as_deref()?;
     let is_system = user.contains("SYSTEM") || user.contains("LocalSystem");
@@ -184,6 +188,7 @@ pub fn check_privilege_escalation(proc: &ProcessInfo) -> Option<RiskFactor> {
 }
 
 /// Check: svchost.exe must be launched by services.exe with -k flag
+#[must_use]
 pub fn check_svchost_integrity(
     proc: &ProcessInfo,
     all_procs: &[ProcessInfo],
@@ -235,6 +240,7 @@ pub fn check_svchost_integrity(
 }
 
 /// Check: process name does not match exe filename (renamed binary)
+#[must_use]
 pub fn check_name_path_mismatch(proc: &ProcessInfo) -> Option<RiskFactor> {
     let exe = proc.exe.as_deref()?;
     let exe_filename = exe.rsplit('\\').next().unwrap_or("").to_lowercase();

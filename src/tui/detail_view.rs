@@ -191,6 +191,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
 use crate::format::format_bytes;
 
+#[must_use]
 pub fn draw_placeholder(_area: Rect) -> String {
     "进程详情（开发中）".to_string()
 }

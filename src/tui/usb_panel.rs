@@ -6,7 +6,7 @@ use ratatui::widgets::{
 };
 
 use crate::app::App;
-use crate::eject::format_size;
+use crate::format::format_bytes;
 use crate::tui::theme;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
@@ -33,8 +33,8 @@ fn draw_device_list(f: &mut Frame, area: Rect, app: &App) {
             .map(|(i, dev)| {
                 let size_info = format!(
                     "{}/{}",
-                    format_size(dev.used_size),
-                    format_size(dev.total_size)
+                    format_bytes(dev.used_size),
+                    format_bytes(dev.total_size)
                 );
                 let status = if dev.is_occupied {
                     "⚠ 有占用"

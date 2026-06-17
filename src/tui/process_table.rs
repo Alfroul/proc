@@ -95,8 +95,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             };
 
             if show_disk {
-                let disk_r = format_speed(proc.disk_read_speed);
-                let disk_w = format_speed(proc.disk_write_speed);
+                let disk_r = crate::format::format_speed(proc.disk_read_speed);
+                let disk_w = crate::format::format_speed(proc.disk_write_speed);
                 Row::new(vec![
                     Cell::from(checkbox),
                     Cell::from(proc.pid.to_string()),
@@ -190,21 +190,7 @@ fn class_style(class: &ProcessClass) -> Style {
     }
 }
 
-fn format_speed(bytes_per_sec: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    if bytes_per_sec >= GB {
-        format!("{:.1}GB/s", bytes_per_sec as f64 / GB as f64)
-    } else if bytes_per_sec >= MB {
-        format!("{:.1}MB/s", bytes_per_sec as f64 / MB as f64)
-    } else if bytes_per_sec >= KB {
-        format!("{:.0}KB/s", bytes_per_sec as f64 / KB as f64)
-    } else {
-        format!("{}B/s", bytes_per_sec)
-    }
-}
-
+#[must_use]
 pub fn draw_placeholder(_area: Rect) -> String {
     "进程列表（加载中...）".to_string()
 }

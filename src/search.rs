@@ -12,6 +12,7 @@ impl Default for SearchState {
 }
 
 impl SearchState {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             active: false,
@@ -43,10 +44,12 @@ impl SearchState {
         }
     }
 
+    #[must_use]
     pub fn is_active(&self) -> bool {
         self.active
     }
 
+    #[must_use]
     pub fn query(&self) -> &str {
         &self.query
     }

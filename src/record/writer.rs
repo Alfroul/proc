@@ -16,6 +16,7 @@ pub struct Recorder {
     thread: Option<std::thread::JoinHandle<()>>,
     path: PathBuf,
     start_time: u64,
+    stopped: bool,
 }
 
 impl Recorder {
@@ -82,6 +83,7 @@ impl Recorder {
             thread: Some(thread),
             path,
             start_time,
+            stopped: false,
         })
     }
 
@@ -90,19 +92,38 @@ impl Recorder {
     }
 
     pub fn stop(mut self) -> anyhow::Result<()> {
-        let _ = self.tx.send(WriterMsg::Stop);
-        if let Some(thread) = self.thread.take() {
-            thread.join().ok();
-        }
+        self.stop_internal();
         tracing::info!("录制已保存到: {}", self.path.display());
         Ok(())
     }
 
+    fn stop_internal(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        let _ = self.tx.send(WriterMsg::Stop);
+        if let Some(thread) = self.thread.take() {
+            thread.join().ok();
+        }
+    }
+
+    #[must_use]
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
 
+    #[must_use]
     pub fn start_time(&self) -> u64 {
         self.start_time
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        // Mirror VtRecorder: if `stop()` was already called this is a no-op,
+        // otherwise flush + join so a forgotten Recorder still persists its
+        // buffered frames and never leaks the writer thread.
+        self.stop_internal();
     }
 }

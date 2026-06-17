@@ -168,6 +168,7 @@ impl From<&FrameOpRecord> for OpRecord {
 /// byte back to the runtime enum. Kept here so callers don't need to inline the
 /// match each time.
 impl NetworkViewMode {
+    #[must_use]
     pub fn from_frame_code(code: u8) -> Self {
         match code {
             1 => NetworkViewMode::Process,

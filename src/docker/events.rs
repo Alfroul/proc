@@ -1,5 +1,9 @@
-use std::sync::mpsc;
+use std::sync::mpsc::{self, TrySendError};
 use std::time::SystemTime;
+
+/// Bounded channel capacity for the Docker events backpressure queue.
+/// See ADR-0006 for rationale (≈6 s buffer at 10 events/sec).
+const EVENT_CHANNEL_CAPACITY: usize = 64;
 
 /// Docker 容器事件
 #[derive(Debug, Clone)]
@@ -16,6 +20,7 @@ pub struct DockerEventReceiver {
 }
 
 impl DockerEventReceiver {
+    #[must_use]
     pub fn try_recv(&self) -> Option<DockerEvent> {
         self.rx.try_recv().ok()
     }
@@ -26,8 +31,9 @@ impl DockerEventReceiver {
 /// 使用独立的 tokio runtime，避免与 TUI 主循环冲突。
 /// 连接断开时尝试重连（指数退避，上限 60s），超过 10 次放弃。
 /// 接收端被 drop 时线程自动退出。
+#[must_use]
 pub fn spawn_event_watcher(docker: bollard::Docker) -> DockerEventReceiver {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(EVENT_CHANNEL_CAPACITY);
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
@@ -85,8 +91,18 @@ pub fn spawn_event_watcher(docker: bollard::Docker) -> DockerEventReceiver {
                                 timestamp: SystemTime::now(),
                             };
 
-                            if tx.send(docker_event).is_err() {
-                                break 'outer;
+                            // ADR-0006: bounded sync_channel. On Full we drop
+                            // the new event (keep history). On Disconnected
+                            // (consumer dropped) we exit the watcher.
+                            match tx.try_send(docker_event) {
+                                Ok(()) => {}
+                                Err(TrySendError::Full(_)) => {
+                                    tracing::warn!(
+                                        "Docker 事件通道已满（{}），丢弃新事件",
+                                        EVENT_CHANNEL_CAPACITY
+                                    );
+                                }
+                                Err(TrySendError::Disconnected(_)) => break 'outer,
                             }
                         }
                         Ok(None) => break, // stream ended cleanly — try reconnect
@@ -123,6 +139,7 @@ pub fn spawn_event_watcher(docker: bollard::Docker) -> DockerEventReceiver {
 }
 
 /// 格式化事件描述（用于 CLI 输出）
+#[must_use]
 pub fn format_event_description(event: &DockerEvent) -> String {
     let name = event
         .container_name

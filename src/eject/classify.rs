@@ -18,6 +18,7 @@ pub enum HandleRisk {
 }
 
 impl HandleRisk {
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::Critical => "🔴 关键",
@@ -27,6 +28,7 @@ impl HandleRisk {
         }
     }
 
+    #[must_use]
     pub fn color(&self) -> Color {
         match self {
             Self::Critical => Color::Red,
@@ -36,6 +38,7 @@ impl HandleRisk {
         }
     }
 
+    #[must_use]
     pub fn description(&self) -> &str {
         match self {
             Self::Critical => "写入中，不可操作",
@@ -57,6 +60,7 @@ const SYSTEM_BACKGROUND_PROCESSES: &[&str] = &[
 ];
 
 /// 对句柄占用进行风险分类
+#[must_use]
 pub fn classify_handle(lock: &HandleLock) -> HandleRisk {
     let name_lower = lock.process_name.to_lowercase();
 
@@ -85,6 +89,7 @@ pub fn classify_handle(lock: &HandleLock) -> HandleRisk {
     HandleRisk::Safe
 }
 
+#[must_use]
 pub fn get_risk_label(risk: HandleRisk) -> (&'static str, Color) {
     let label = match risk {
         HandleRisk::Critical => "🔴 关键",
@@ -101,6 +106,7 @@ pub fn get_risk_label(risk: HandleRisk) -> (&'static str, Color) {
     (label, color)
 }
 
+#[must_use]
 pub fn risk_weight(risk: HandleRisk) -> u8 {
     match risk {
         HandleRisk::Critical => 4,

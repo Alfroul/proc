@@ -29,6 +29,7 @@ pub mod view_models;
 /// Returns the local timezone offset from UTC in hours (e.g. +8 for CST).
 /// Uses Win32 `GetTimeZoneInformation` to avoid chrono dependency.
 #[cfg(target_os = "windows")]
+#[must_use]
 pub fn local_offset_hours() -> i64 {
     use windows::Win32::System::Time::GetTimeZoneInformation;
     use windows::Win32::System::Time::TIME_ZONE_INFORMATION;
@@ -54,6 +55,7 @@ pub fn local_offset_hours() -> i64 {
 /// Bias convention: `bias_total` is `UTC − local` in minutes, so the offset
 /// we want (east-positive, e.g. +8 for CST) is `-bias_total / 60`. We promote
 /// to i64 *before* negating — `-(i32::MIN)` is UB in release Rust.
+#[must_use]
 pub fn bias_minutes_to_offset_hours(bias_total: i32) -> i64 {
     -(bias_total as i64) / 60
 }
@@ -76,6 +78,7 @@ pub fn local_offset_hours() -> i64 {
 }
 
 /// Returns the proc config directory (~/.config/proc).
+#[must_use]
 pub fn dirs_config_dir() -> std::path::PathBuf {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
@@ -87,6 +90,7 @@ pub fn dirs_config_dir() -> std::path::PathBuf {
 /// civil_from_days algorithm. Takes seconds since 1970-01-01 UTC and treats the
 /// input as a UTC value — callers should add `local_offset_hours() * 3600`
 /// first if they want local-calendar output.
+#[must_use]
 pub fn epoch_secs_to_ymd(secs: u64) -> (u32, u32, u32) {
     let days = (secs / 86400) as i64;
     let z = days + 719468;

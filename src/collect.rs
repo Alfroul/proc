@@ -445,6 +445,7 @@ pub enum ProcessViewMode {
 }
 
 impl ProcessViewMode {
+    #[must_use]
     pub fn toggle(&self) -> Self {
         match self {
             Self::List => Self::AppGroup,
@@ -453,6 +454,7 @@ impl ProcessViewMode {
         }
     }
 
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::List => "列表",
@@ -485,6 +487,7 @@ pub enum SortField {
 }
 
 impl SortField {
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::Cpu => "CPU%",
@@ -498,6 +501,7 @@ impl SortField {
     }
 
     /// 循环切换到下一个排序字段
+    #[must_use]
     pub fn next(&self) -> Self {
         match self {
             Self::Cpu => Self::Memory,
@@ -511,6 +515,7 @@ impl SortField {
     }
 
     /// 循环切换到上一个排序字段
+    #[must_use]
     pub fn prev(&self) -> Self {
         match self {
             Self::Cpu => Self::DiskWrite,
@@ -524,6 +529,7 @@ impl SortField {
     }
 
     /// 稳定的字符串标识，用于持久化（不要随版本变化）。
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Cpu => "cpu",
@@ -537,6 +543,7 @@ impl SortField {
     }
 
     /// 与 `as_str` 对应；未知字符串返回 None（调用者回退到默认值）。
+    #[must_use]
     pub fn parse_from_str(s: &str) -> Option<Self> {
         match s.trim() {
             "cpu" => Some(Self::Cpu),
@@ -548,6 +555,42 @@ impl SortField {
             "disk_write" => Some(Self::DiskWrite),
             _ => None,
         }
+    }
+}
+
+/// 共用进程排序：用于 `proc ls` / `proc export`。
+///
+/// - 非 Name 分支：所有比较器都 `.then(pid)` 作为 tie-breaker，避免同分进程顺序抖动。
+/// - Name 分支：预建 lower-case Vec 后 `sort_by_key`，避免每个比较对调用一次 `to_lowercase`（N log N → N）。
+pub fn sort_processes(procs: &mut Vec<ProcessInfo>, sort_field: SortField) {
+    match sort_field {
+        SortField::Name => {
+            let mut keyed: Vec<(String, ProcessInfo)> = procs
+                .drain(..)
+                .map(|p| (p.name.to_lowercase(), p))
+                .collect();
+            keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.pid.cmp(&b.1.pid)));
+            *procs = keyed.into_iter().map(|(_, p)| p).collect();
+        }
+        SortField::Pid => procs.sort_by_key(|p| p.pid),
+        SortField::Cpu => procs.sort_by(|a, b| {
+            b.cpu_usage
+                .partial_cmp(&a.cpu_usage)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.pid.cmp(&b.pid))
+        }),
+        SortField::Memory => procs.sort_by(|a, b| b.memory.cmp(&a.memory).then(a.pid.cmp(&b.pid))),
+        SortField::Security => procs.sort_by_key(|p| p.pid),
+        SortField::DiskRead => procs.sort_by(|a, b| {
+            b.disk_read_speed
+                .cmp(&a.disk_read_speed)
+                .then(a.pid.cmp(&b.pid))
+        }),
+        SortField::DiskWrite => procs.sort_by(|a, b| {
+            b.disk_write_speed
+                .cmp(&a.disk_write_speed)
+                .then(a.pid.cmp(&b.pid))
+        }),
     }
 }
 
@@ -1016,11 +1059,13 @@ impl SystemSnapshot {
     }
 
     /// Access the incremental process cache as a Vec (for compatibility)
+    #[must_use]
     pub fn cached_processes_vec(&self) -> Vec<ProcessInfo> {
         self.process_cache.values().cloned().collect()
     }
 
     /// Access the incremental process cache directly
+    #[must_use]
     pub fn process_cache(&self) -> &HashMap<u32, ProcessInfo> {
         &self.process_cache
     }
@@ -1032,6 +1077,7 @@ impl SystemSnapshot {
     }
 
     /// 获取全局 CPU 使用率 (0-100)
+    #[must_use]
     pub fn cpu_usage(&self) -> f32 {
         if let Some(cpu) = self.replay_cpu {
             return cpu;
@@ -1045,6 +1091,7 @@ impl SystemSnapshot {
     }
 
     /// 获取内存使用情况 (已用 bytes, 总量 bytes)
+    #[must_use]
     pub fn memory_usage(&self) -> (u64, u64) {
         if let Some(mem) = self.replay_memory {
             return mem;
@@ -1076,11 +1123,13 @@ impl SystemSnapshot {
     }
 
     /// 获取 Swap 使用情况 (已用 bytes, 总量 bytes)
+    #[must_use]
     pub fn swap_usage(&self) -> (u64, u64) {
         (self.sys.used_swap(), self.sys.total_swap())
     }
 
     /// 获取系统盘（最大非可移动磁盘）使用情况 (已用 bytes, 总量 bytes)
+    #[must_use]
     pub fn disk_usage(&self) -> (u64, u64) {
         self.disks
             .list()
@@ -1092,11 +1141,13 @@ impl SystemSnapshot {
     }
 
     /// 获取系统运行时间（秒）
+    #[must_use]
     pub fn uptime_secs() -> u64 {
         sysinfo::System::uptime()
     }
 
     /// 获取 CPU 和 GPU 温度 (cpu_temp, gpu_temp)，None 表示未检测到
+    #[must_use]
     pub fn temperatures(&self) -> (Option<f32>, Option<f32>) {
         let mut cpu_temp: Option<f32> = None;
         let mut gpu_temp: Option<f32> = None;
@@ -1116,6 +1167,7 @@ impl SystemSnapshot {
         (cpu_temp, gpu_temp)
     }
 
+    #[must_use]
     pub fn process_name_map(&self) -> std::collections::HashMap<u32, String> {
         self.sys
             .processes()
@@ -1124,26 +1176,31 @@ impl SystemSnapshot {
             .collect()
     }
 
+    #[must_use]
     pub fn gpu_info(&self) -> &[crate::gpu::GpuInfo] {
         &self.gpu_info
     }
 
+    #[must_use]
     pub fn throttle_info(&self) -> Option<&crate::throttle::ThrottleInfo> {
         self.throttle_info.as_ref()
     }
 
     /// 获取上次刷新时间
+    #[must_use]
     pub fn last_refresh(&self) -> Instant {
         self.refresh_time
     }
 
     /// 获取进程数量
+    #[must_use]
     pub fn process_count(&self) -> usize {
         self.sys.processes().len()
     }
 
     /// Global aggregate disk I/O speed (sum of per-disk speeds).
     /// For per-disk breakdown, use `per_disk_io_speed()`.
+    #[must_use]
     pub fn disk_io_speed(&self) -> (u64, u64) {
         let mut read: u64 = 0;
         let mut write: u64 = 0;
@@ -1155,11 +1212,13 @@ impl SystemSnapshot {
     }
 
     /// Per-disk I/O speed.
+    #[must_use]
     pub fn per_disk_io_speed(&self) -> Vec<DiskIoInfo> {
         self.disk_io_speeds.clone()
     }
 
     /// 获取所有磁盘信息列表
+    #[must_use]
     pub fn all_disks(&self) -> Vec<DiskInfo> {
         self.disks
             .list()
@@ -1175,6 +1234,7 @@ impl SystemSnapshot {
     }
 
     /// 获取活跃网卡信息（过滤 APIPA 169.254.x.x 和回环 127.0.0.1）
+    #[must_use]
     pub fn net_adapters(&self) -> Vec<NetAdapterInfo> {
         let ipv4_map = query_adapter_ipv4_addresses();
         ipv4_map
@@ -1187,6 +1247,7 @@ impl SystemSnapshot {
     }
 
     /// 获取 TCP 连接状态统计
+    #[must_use]
     pub fn tcp_stats() -> TcpStats {
         query_tcp_stats()
     }
@@ -1194,6 +1255,7 @@ impl SystemSnapshot {
 
 /// 检测当前进程是否以管理员权限运行
 #[cfg(target_os = "windows")]
+#[must_use]
 pub fn is_elevated() -> bool {
     use windows::Win32::Security::{
         GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,

@@ -96,31 +96,31 @@ mod non_windows_stubs {
     #[test]
     fn scan_all_devices_unsupported() {
         let err = eject::scan_all_devices().unwrap_err();
-        assert!(matches!(err, ProcError::UsbDetect(_)), "got {:?}", err);
+        assert!(matches!(err, ProcError::UsbDetect { .. }), "got {:?}", err);
     }
 
     #[test]
     fn scan_device_locks_unsupported() {
         let err = eject::scan_device_locks('E').unwrap_err();
-        assert!(matches!(err, ProcError::UsbDetect(_)), "got {:?}", err);
+        assert!(matches!(err, ProcError::UsbDetect { .. }), "got {:?}", err);
     }
 
     #[test]
     fn scan_device_locks_with_processes_unsupported() {
         let err = eject::scan_device_locks_with_processes('E', &[]).unwrap_err();
-        assert!(matches!(err, ProcError::UsbDetect(_)), "got {:?}", err);
+        assert!(matches!(err, ProcError::UsbDetect { .. }), "got {:?}", err);
     }
 
     #[test]
     fn kill_safe_processes_unsupported() {
         let err = eject::kill_safe_processes('E').unwrap_err();
-        assert!(matches!(err, ProcError::UsbDetect(_)), "got {:?}", err);
+        assert!(matches!(err, ProcError::UsbDetect { .. }), "got {:?}", err);
     }
 
     #[test]
     fn cli_check_drive_unsupported() {
         let err = eject::cli_check_drive("E:", false).unwrap_err();
-        assert!(matches!(err, ProcError::UsbDetect(_)), "got {:?}", err);
+        assert!(matches!(err, ProcError::UsbDetect { .. }), "got {:?}", err);
     }
 
     #[test]

@@ -1,6 +1,6 @@
-use std::io::{BufRead, BufReader, Write as IoWrite};
+use std::io::{BufRead, BufReader, Read, Write as IoWrite};
 use std::net::{IpAddr, SocketAddr, TcpStream};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 pub enum DiagnosticTool {
@@ -30,6 +30,7 @@ pub struct DiagnosticState {
 }
 
 impl DiagnosticState {
+    #[must_use]
     pub fn new(target_ip: IpAddr) -> Self {
         Self {
             target_ip,
@@ -42,6 +43,7 @@ impl DiagnosticState {
         }
     }
 
+    #[must_use]
     pub fn tool_list() -> Vec<DiagnosticTool> {
         vec![
             DiagnosticTool::Ping,
@@ -52,6 +54,7 @@ impl DiagnosticState {
         ]
     }
 
+    #[must_use]
     pub fn tool_name(tool: &DiagnosticTool) -> &'static str {
         match tool {
             DiagnosticTool::Ping => "Ping",
@@ -63,11 +66,13 @@ impl DiagnosticState {
     }
 
     /// Whether this tool is unavailable for private/loopback IPs
+    #[must_use]
     pub fn tool_unavailable_for_private(tool: &DiagnosticTool) -> bool {
         matches!(tool, DiagnosticTool::Whois | DiagnosticTool::Traceroute)
     }
 }
 
+#[must_use]
 pub fn is_private_or_loopback(ip: &IpAddr) -> bool {
     ip.is_loopback() || is_private(ip)
 }
@@ -81,7 +86,10 @@ fn is_private(ip: &IpAddr) -> bool {
 
 /// Run ping in a background thread, streaming output lines via mpsc channel.
 ///
-/// Handles GBK-encoded output from Windows ping.exe by decoding with encoding_rs.
+/// Spawns ping.exe and streams its stdout line-by-line so a Ctrl+C can kill
+/// the child between hops (rather than waiting for the whole run). Decodes
+/// GBK-encoded output from Windows ping.exe with encoding_rs.
+#[must_use]
 pub fn run_ping(
     ip: IpAddr,
 ) -> (
@@ -91,37 +99,27 @@ pub fn run_ping(
     let (tx, rx) = std::sync::mpsc::channel();
 
     let handle = std::thread::spawn(move || {
-        let output = match Command::new("ping")
+        let mut child = match Command::new("ping")
             .args(["-n", "4", "-w", "1000", &ip.to_string()])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .spawn()
         {
-            Ok(o) => o,
+            Ok(c) => c,
             Err(e) => {
                 let _ = tx.send(format!("执行 ping 失败: {}", e));
                 return;
             }
         };
 
-        let (decoded, _, _) = encoding_rs::GBK.decode(&output.stdout);
-        for line in decoded.lines() {
-            let _ = tx.send(line.to_string());
-        }
-
-        if !output.status.success() {
-            let (err_decoded, _, _) = encoding_rs::GBK.decode(&output.stderr);
-            let err_str = err_decoded.trim().to_string();
-            if !err_str.is_empty() {
-                let _ = tx.send(format!("错误: {}", err_str));
-            }
-        }
+        stream_gbk_stdout(&mut child, &tx);
     });
 
     (handle, rx)
 }
 
 /// Run DNS reverse lookup in a background thread.
+#[must_use]
 pub fn run_dns_reverse(
     ip: IpAddr,
 ) -> (
@@ -147,6 +145,7 @@ pub fn run_dns_reverse(
 }
 
 /// Run Whois query in a background thread.
+#[must_use]
 pub fn run_whois(
     ip: IpAddr,
 ) -> (
@@ -196,6 +195,10 @@ pub fn run_whois(
 }
 
 /// Run traceroute in a background thread, streaming output via mpsc channel.
+///
+/// Spawns tracert.exe and streams stdout line-by-line so Ctrl+C between hops
+/// kills the child immediately (tracert can otherwise run for ~15s+).
+#[must_use]
 pub fn run_traceroute(
     ip: IpAddr,
 ) -> (
@@ -205,34 +208,75 @@ pub fn run_traceroute(
     let (tx, rx) = std::sync::mpsc::channel();
 
     let handle = std::thread::spawn(move || {
-        let output = match Command::new("tracert")
+        let mut child = match Command::new("tracert")
             .args(["-d", "-h", "15", "-w", "1000", &ip.to_string()])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .spawn()
         {
-            Ok(o) => o,
+            Ok(c) => c,
             Err(e) => {
                 let _ = tx.send(format!("执行 tracert 失败: {}", e));
                 return;
             }
         };
 
-        let (decoded, _, _) = encoding_rs::GBK.decode(&output.stdout);
-        for line in decoded.lines() {
-            let _ = tx.send(line.to_string());
-        }
-
-        if !output.status.success() {
-            let (err_decoded, _, _) = encoding_rs::GBK.decode(&output.stderr);
-            let err_str = err_decoded.trim().to_string();
-            if !err_str.is_empty() {
-                let _ = tx.send(format!("错误: {}", err_str));
-            }
-        }
+        stream_gbk_stdout(&mut child, &tx);
     });
 
     (handle, rx)
+}
+
+/// Stream a GBK-encoded child's stdout to `tx`, checking `shutdown::requested()`
+/// between lines. On shutdown or natural EOF the child is killed/reaped and
+/// any non-empty stderr dump is forwarded as `错误: <text>`.
+fn stream_gbk_stdout(child: &mut Child, tx: &std::sync::mpsc::Sender<String>) {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    if let Some(stdout) = stdout {
+        let mut reader = BufReader::new(stdout);
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            if crate::shutdown::requested() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    // Strip CRLF / LF, decode as GBK.
+                    while matches!(buf.last(), Some(b'\n') | Some(b'\r')) {
+                        buf.pop();
+                    }
+                    let (decoded, _, _) = encoding_rs::GBK.decode(&buf);
+                    let _ = tx.send(decoded.to_string());
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    // If shutdown fired during the read loop the child has already been
+    // killed + reaped above. Otherwise drain its exit status and surface
+    // any stderr so failures are visible in the TUI diagnostic view.
+    if !crate::shutdown::requested() {
+        let status = child.wait().ok();
+        if !matches!(status.map(|s| s.success()), Some(true))
+            && let Some(mut stderr) = stderr
+        {
+            let mut err_bytes = Vec::new();
+            if stderr.read_to_end(&mut err_bytes).is_ok() && !err_bytes.is_empty() {
+                let (decoded, _, _) = encoding_rs::GBK.decode(&err_bytes);
+                let err_str = decoded.trim().to_string();
+                if !err_str.is_empty() {
+                    let _ = tx.send(format!("错误: {}", err_str));
+                }
+            }
+        }
+    }
 }
 
 const SCAN_PORTS: [(u16, &str); 15] = [
@@ -254,6 +298,7 @@ const SCAN_PORTS: [(u16, &str); 15] = [
 ];
 
 /// Run port scan in a background thread.
+#[must_use]
 pub fn run_port_scan(
     ip: IpAddr,
 ) -> (

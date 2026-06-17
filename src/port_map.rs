@@ -28,6 +28,7 @@ pub enum NetworkViewMode {
 }
 
 impl NetworkViewMode {
+    #[must_use]
     pub fn toggle(&self) -> Self {
         match self {
             Self::Port => Self::Process,
@@ -35,6 +36,7 @@ impl NetworkViewMode {
             Self::Remote => Self::Port,
         }
     }
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::Port => "按端口",
@@ -53,6 +55,7 @@ pub enum PortSortField {
 }
 
 impl PortSortField {
+    #[must_use]
     pub fn next(&self) -> Self {
         match self {
             Self::LocalPort => Self::RemoteAddr,
@@ -61,6 +64,7 @@ impl PortSortField {
             Self::Process => Self::LocalPort,
         }
     }
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::LocalPort => "端口",
@@ -81,6 +85,7 @@ pub enum PortStateFilter {
 }
 
 impl PortStateFilter {
+    #[must_use]
     pub fn next(&self) -> Self {
         match self {
             Self::All => Self::Established,
@@ -89,6 +94,7 @@ impl PortStateFilter {
             Self::Udp => Self::All,
         }
     }
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::All => "全部",
@@ -99,6 +105,7 @@ impl PortStateFilter {
     }
 }
 
+#[must_use]
 pub fn matches_filter(entry: &PortEntry, filter: &PortStateFilter) -> bool {
     match filter {
         PortStateFilter::All => true,
@@ -114,6 +121,7 @@ pub fn matches_filter(entry: &PortEntry, filter: &PortStateFilter) -> bool {
     }
 }
 
+#[must_use]
 pub fn state_group(state: &Option<String>, protocol: &Protocol) -> u8 {
     if *protocol == Protocol::Udp {
         return 3;
@@ -139,12 +147,15 @@ pub fn sort_entries(entries: &mut [PortEntry], sort: PortSortField) {
                 }
                 PortSortField::State => a.state.cmp(&b.state),
                 PortSortField::Process => a.process_name.cmp(&b.process_name),
-            },
+            }
+            .then_with(|| a.pid.cmp(&b.pid))
+            .then_with(|| a.local_port.cmp(&b.local_port)),
             other => other,
         }
     });
 }
 
+#[must_use]
 pub fn is_ipv6_duplicate(entry: &PortEntry, seen: &[(u16, u32, String)]) -> bool {
     if !entry.local_addr.to_string().contains(':') {
         return false;
@@ -174,7 +185,7 @@ pub fn scan_ports() -> Result<Vec<PortEntry>> {
     let proto_flags = netstat2::ProtocolFlags::TCP | netstat2::ProtocolFlags::UDP;
 
     let sockets_info = netstat2::get_sockets_info(af_flags, proto_flags)
-        .map_err(|e| ProcError::PortScan(format!("端口扫描失败: {}", e)))?;
+        .map_err(|e| ProcError::port_scan_with("端口扫描失败", e))?;
 
     let name_map = crate::collect::sysinfo_with(|sys| {
         let mut map: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
@@ -269,6 +280,7 @@ pub struct ProcessNetSummary {
 }
 
 impl ProcessNetSummary {
+    #[must_use]
     pub fn from_pid(pid: u32, entries: &[PortEntry]) -> Self {
         let mut s = Self::default();
         for e in entries {
@@ -323,6 +335,7 @@ pub struct ProcessNetGroup {
 }
 
 impl ProcessNetGroup {
+    #[must_use]
     pub fn from_entries(entries: &[PortEntry]) -> Vec<Self> {
         let mut map: HashMap<(u32, String), Vec<&PortEntry>> = HashMap::new();
         for e in entries {
@@ -394,6 +407,7 @@ pub enum ProcessSortField {
 }
 
 impl ProcessSortField {
+    #[must_use]
     pub fn next(&self) -> Self {
         match self {
             Self::ConnectionCount => Self::ProcessName,
@@ -401,6 +415,7 @@ impl ProcessSortField {
             Self::Pid => Self::ConnectionCount,
         }
     }
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::ConnectionCount => "连接数",
@@ -415,16 +430,18 @@ pub fn sort_process_groups(groups: &mut [ProcessNetGroup], sort: ProcessSortFiel
         ProcessSortField::ConnectionCount => {
             let a_total = a.tcp_count + a.udp_count;
             let b_total = b.tcp_count + b.udp_count;
-            b_total.cmp(&a_total)
+            b_total.cmp(&a_total).then(a.pid.cmp(&b.pid))
         }
         ProcessSortField::ProcessName => a
             .process_name
             .to_lowercase()
-            .cmp(&b.process_name.to_lowercase()),
+            .cmp(&b.process_name.to_lowercase())
+            .then(a.pid.cmp(&b.pid)),
         ProcessSortField::Pid => a.pid.cmp(&b.pid),
     });
 }
 
+#[must_use]
 pub fn service_name(port: u16, protocol: Protocol) -> Option<&'static str> {
     match protocol {
         Protocol::Tcp => match port {
@@ -466,6 +483,7 @@ pub fn service_name(port: u16, protocol: Protocol) -> Option<&'static str> {
     }
 }
 
+#[must_use]
 pub fn format_port_service(port: u16, protocol: Protocol) -> String {
     match service_name(port, protocol) {
         Some(name) => format!("{} ({})", name, port),
@@ -481,6 +499,7 @@ pub enum IpClass {
     Public,
 }
 
+#[must_use]
 pub fn classify_ip(addr: &IpAddr) -> IpClass {
     if addr.is_loopback() {
         IpClass::Loopback
@@ -510,6 +529,7 @@ fn is_link_local(addr: &IpAddr) -> bool {
     }
 }
 
+#[must_use]
 pub fn ip_class_label(class: IpClass) -> &'static str {
     match class {
         IpClass::Loopback => "本机",
@@ -542,6 +562,7 @@ impl std::fmt::Display for CloudProvider {
     }
 }
 
+#[must_use]
 pub fn detect_cloud_provider(addr: &IpAddr) -> Option<CloudProvider> {
     let v4 = match addr {
         IpAddr::V4(v4) => *v4,
@@ -662,6 +683,7 @@ pub struct RemoteGroup {
 }
 
 impl RemoteGroup {
+    #[must_use]
     pub fn from_entries(entries: &[PortEntry]) -> Vec<Self> {
         let mut map: HashMap<IpAddr, Vec<&PortEntry>> = HashMap::new();
 
@@ -744,6 +766,7 @@ pub enum RemoteSortField {
 }
 
 impl RemoteSortField {
+    #[must_use]
     pub fn next(&self) -> Self {
         match self {
             Self::ConnectionCount => Self::IpAddress,
@@ -751,6 +774,7 @@ impl RemoteSortField {
             Self::ProcessCount => Self::ConnectionCount,
         }
     }
+    #[must_use]
     pub fn label(&self) -> &str {
         match self {
             Self::ConnectionCount => "连接数",

@@ -86,6 +86,7 @@ pub struct MonitorManager {
 }
 
 impl MonitorManager {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -128,15 +129,17 @@ impl MonitorManager {
             .entries
             .iter()
             .position(|e| e.id == id)
-            .ok_or_else(|| ProcError::NotFound(format!("监控条目 {} 不存在", id)))?;
+            .ok_or_else(|| ProcError::not_found(format!("监控条目 {id} 不存在")))?;
         self.entries.remove(idx);
         Ok(())
     }
 
+    #[must_use]
     pub fn list_monitors(&self) -> &[MonitorEntry] {
         &self.entries
     }
 
+    #[must_use]
     pub fn get_monitor(&self, id: u32) -> Option<&MonitorEntry> {
         self.entries.iter().find(|e| e.id == id)
     }
@@ -157,11 +160,13 @@ impl MonitorManager {
         }
     }
 
+    #[must_use]
     pub fn notifications(&self) -> &[NotificationRecord] {
         &self.notifications
     }
 
     /// 计算指数退避时间（秒）
+    #[must_use]
     pub fn calc_backoff(base: u64, crash_count: u32, max_backoff: u64) -> u64 {
         let exp = crash_count.saturating_sub(1);
         let delay = base.saturating_mul(2u64.saturating_pow(exp));

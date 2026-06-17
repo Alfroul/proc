@@ -56,5 +56,51 @@ jobs:
       - name: check (no default features)
         run: cargo check --no-default-features --all-targets
 
-      - name: build platform_compat test
-        run: cargo test --test test_platform_compat --no-run
+      - name: test (platform-agnostic)
+        run: |
+          cargo test --release \
+            --test test_tree \
+            --test test_throttle \
+            --test test_record_color \
+            --test test_platform_compat \
+            --test test_alert \
+            --test test_search
+
+  check-macos:
+    # macOS 仅 cargo check + clippy（与 Linux 同样的 cfg-gated 降级）。
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: check (no default features)
+        run: cargo check --no-default-features --all-targets
+
+  msrv:
+    # 验证 rust-version = "1.85" 声明确实可编译。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+
+      - name: check (no default features)
+        run: cargo check --no-default-features --all-targets
+
+  audit:
+    # 安全审计：cargo-audit 扫描 Cargo.lock 已知漏洞。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
