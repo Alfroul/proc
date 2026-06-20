@@ -8,7 +8,7 @@ const CPU_EMA_ALPHA: f32 = 0.3;
 
 // ---------------------------------------------------------------------------
 // SysinfoRegistry — 全局 sysinfo::System 单例
-// 详见 docs/adr/0004-sysinfo-单例收敛方案.md
+// 设计动机见 CHANGELOG.md「阶段 5 — 资源生命周期」(ADR SysinfoRegistry 收敛)。
 // ---------------------------------------------------------------------------
 
 static SYSINFO_REGISTRY: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
@@ -24,14 +24,18 @@ pub fn sysinfo_shared() -> &'static Mutex<sysinfo::System> {
 ///
 /// 闭包内**禁止**：refresh_*、再次进入 sysinfo_with、长耗时操作。
 /// 只做只读的 name / exe 查询。
+///
+/// 中毒时（worker 线程 panic）通过 `into_inner()` 取回内部 System 继续，
+/// 让 TUI 不至于因为某次 sysinfo 调用炸了就整个挂掉。
 pub fn sysinfo_with<F, R>(f: F) -> R
 where
     F: FnOnce(&sysinfo::System) -> R,
 {
-    let sys = sysinfo_shared()
-        .lock()
-        .expect("sysinfo registry mutex poisoned");
-    f(&sys)
+    let guard = sysinfo_shared().lock().unwrap_or_else(|e| {
+        tracing::warn!("sysinfo registry mutex poisoned, recovering: {:?}", e);
+        e.into_inner()
+    });
+    f(&guard)
 }
 
 /// Windows API fallback: sysinfo returns WorkingSetSize which is 0 for vmmem/Hyper-V processes.
@@ -388,14 +392,12 @@ fn query_tcp_stats() -> TcpStats {
     for si in &sockets_info {
         if let netstat2::ProtocolSocketInfo::Tcp(tcp) = &si.protocol_socket_info {
             let state_str = format!("{}", tcp.state);
-            if state_str.contains("Established") {
-                stats.established += 1;
-            } else if state_str.contains("TimeWait") || state_str.contains("TIME_WAIT") {
-                stats.time_wait += 1;
-            } else if state_str.contains("CloseWait") || state_str.contains("CLOSE_WAIT") {
-                stats.close_wait += 1;
-            } else if state_str.contains("Listen") {
-                stats.listen += 1;
+            match crate::port_map::TcpState::from_state_str(Some(&state_str)) {
+                crate::port_map::TcpState::Established => stats.established += 1,
+                crate::port_map::TcpState::TimeWait => stats.time_wait += 1,
+                crate::port_map::TcpState::CloseWait => stats.close_wait += 1,
+                crate::port_map::TcpState::Listen => stats.listen += 1,
+                crate::port_map::TcpState::Other => {}
             }
         }
     }
@@ -721,6 +723,201 @@ impl HeavyWorker {
     }
 }
 
+/// 后台轻量采集 worker:把 GPU / 温度 / 磁盘 IO / 电源信息从 TUI 主线程
+/// 挪到独立线程。主线程 `refresh_light()` 只保留 CPU/内存/网络的快速刷新,
+/// 其余改为 `try_recv` 最新 [`LightSnapshot`]。
+///
+/// 这些子项里 `components.refresh(true)`(WMI 温度)、`gpu_collector.refresh()`
+/// (DXGI factory 反复创建)、`disks.refresh(true)` 都可能在 Windows 上单次
+/// 阻塞 50~200ms,在 50ms 帧率的 TUI 主线程上肉眼可见卡顿。
+///
+/// 模式照搬 [`HeavyWorker`] / [`crate::port_worker::PortSnapshotWorker`]:
+/// `mpsc::sync_channel(1)` + worker 自驱 1s 循环 + 主线程 `try_recv_latest`。
+struct LightSnapshot {
+    gpu_info: Vec<crate::gpu::GpuInfo>,
+    temperatures: (Option<f32>, Option<f32>),
+    disk_io_speeds: Vec<DiskIoInfo>,
+    all_disks: Vec<DiskInfo>,
+    /// 系统盘 (used, total)
+    disk_usage: (u64, u64),
+    throttle_info: Option<crate::throttle::ThrottleInfo>,
+}
+
+struct LightWorker {
+    snapshot_rx: std::sync::mpsc::Receiver<LightSnapshot>,
+    shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LightWorker {
+    fn start() -> Self {
+        let (snap_tx, snap_rx) = std::sync::mpsc::sync_channel::<LightSnapshot>(1);
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+
+        let handle = std::thread::Builder::new()
+            .name("proc-light-refresh".into())
+            .spawn(move || light_worker_loop(snap_tx, shutdown_rx))
+            .expect("failed to spawn light-refresh thread");
+
+        Self {
+            snapshot_rx: snap_rx,
+            shutdown_tx: Some(shutdown_tx),
+            thread: Some(handle),
+        }
+    }
+
+    /// Drain 到最新一份;无新快照时返回 `None`。首次启动可阻塞等首帧。
+    fn try_recv_latest(&self) -> Option<LightSnapshot> {
+        let mut latest = None;
+        while let Ok(s) = self.snapshot_rx.try_recv() {
+            latest = Some(s);
+        }
+        latest
+    }
+
+    /// 阻塞等待首帧(最多 `timeout`)。`SystemSnapshot::new()` 用这个避免
+    /// 启动后第一秒 sidebar 显示空白。
+    fn recv_first(&self, timeout: Duration) -> Option<LightSnapshot> {
+        match self.snapshot_rx.recv_timeout(timeout) {
+            Ok(first) => {
+                // 把可能已经排队的更 新帧也 drain 掉,只留最新
+                let mut latest = first;
+                while let Ok(s) = self.snapshot_rx.try_recv() {
+                    latest = s;
+                }
+                Some(latest)
+            }
+            Err(_) => None,
+        }
+    }
+}
+
+impl Drop for LightWorker {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+            drop(tx);
+        }
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn light_worker_loop(
+    snap_tx: std::sync::mpsc::SyncSender<LightSnapshot>,
+    shutdown_rx: std::sync::mpsc::Receiver<()>,
+) {
+    use std::sync::mpsc::{RecvTimeoutError, TrySendError};
+
+    let mut disks = sysinfo::Disks::new_with_refreshed_list();
+    let mut components = sysinfo::Components::new_with_refreshed_list();
+    let mut gpu_collector = crate::gpu::GpuCollector::new();
+    let mut prev_disk_io: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut prev_disk_io_time = Instant::now();
+
+    loop {
+        components.refresh(true);
+        let gpu_info = gpu_collector.refresh();
+
+        let throttle_info = if let Some(info) = crate::throttle::query_processor_power_info() {
+            crate::throttle::detect_throttle(&info)
+        } else {
+            None
+        };
+
+        disks.refresh(true);
+        let now = Instant::now();
+        let disk_elapsed = now
+            .duration_since(prev_disk_io_time)
+            .as_secs_f64()
+            .max(0.001);
+
+        let mut new_prev: HashMap<String, (u64, u64)> = HashMap::with_capacity(disks.list().len());
+        let mut disk_io_speeds: Vec<DiskIoInfo> = Vec::with_capacity(disks.list().len());
+        let mut all_disks: Vec<DiskInfo> = Vec::with_capacity(disks.list().len());
+
+        for disk in disks.list() {
+            let mount = disk.mount_point().to_string_lossy().to_string();
+            let usage = disk.usage();
+            let (read_speed, write_speed) = match prev_disk_io.get(&mount) {
+                Some(&(prev_r, prev_w)) => (
+                    ((usage.total_read_bytes.saturating_sub(prev_r)) as f64 / disk_elapsed) as u64,
+                    ((usage.total_written_bytes.saturating_sub(prev_w)) as f64 / disk_elapsed)
+                        as u64,
+                ),
+                None => (0, 0),
+            };
+            new_prev.insert(
+                mount.clone(),
+                (usage.total_read_bytes, usage.total_written_bytes),
+            );
+            disk_io_speeds.push(DiskIoInfo {
+                name: disk.name().to_string_lossy().to_string(),
+                mount_point: mount,
+                read_speed,
+                write_speed,
+            });
+            all_disks.push(DiskInfo {
+                name: disk.name().to_string_lossy().to_string(),
+                mount_point: disk.mount_point().to_string_lossy().to_string(),
+                used: disk.total_space() - disk.available_space(),
+                total: disk.total_space(),
+                is_removable: disk.is_removable(),
+            });
+        }
+        prev_disk_io = new_prev;
+        prev_disk_io_time = now;
+
+        // 温度
+        let mut cpu_temp: Option<f32> = None;
+        let mut gpu_temp: Option<f32> = None;
+        for component in components.iter() {
+            let label = component.label().to_lowercase();
+            let temp = match component.temperature() {
+                Some(t) if t >= 0.0 => t,
+                _ => continue,
+            };
+            if cpu_temp.is_none() && (label.contains("cpu") || label.contains("core")) {
+                cpu_temp = Some(temp);
+            }
+            if gpu_temp.is_none() && (label.contains("gpu") || label.contains("render")) {
+                gpu_temp = Some(temp);
+            }
+        }
+
+        // 系统盘 = 最大非可移动磁盘
+        let disk_usage = disks
+            .list()
+            .iter()
+            .filter(|d| !d.is_removable())
+            .max_by_key(|d| d.total_space())
+            .map(|d| (d.total_space() - d.available_space(), d.total_space()))
+            .unwrap_or((0, 0));
+
+        let snapshot = LightSnapshot {
+            gpu_info,
+            temperatures: (cpu_temp, gpu_temp),
+            disk_io_speeds,
+            all_disks,
+            disk_usage,
+            throttle_info,
+        };
+
+        match snap_tx.try_send(snapshot) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Disconnected(_)) => break,
+        }
+
+        match shutdown_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(_) => break,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
 /// 系统快照
 pub struct SystemSnapshot {
     sys: sysinfo::System,
@@ -736,22 +933,23 @@ pub struct SystemSnapshot {
     prev_net_time: Instant,
     pub net_down_speed: u64,
     pub net_up_speed: u64,
-    disks: sysinfo::Disks,
-    components: sysinfo::Components,
     pub net_total_rx: u64,
     pub net_total_tx: u64,
-    gpu_collector: crate::gpu::GpuCollector,
+    // GPU/温度/磁盘/电源 后台 worker —— 见 [`LightWorker`]。
+    // 这些字段是 last-known 缓存,由 worker 每 1s 推送更新;
+    // 主线程 `refresh_light()` 只 try_recv,不再做同步系统调用。
+    light_worker: LightWorker,
     gpu_info: Vec<crate::gpu::GpuInfo>,
+    temperatures_cache: (Option<f32>, Option<f32>),
+    disk_io_speeds: Vec<DiskIoInfo>,
+    disks_cache: Vec<DiskInfo>,
+    /// 系统盘 (used, total) —— 由 worker 推送
+    disk_usage_cache: (u64, u64),
+    throttle_info: Option<crate::throttle::ThrottleInfo>,
     // Replay mode overrides
     replay_cpu: Option<f32>,
     replay_memory: Option<(u64, u64)>,
     replay_net: Option<(u64, u64)>,
-    // Throttle detection
-    throttle_info: Option<crate::throttle::ThrottleInfo>,
-    // Per-disk I/O tracking
-    prev_disk_io: HashMap<String, (u64, u64)>,
-    prev_disk_io_time: Instant,
-    disk_io_speeds: Vec<DiskIoInfo>,
     // Incremental process cache: avoids full Vec<ProcessInfo> rebuild every 2s
     process_cache: HashMap<u32, ProcessInfo>,
     // Background heavy-refresh worker
@@ -809,9 +1007,14 @@ impl SystemSnapshot {
         let num_cpus = sys.cpus().len().max(1) as f32;
         let networks = sysinfo::Networks::new_with_refreshed_list();
         let (total_rx, total_tx) = sum_network_totals(&networks);
-        let disks = sysinfo::Disks::new_with_refreshed_list();
-        let components = sysinfo::Components::new_with_refreshed_list();
         let now = Instant::now();
+
+        let light_worker = LightWorker::start();
+        // 预热:阻塞等 worker 推第一帧(最多 5s),避免启动后第一秒
+        // sidebar 的 GPU/温度/磁盘都显示空白。超时则保持空缓存,
+        // worker 后续仍会异步推上来。
+        let first_snap = light_worker.recv_first(Duration::from_secs(5));
+
         Ok(Self {
             sys,
             networks,
@@ -826,32 +1029,42 @@ impl SystemSnapshot {
             prev_net_time: now,
             net_down_speed: 0,
             net_up_speed: 0,
-            disks,
-            components,
             net_total_rx: total_rx,
             net_total_tx: total_tx,
-            gpu_collector: crate::gpu::GpuCollector::new(),
-            gpu_info: Vec::new(),
+            light_worker,
+            gpu_info: first_snap
+                .as_ref()
+                .map(|s| s.gpu_info.clone())
+                .unwrap_or_default(),
+            temperatures_cache: first_snap
+                .as_ref()
+                .map(|s| s.temperatures)
+                .unwrap_or((None, None)),
+            disk_io_speeds: first_snap
+                .as_ref()
+                .map(|s| s.disk_io_speeds.clone())
+                .unwrap_or_default(),
+            disks_cache: first_snap
+                .as_ref()
+                .map(|s| s.all_disks.clone())
+                .unwrap_or_default(),
+            disk_usage_cache: first_snap.as_ref().map(|s| s.disk_usage).unwrap_or((0, 0)),
+            throttle_info: first_snap.and_then(|s| s.throttle_info),
             replay_cpu: None,
             replay_memory: None,
             replay_net: None,
-            throttle_info: None,
-            prev_disk_io: HashMap::new(),
-            prev_disk_io_time: now,
-            disk_io_speeds: Vec::new(),
             process_cache: HashMap::new(),
             heavy_worker: HeavyWorker::start(),
             heavy_pending: false,
         })
     }
 
-    /// 轻量刷新（每 1 秒）：CPU/内存/GPU/网络/温度
+    /// 轻量刷新（每 1 秒）:CPU/内存/网络。GPU/温度/磁盘/电源由后台
+    /// [`LightWorker`] 异步推送,这里只 `try_recv` 覆盖缓存。
     pub fn refresh_light(&mut self) {
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
         self.networks.refresh(true);
-        self.components.refresh(true);
-        self.gpu_info = self.gpu_collector.refresh();
 
         let (total_rx, total_tx) = sum_network_totals(&self.networks);
         let now = Instant::now();
@@ -869,54 +1082,19 @@ impl SystemSnapshot {
         self.net_total_rx = total_rx;
         self.net_total_tx = total_tx;
 
-        // Throttle detection
-        if let Some(info) = crate::throttle::query_processor_power_info() {
-            self.throttle_info = crate::throttle::detect_throttle(&info);
-        } else {
-            self.throttle_info = None;
+        // GPU/温度/磁盘/电源 —— 来自后台 worker 的最新一帧(若有)。
+        // 无新帧就保留旧缓存,UI 不至于空白。
+        if let Some(s) = self.light_worker.try_recv_latest() {
+            self.gpu_info = s.gpu_info;
+            self.temperatures_cache = s.temperatures;
+            self.disk_io_speeds = s.disk_io_speeds;
+            self.disks_cache = s.all_disks;
+            self.disk_usage_cache = s.disk_usage;
+            self.throttle_info = s.throttle_info;
         }
-
-        // Per-disk I/O speed
-        self.disks.refresh(true);
-        let disk_elapsed = now
-            .duration_since(self.prev_disk_io_time)
-            .as_secs_f64()
-            .max(0.001);
-        let mut new_prev = HashMap::new();
-        let mut new_speeds = Vec::new();
-        for disk in self.disks.list() {
-            let mount = disk.mount_point().to_string_lossy().to_string();
-            let usage = disk.usage();
-            let read_speed = match self.prev_disk_io.get(&mount) {
-                Some(&(prev_r, _)) => {
-                    ((usage.total_read_bytes.saturating_sub(prev_r)) as f64 / disk_elapsed) as u64
-                }
-                None => 0,
-            };
-            let write_speed = match self.prev_disk_io.get(&mount) {
-                Some(&(_, prev_w)) => {
-                    ((usage.total_written_bytes.saturating_sub(prev_w)) as f64 / disk_elapsed)
-                        as u64
-                }
-                None => 0,
-            };
-            new_prev.insert(
-                mount.clone(),
-                (usage.total_read_bytes, usage.total_written_bytes),
-            );
-            new_speeds.push(DiskIoInfo {
-                name: disk.name().to_string_lossy().to_string(),
-                mount_point: mount,
-                read_speed,
-                write_speed,
-            });
-        }
-        self.prev_disk_io = new_prev;
-        self.prev_disk_io_time = now;
-        self.disk_io_speeds = new_speeds;
     }
 
-    /// 重量刷新（每 2 秒）：进程列表、磁盘、EMA 平滑、GPU
+    /// 重量刷新（每 2 秒）：进程列表、EMA 平滑。磁盘/GPU 由 [`LightWorker`] 维护。
     pub fn refresh_heavy(&mut self) -> Result<()> {
         self.sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
@@ -929,8 +1107,6 @@ impl SystemSnapshot {
                 .with_cwd(sysinfo::UpdateKind::OnlyIfNotSet)
                 .with_cmd(sysinfo::UpdateKind::OnlyIfNotSet),
         );
-
-        self.disks.refresh(true);
 
         let alive_pids: std::collections::HashSet<u32> =
             self.sys.processes().keys().map(|p| p.as_u32()).collect();
@@ -1000,7 +1176,6 @@ impl SystemSnapshot {
         if let Some(result) = self.heavy_worker.try_recv() {
             self.heavy_pending = false;
             self.apply_heavy_result(result);
-            self.disks.refresh(true);
             self.refresh_time = Instant::now();
             return Ok(true);
         }
@@ -1020,7 +1195,6 @@ impl SystemSnapshot {
             {
                 self.heavy_pending = false;
                 self.apply_heavy_result(result);
-                self.disks.refresh(true);
                 self.refresh_time = Instant::now();
                 return Ok(true);
             }
@@ -1062,6 +1236,14 @@ impl SystemSnapshot {
     #[must_use]
     pub fn cached_processes_vec(&self) -> Vec<ProcessInfo> {
         self.process_cache.values().cloned().collect()
+    }
+
+    /// Access the incremental process cache as an `Arc<Vec>`, enabling cheap
+    /// refcount-only clones for scoring/rendering paths that previously paid
+    /// a full per-element deep copy every heavy refresh.
+    #[must_use]
+    pub fn cached_processes_arc(&self) -> std::sync::Arc<Vec<ProcessInfo>> {
+        std::sync::Arc::new(self.process_cache.values().cloned().collect())
     }
 
     /// Access the incremental process cache directly
@@ -1131,13 +1313,7 @@ impl SystemSnapshot {
     /// 获取系统盘（最大非可移动磁盘）使用情况 (已用 bytes, 总量 bytes)
     #[must_use]
     pub fn disk_usage(&self) -> (u64, u64) {
-        self.disks
-            .list()
-            .iter()
-            .filter(|d| !d.is_removable())
-            .max_by_key(|d| d.total_space())
-            .map(|d| (d.total_space() - d.available_space(), d.total_space()))
-            .unwrap_or((0, 0))
+        self.disk_usage_cache
     }
 
     /// 获取系统运行时间（秒）
@@ -1149,22 +1325,7 @@ impl SystemSnapshot {
     /// 获取 CPU 和 GPU 温度 (cpu_temp, gpu_temp)，None 表示未检测到
     #[must_use]
     pub fn temperatures(&self) -> (Option<f32>, Option<f32>) {
-        let mut cpu_temp: Option<f32> = None;
-        let mut gpu_temp: Option<f32> = None;
-        for component in self.components.iter() {
-            let label = component.label().to_lowercase();
-            let temp = match component.temperature() {
-                Some(t) if t >= 0.0 => t,
-                _ => continue,
-            };
-            if cpu_temp.is_none() && (label.contains("cpu") || label.contains("core")) {
-                cpu_temp = Some(temp);
-            }
-            if gpu_temp.is_none() && (label.contains("gpu") || label.contains("render")) {
-                gpu_temp = Some(temp);
-            }
-        }
-        (cpu_temp, gpu_temp)
+        self.temperatures_cache
     }
 
     #[must_use]
@@ -1220,17 +1381,7 @@ impl SystemSnapshot {
     /// 获取所有磁盘信息列表
     #[must_use]
     pub fn all_disks(&self) -> Vec<DiskInfo> {
-        self.disks
-            .list()
-            .iter()
-            .map(|d| DiskInfo {
-                name: d.name().to_string_lossy().to_string(),
-                mount_point: d.mount_point().to_string_lossy().to_string(),
-                used: d.total_space() - d.available_space(),
-                total: d.total_space(),
-                is_removable: d.is_removable(),
-            })
-            .collect()
+        self.disks_cache.clone()
     }
 
     /// 获取活跃网卡信息（过滤 APIPA 169.254.x.x 和回环 127.0.0.1）

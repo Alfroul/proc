@@ -351,7 +351,11 @@ fn test_disk_io_info_struct() {
 }
 
 #[test]
-fn test_metric_name_temperature_extracts_empty() {
+fn test_metric_name_temperature_extracts() {
+    // 原测试假设 CPU/GPU 温度永远为空（"stub"），但 LightWorker 预热 + NVML
+    // 可用时 gpu_info 会被填充。CI runner 通常无 GPU，开发机有 — 测试必须
+    // 同时覆盖两种情况：返回值要么为空，要么是单个 (0, 温度) 元组且温度在
+    // 合理范围（< 150°C）。
     let mut snapshot = SystemSnapshot::new().expect("snapshot creation");
     let _ = snapshot.refresh_heavy_incremental();
     let procs = snapshot.cached_processes_vec();
@@ -360,18 +364,32 @@ fn test_metric_name_temperature_extracts_empty() {
     let gpu_temp = MetricName::GpuTemperature.extract(&snapshot, &procs);
     let throttle = MetricName::CpuThrottlePercent.extract(&snapshot, &procs);
 
+    fn assert_temp_slice(s: &[(u32, f64)], label: &str) {
+        assert!(
+            s.len() <= 1,
+            "{label} should have at most one entry, got {s:?}"
+        );
+        if let Some(&(_, t)) = s.first() {
+            assert!(
+                (0.0..=150.0).contains(&t),
+                "{label} temperature {t} out of plausible range"
+            );
+        }
+    }
+
+    assert_temp_slice(&cpu_temp, "CpuTemperature");
+    assert_temp_slice(&gpu_temp, "GpuTemperature");
+    // throttle 是百分比，要么空要么 [0, 100]。
     assert!(
-        cpu_temp.is_empty(),
-        "CpuTemperature should return empty Vec (stub)"
+        throttle.len() <= 1,
+        "CpuThrottlePercent shape wrong: {throttle:?}"
     );
-    assert!(
-        gpu_temp.is_empty(),
-        "GpuTemperature should return empty Vec (stub)"
-    );
-    assert!(
-        throttle.is_empty(),
-        "CpuThrottlePercent should return empty Vec (stub)"
-    );
+    if let Some(&(_, t)) = throttle.first() {
+        assert!(
+            (0.0..=100.0).contains(&t),
+            "CpuThrottlePercent {t} out of [0, 100]"
+        );
+    }
 }
 
 #[test]

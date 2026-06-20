@@ -272,7 +272,7 @@ fn stream_gbk_stdout(child: &mut Child, tx: &std::sync::mpsc::Sender<String>) {
                 let (decoded, _, _) = encoding_rs::GBK.decode(&err_bytes);
                 let err_str = decoded.trim().to_string();
                 if !err_str.is_empty() {
-                    let _ = tx.send(format!("错误: {}", err_str));
+                    let _ = tx.send(format!("执行出错: {}", err_str));
                 }
             }
         }

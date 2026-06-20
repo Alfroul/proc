@@ -17,6 +17,7 @@ pub mod inspect;
 pub mod kill;
 pub mod monitor;
 pub mod port_map;
+pub mod port_worker;
 pub mod record;
 pub mod search;
 pub mod security;
@@ -26,6 +27,7 @@ pub mod tree;
 pub mod tui;
 pub mod ui_state;
 pub mod view_models;
+pub mod worker;
 
 /// Returns the local timezone offset from UTC in hours (e.g. +8 for CST).
 /// Uses Win32 `GetTimeZoneInformation` to avoid chrono dependency.

@@ -247,8 +247,17 @@ fn test_process_count() {
     let _ = snapshot.refresh_heavy_incremental();
     let count = snapshot.process_count();
     assert!(count > 0, "Should have at least 1 process");
-    // cached_processes_vec may include extras from collect_missing_processes
-    assert!(snapshot.cached_processes_vec().len() >= count);
+    // `process_count()` 走 SystemSnapshot 自身的 sysinfo（new() 时一次性 snapshot），
+    // `cached_processes_vec()` 走 HeavyWorker 的 sysinfo（refresh_heavy_incremental
+    // 后的更新帧）。两份 sysinfo 来自不同时刻，进程在期间 spawn/exit 完全可能，
+    // 因此不能要求 cached >= count 严格成立；只要两者都在同一量级即可。
+    let cached = snapshot.cached_processes_vec().len();
+    let larger = count.max(cached);
+    let smaller = count.min(cached);
+    assert!(
+        larger.saturating_sub(smaller) <= larger / 10,
+        "process_count {count} vs cached {cached} diverged > 10%; snapshot race?"
+    );
 }
 
 #[test]

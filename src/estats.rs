@@ -219,7 +219,7 @@ mod win32 {
     }
 
     impl EStatsCollector {
-        pub fn new() -> std::result::Result<Self, String> {
+        pub fn new() -> crate::error::Result<Self> {
             enable_estats_for_all();
             let current = sample_connections();
             Ok(Self {
@@ -322,11 +322,13 @@ mod win32 {
 
 #[cfg(not(target_os = "windows"))]
 impl EStatsCollector {
-    pub fn new() -> std::result::Result<Self, String> {
+    pub fn new() -> crate::error::Result<Self> {
         tracing::warn!(
             "EStatsCollector::new is not supported on this platform; per-connection bandwidth is disabled"
         );
-        Err("EStats is only available on Windows".to_string())
+        Err(crate::error::ProcError::monitor(
+            "EStats is only available on Windows",
+        ))
     }
 
     pub fn sample(&mut self) {}

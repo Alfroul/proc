@@ -1,6 +1,6 @@
-//! Kill/Watchdog 安全（阶段 4）测试。
+//! Kill/Watchdog 安全测试。
 //!
-//! 见 docs/stages/stage-4.md。覆盖：
+//! 覆盖：
 //! - `kill_process` 对不存在 PID 返回 `AlreadyGone`
 //! - `kill_process` 对 System (PID 4) 非 admin 时返回 `AccessDenied`
 //! - `find_processes_by_name` 不匹配时返回空

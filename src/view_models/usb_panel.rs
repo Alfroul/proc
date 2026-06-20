@@ -62,8 +62,10 @@ impl UsbPanel {
                     }
                     if occupied {
                         self.locks = locks;
+                        self.focus_locks = true;
                     } else {
                         self.locks.clear();
+                        self.focus_locks = false;
                         self.status_message = Some(
                             "✅ 无占用进程，可以安全弹出 U 盘了（请手动在系统托盘或文件管理器中弹出）"
                                 .to_string(),
@@ -79,19 +81,26 @@ impl UsbPanel {
         }
     }
 
+    /// 同步扫描版本:CLI 路径或测试用。TUI 主循环改用 [`Self::merge_devices`]
+    /// 消费后台 worker 推送的快照。
     pub fn refresh_device_list(&mut self) {
-        if let Ok(mut new_devices) = crate::eject::scan_all_devices() {
-            for new_dev in &mut new_devices {
-                if let Some(old) = self
-                    .devices
-                    .iter()
-                    .find(|d| d.drive_letter == new_dev.drive_letter)
-                {
-                    new_dev.is_occupied = old.is_occupied;
-                }
-            }
-            self.devices = new_devices;
+        if let Ok(new_devices) = crate::eject::scan_all_devices() {
+            self.merge_devices(new_devices);
         }
+    }
+
+    /// 合并后台 worker 推送的新设备列表,保留旧设备的 `is_occupied` 状态。
+    pub fn merge_devices(&mut self, mut new_devices: Vec<RemovableDevice>) {
+        for new_dev in &mut new_devices {
+            if let Some(old) = self
+                .devices
+                .iter()
+                .find(|d| d.drive_letter == new_dev.drive_letter)
+            {
+                new_dev.is_occupied = old.is_occupied;
+            }
+        }
+        self.devices = new_devices;
     }
 
     fn move_cursor(&mut self, delta: i32) {
@@ -226,7 +235,20 @@ impl Panel for UsbPanel {
     }
 
     fn tick(&mut self, _ctx: &mut PanelContext) -> bool {
-        self.refresh_device_list();
+        // U 盘拔出 / 重新枚举后 devices 缩短，device_cursor 必须收紧。
+        // lock_cursor 由用户按 r / Enter 显式触发同步采集，单独走 clamp 即可。
+        let dev_total = self.devices.len();
+        if dev_total == 0 {
+            self.device_cursor = 0;
+        } else if self.device_cursor >= dev_total {
+            self.device_cursor = dev_total - 1;
+        }
+        let lock_total = self.locks.len();
+        if lock_total == 0 {
+            self.lock_cursor = 0;
+        } else if self.lock_cursor >= lock_total {
+            self.lock_cursor = lock_total - 1;
+        }
         false
     }
 

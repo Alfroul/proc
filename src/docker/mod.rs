@@ -1,5 +1,6 @@
 pub mod events;
 pub mod health;
+pub mod snapshot_worker;
 pub mod stats;
 
 use std::time::SystemTime;
@@ -80,7 +81,7 @@ impl DockerMonitor {
         {
             match Self::verify_connection(docker, &runtime, "命名管道") {
                 Ok(docker) => return Ok(Self { runtime, docker }),
-                Err(e) => last_err = e,
+                Err(e) => last_err = e.to_string(),
             }
         }
 
@@ -90,7 +91,7 @@ impl DockerMonitor {
         {
             match Self::verify_connection(docker, &runtime, "TCP") {
                 Ok(docker) => return Ok(Self { runtime, docker }),
-                Err(e) => last_err = e,
+                Err(e) => last_err = e.to_string(),
             }
         }
 
@@ -108,7 +109,7 @@ impl DockerMonitor {
         docker: bollard::Docker,
         runtime: &tokio::runtime::Runtime,
         label: &str,
-    ) -> std::result::Result<bollard::Docker, String> {
+    ) -> Result<bollard::Docker> {
         use bollard::container::ListContainersOptions;
 
         let opts: ListContainersOptions<String> = ListContainersOptions {
@@ -119,7 +120,7 @@ impl DockerMonitor {
         runtime
             .block_on(async { docker.list_containers(Some(opts)).await })
             .map(|_| docker)
-            .map_err(|e| format!("{} 验证失败: {}", label, e))
+            .map_err(|e| ProcError::docker_with(format!("{label} 验证失败"), e))
     }
 
     /// 获取 Docker 客户端的克隆（用于事件监听线程）

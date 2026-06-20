@@ -7,7 +7,6 @@ use crate::app_group::{self, AppGroup, AppGroupItem, VersionInfo, build_visual_i
 use crate::app_panel::{AppGroupSortField, AppMode, KeyResult, KillRequest, Panel, PanelContext};
 use crate::classify;
 use crate::collect::{ProcessInfo, ProcessViewMode, SortField};
-use crate::port_map;
 use crate::tree::{self, TreeFilter, TreeNode};
 
 const PAGE_SIZE: usize = 20;
@@ -736,20 +735,6 @@ impl ProcessPanel {
             self.app_group_expanded = prev_expanded;
         }
     }
-
-    /// Format port info for a PID (used when entering detail view).
-    #[must_use]
-    pub fn format_port_info(pid: u32) -> String {
-        match port_map::find_ports_by_pid(pid) {
-            Ok(ports) if ports.is_empty() => "无".to_string(),
-            Ok(ports) => ports
-                .iter()
-                .map(|p| format!("{}:{} ({})", p.local_addr, p.local_port, p.protocol))
-                .collect::<Vec<_>>()
-                .join(", "),
-            Err(_) => "扫描失败".to_string(),
-        }
-    }
 }
 
 impl Panel for ProcessPanel {
@@ -805,10 +790,34 @@ impl Panel for ProcessPanel {
             needs_draw = true;
         }
 
-        // Clamp cursor for list view
-        let total = ctx.cached_sorted.len();
-        if self.cursor_index >= total && total > 0 {
-            self.cursor_index = total - 1;
+        // Clamp cursors so 进程退出 / 搜索收窄后光标不至于指向越界位置。
+        // tree_move_cursor / app_group_move_cursor 走 wraparound，不 clamp 时
+        // 第一次按键会产生奇怪跳变；list 模式靠 cursor 本身 saturating。
+        match self.process_view_mode {
+            ProcessViewMode::List => {
+                let total = ctx.cached_sorted.len();
+                if total == 0 {
+                    self.cursor_index = 0;
+                } else if self.cursor_index >= total {
+                    self.cursor_index = total - 1;
+                }
+            }
+            ProcessViewMode::Tree => {
+                let total = self.get_filtered_tree_visible().len();
+                if total == 0 {
+                    self.tree_cursor = 0;
+                } else if self.tree_cursor >= total {
+                    self.tree_cursor = total - 1;
+                }
+            }
+            ProcessViewMode::AppGroup => {
+                let total = self.app_groups.len();
+                if total == 0 {
+                    self.app_group_cursor = 0;
+                } else if self.app_group_cursor >= total {
+                    self.app_group_cursor = total - 1;
+                }
+            }
         }
 
         needs_draw

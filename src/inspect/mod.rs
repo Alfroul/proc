@@ -38,11 +38,28 @@ pub struct InspectionData {
 ///
 /// 任一子模块失败都用空 Vec 兜底，由调用方决定是否向用户展示降级提示。
 /// 阶段 13 的 TUI 会把 `net.is_empty()` 等显示为「无数据 / 此平台不支持」。
+///
+/// **注意**：此函数会触发一次完整 `port_map::scan_ports()`（netstat2 syscall +
+/// sysinfo 全 PID 名表，几百毫秒级），主线程上调用会卡帧。TUI 主循环应改用
+/// [`inspect_with_ports`] 复用 `port_panel.port_entries`。
 #[must_use]
 pub fn inspect(pid: u32) -> InspectionData {
     InspectionData {
         env: env::collect_env(pid).unwrap_or_default(),
         dlls: dlls::collect_dlls(pid).unwrap_or_default(),
         net: crate::port_map::find_ports_by_pid(pid).unwrap_or_default(),
+    }
+}
+
+/// 与 [`inspect`] 相同，但网络分支接受调用方已采好的 `PortEntry` 切片，
+/// 避免在 UI 主线程上重复 `scan_ports()`。
+///
+/// TUI 进详情页 / 按 `r` 刷新时应调此版本，把 `port_panel.port_entries` 传进来。
+#[must_use]
+pub fn inspect_with_ports(pid: u32, ports: &[crate::port_map::PortEntry]) -> InspectionData {
+    InspectionData {
+        env: env::collect_env(pid).unwrap_or_default(),
+        dlls: dlls::collect_dlls(pid).unwrap_or_default(),
+        net: ports.iter().filter(|e| e.pid == pid).cloned().collect(),
     }
 }

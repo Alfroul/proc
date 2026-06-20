@@ -93,11 +93,11 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 | `proc port 8080 [--kill]` | 端口占用查询 / 直接终止 |
 | `proc kill <pid> [--force]` | 终止单进程 / 强制终止进程树 |
 | `proc pkill <name> [--force --dry-run]` | 按名称批量终止（精确匹配，大小写不敏感）|
-| `proc eject <drive> [--locks]` | U 盘占用分析 / 详细句柄列表 |
-| `proc monitor add/list/remove` | 监控管理（`--pid` / `--port` / `--command`）|
+| `proc eject <drive> [--find-locks]` | U 盘占用分析 / 详细句柄列表 |
+| `proc monitor --add --pid N` / `--remove ID` | 监控管理（按 `--pid` / `--port` / `--command`）|
 | `proc record` / `proc replay <file>` | VT100 录屏 |
 | `proc export --format json\|csv [-o file] [--sort] [--limit]` | 进程数据导出（含 ISO-8601 本地时间戳，无 chrono 依赖）|
-| `proc docker ps / inspect <name> / watch` | Docker 子命令 |
+| `proc docker [--watch] [--container <name>]` | Docker 容器列表 / 事件流 / 详情 |
 
 ### 主题与持久化
 
@@ -157,16 +157,18 @@ proc kill 1234 --force                            # 强制终止进程树
 proc pkill chrome.exe                             # 按名称终止
 proc pkill chrome.exe --force --dry-run           # 强制 + 预览不实际终止
 proc eject E:                                     # 检测 E 盘占用
-proc eject E: --locks                             # 详细句柄列表
-proc monitor add --pid 1234                       # 监控 PID
-proc monitor add --port 8080                      # 监控端口
-proc monitor add --command "cargo run"            # 监控并自动重启
-proc monitor list / remove 1                      # 列出 / 删除监控
+proc eject E: --find-locks                        # 详细句柄列表
+proc monitor --add --pid 1234                     # 监控 PID
+proc monitor --add --port 8080                    # 监控端口
+proc monitor --add --command "cargo run"          # 监控并自动重启
+proc monitor --remove 1                           # 删除监控（按 ID）
 proc record                                       # 启动 TUI 并录制
 proc replay recording.prec                        # 回放
 proc export --format json --limit 20              # 导出 JSON 到 stdout
 proc export --format csv -o procs.csv --sort mem  # 按内存导出 CSV 到文件
-proc docker ps / inspect <name> / watch           # Docker 子命令
+proc docker                                       # Docker 容器列表
+proc docker --watch                               # 持续监听容器事件
+proc docker --container <name>                    # 查看指定容器详情
 ```
 
 ## 平台支持

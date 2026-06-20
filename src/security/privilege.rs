@@ -84,10 +84,14 @@ pub fn check_privilege_tokens(pid: u32, user_id: Option<&str>) -> Option<RiskFac
         let priv_count = u32::from_le_bytes(buf[0..4].try_into().unwrap_or([0; 4])) as usize;
         let mut found_dangerous = Vec::new();
 
-        // LUID_AND_ATTRIBUTES: LUID (8 bytes) + Attributes (4 bytes) = 12 bytes, starts at offset 4
+        // TOKEN_PRIVILEGES: { DWORD PrivilegeCount; LUID_AND_ATTRIBUTES Privileges[] }
+        // LUID_AND_ATTRIBUTES: { LUID (LowPart u32 + HighPart i32 = 8 bytes); DWORD Attributes = 4 bytes }
+        // → 每个 entry 12 字节，数组从 offset 4 起。早期实现误用 8 字节步长，
+        //   导致除首项外全部读错位，特权检测近乎失效。
+        const LUID_AND_ATTRIBUTES_SIZE: usize = 12;
         for i in 0..priv_count.min(100) {
-            let offset = 4 + i * 8;
-            if offset + 12 > buf.len() {
+            let offset = 4 + i * LUID_AND_ATTRIBUTES_SIZE;
+            if offset + LUID_AND_ATTRIBUTES_SIZE > buf.len() {
                 break;
             }
 

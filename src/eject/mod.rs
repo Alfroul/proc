@@ -2,6 +2,7 @@
 // classify 跨平台（HandleRisk 枚举 + 风险权重）。非 Windows 下公共 API
 // 全部返回 Err(ProcError::UsbDetect)，类型本身保持可见以便消费者编译。
 pub mod classify;
+pub mod snapshot_worker;
 
 #[cfg(target_os = "windows")]
 pub mod cache;
@@ -118,7 +119,13 @@ mod windows_impl {
         }
 
         if killed > 0 {
-            let _ = super::cache::flush_write_cache(drive_letter);
+            // 刷盘是「杀占用进程 → 用户弹 U 盘」之间的关键一步：失败会导致
+            // 写缓存丢在内核里、用户拔盘后数据损坏。失败必须显式告警，不能
+            // 让 let _ 吞掉。返回值放进 errors，让调用方在 UI/CLI 都能看到。
+            if let Err(e) = super::cache::flush_write_cache(drive_letter) {
+                tracing::warn!("flush_write_cache({}) 失败: {}", drive_letter, e);
+                errors.push(format!("刷盘失败 ({}): {}", drive_letter, e));
+            }
         }
 
         Ok((killed, skipped, errors))
@@ -222,7 +229,14 @@ mod windows_impl {
                 "  提示: {} 个关键系统进程占用（可能是写入缓存），尝试刷新缓存...",
                 crit_count
             );
-            let _ = super::cache::flush_write_cache(drive_letter);
+            // 刷盘失败必须告知用户，否则他们可能误以为可以安全弹 U 盘。
+            match super::cache::flush_write_cache(drive_letter) {
+                Ok(()) => println!("  ✅ 缓存已刷新"),
+                Err(e) => {
+                    tracing::warn!("flush_write_cache({}) 失败: {}", drive_letter, e);
+                    println!("  ❌ 刷盘失败: {} — 建议先手动停盘再拔", e);
+                }
+            }
         }
 
         Ok(())

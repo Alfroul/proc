@@ -16,6 +16,15 @@ use crate::port_map::{
 const PAGE_SIZE: usize = 20;
 const SPARKLINE_LEN: usize = 30;
 
+/// 数据缩水后把光标拉回有效区间。total == 0 时光标归零。
+fn clamp_cursor(cursor: &mut usize, total: usize) {
+    if total == 0 {
+        *cursor = 0;
+    } else if *cursor >= total {
+        *cursor = total - 1;
+    }
+}
+
 pub struct PortPanel {
     // Core port data
     pub port_entries: Vec<PortEntry>,
@@ -70,6 +79,10 @@ pub struct PortPanel {
     pub diagnostic: Option<DiagnosticState>,
     pub diagnostic_rx: Option<std::sync::mpsc::Receiver<String>>,
     pub diagnostic_thread: Option<std::thread::JoinHandle<()>>,
+
+    // 后台 worker 推送的待处理 sockets(由 App::tick_panels 注入)。
+    // `None` = 本 tick 无新数据,跳过 ports 重算。
+    pub pending_sockets: Option<Vec<netstat2::SocketInfo>>,
 }
 
 impl Default for PortPanel {
@@ -134,6 +147,7 @@ impl PortPanel {
             diagnostic: None,
             diagnostic_rx: None,
             diagnostic_thread: None,
+            pending_sockets: None,
         }
     }
 
@@ -182,6 +196,7 @@ impl PortPanel {
     }
 
     pub fn refresh_ports(&mut self, name_map: &HashMap<u32, String>) {
+        // 仅供 CLI / 测试路径同步使用;TUI 主循环改用后台 PortSnapshotWorker。
         let af_flags = netstat2::AddressFamilyFlags::IPV4 | netstat2::AddressFamilyFlags::IPV6;
         let proto_flags = netstat2::ProtocolFlags::TCP | netstat2::ProtocolFlags::UDP;
         if let Ok(sockets) = netstat2::get_sockets_info(af_flags, proto_flags) {
@@ -810,60 +825,68 @@ impl Panel for PortPanel {
     fn tick(&mut self, ctx: &mut PanelContext) -> bool {
         let mut needs_draw = false;
 
-        // Refresh ports
-        self.prev_port_entries = self.port_entries.clone();
-        let name_map = ctx.snapshot.process_name_map();
-        self.refresh_ports(&name_map);
-        self.connection_diff =
-            port_map::diff_connections(&self.prev_port_entries, &self.port_entries);
+        // 仅在拿到新 sockets(后台 worker 每 ~3s 推一次)时做重算;
+        // 无新数据时跳过 diff/group/anomaly —— 这些计算依赖 port_entries,
+        // 数据没变时重算毫无意义。
+        if let Some(sockets) = self.pending_sockets.take() {
+            self.prev_port_entries = self.port_entries.clone();
+            let name_map = ctx.snapshot.process_name_map();
+            self.port_entries =
+                port_map::scan_ports_with_names(&sockets, &name_map).unwrap_or_default();
+            self.connection_diff =
+                port_map::diff_connections(&self.prev_port_entries, &self.port_entries);
 
-        if self.connection_history.len() >= SPARKLINE_LEN {
-            self.connection_history.pop_front();
-        }
-        self.connection_history
-            .push_back(self.connection_diff.active_count);
-
-        // Process groups
-        self.port_process_groups = ProcessNetGroup::from_entries(&self.port_entries);
-        port_map::sort_process_groups(&mut self.port_process_groups, self.port_process_sort);
-
-        // Remote groups
-        self.port_remote_groups = RemoteGroup::from_entries(&self.port_entries);
-        port_map::sort_remote_groups(&mut self.port_remote_groups, self.port_remote_sort);
-
-        // EStats speeds
-        self.port_process_speeds.clear();
-        if let Some(ref mut collector) = self.estats_collector {
-            collector.sample();
-            for group in &self.port_process_groups {
-                let (ds, us, td, tu) = collector.process_speed(group.pid, &group.connections);
-                self.port_process_speeds.insert(group.pid, (ds, us, td, tu));
+            if self.connection_history.len() >= SPARKLINE_LEN {
+                self.connection_history.pop_front();
             }
-        }
+            self.connection_history
+                .push_back(self.connection_diff.active_count);
 
-        self.port_filter_dirty = true;
+            // Process groups
+            self.port_process_groups = ProcessNetGroup::from_entries(&self.port_entries);
+            port_map::sort_process_groups(&mut self.port_process_groups, self.port_process_sort);
 
-        // Anomaly detection
-        let new_anomalies = self.anomaly_detector.detect(
-            &self.port_entries,
-            &self.connection_diff,
-            &self.port_process_groups,
-            &self.port_remote_groups,
-        );
+            // Remote groups
+            self.port_remote_groups = RemoteGroup::from_entries(&self.port_entries);
+            port_map::sort_remote_groups(&mut self.port_remote_groups, self.port_remote_sort);
 
-        let critical_ids: HashSet<String> = new_anomalies
-            .iter()
-            .filter(|a| a.severity == AnomalySeverity::Critical)
-            .map(|a| a.id())
-            .collect();
-        for a in &new_anomalies {
-            if a.severity == AnomalySeverity::Critical && !self.prev_critical_ids.contains(&a.id())
-            {
-                let _ = crate::monitor::notify::notify_anomaly("严重", &a.title);
+            // EStats speeds
+            self.port_process_speeds.clear();
+            if let Some(ref mut collector) = self.estats_collector {
+                collector.sample();
+                for group in &self.port_process_groups {
+                    let (ds, us, td, tu) = collector.process_speed(group.pid, &group.connections);
+                    self.port_process_speeds.insert(group.pid, (ds, us, td, tu));
+                }
             }
+
+            self.port_filter_dirty = true;
+
+            // Anomaly detection
+            let new_anomalies = self.anomaly_detector.detect(
+                &self.port_entries,
+                &self.connection_diff,
+                &self.port_process_groups,
+                &self.port_remote_groups,
+            );
+
+            let critical_ids: HashSet<String> = new_anomalies
+                .iter()
+                .filter(|a| a.severity == AnomalySeverity::Critical)
+                .map(|a| a.id())
+                .collect();
+            for a in &new_anomalies {
+                if a.severity == AnomalySeverity::Critical
+                    && !self.prev_critical_ids.contains(&a.id())
+                {
+                    let _ = crate::monitor::notify::notify_anomaly("严重", &a.title);
+                }
+            }
+            self.prev_critical_ids = critical_ids;
+            self.active_anomalies = new_anomalies;
+
+            needs_draw = true;
         }
-        self.prev_critical_ids = critical_ids;
-        self.active_anomalies = new_anomalies;
 
         // Poll diagnostic
         if self.poll_diagnostic() {
@@ -875,6 +898,16 @@ impl Panel for PortPanel {
             self.rebuild_port_filters();
             needs_draw = true;
         }
+
+        // Clamp cursors so 端口消失 / 搜索过滤后光标不至于越界。各 move_cursor
+        // 走 wraparound，不 clamp 时第一次按键会产生奇怪跳变。
+        // 先把长度算出来，避免借 `&mut self.port_cursor` 的同时再借 `&self`。
+        let port_total = self.filtered_ports().len();
+        let proc_total = self.filtered_process_groups().len();
+        let remote_total = self.filtered_remote_groups().len();
+        clamp_cursor(&mut self.port_cursor, port_total);
+        clamp_cursor(&mut self.port_process_cursor, proc_total);
+        clamp_cursor(&mut self.port_remote_cursor, remote_total);
 
         needs_draw
     }

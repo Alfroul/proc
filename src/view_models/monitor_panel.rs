@@ -357,6 +357,13 @@ impl Panel for MonitorPanel {
 
     fn tick(&mut self, _ctx: &mut PanelContext) -> bool {
         self.poll_events();
+        // 监控被删除后列表缩短，cursor 必须收紧。
+        let total = self.manager.list_monitors().len();
+        if total == 0 {
+            self.cursor = 0;
+        } else if self.cursor >= total {
+            self.cursor = total - 1;
+        }
         false
     }
 

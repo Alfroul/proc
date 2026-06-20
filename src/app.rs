@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
@@ -67,7 +68,7 @@ pub struct TimelineState {
 pub struct App {
     pub mode: AppMode,
     pub snapshot: SystemSnapshot,
-    pub cached_processes: Vec<ProcessInfo>,
+    pub cached_processes: Arc<Vec<ProcessInfo>>,
     pub should_quit: bool,
     pub last_refresh: Instant,
     pub last_heavy_refresh: Instant,
@@ -80,9 +81,12 @@ pub struct App {
     pub monitor_panel: MonitorPanel,
     pub docker_panel: DockerPanel,
 
+    // 后台采集 worker(netstat2、USB、Docker 等挪出主线程)
+    pub port_worker: crate::port_worker::PortSnapshotWorker,
+    pub usb_worker: crate::eject::snapshot_worker::UsbSnapshotWorker,
+
     // Global state
     pub detail_process: Option<ProcessInfo>,
-    pub detail_port_info: String,
     pub status_message: Option<String>,
     pub kill_confirm: bool,
     pub pending_kill: Option<KillRequest>,
@@ -150,21 +154,28 @@ impl App {
 
         let mut snapshot = SystemSnapshot::new()?;
         let _ = snapshot.refresh_heavy_incremental();
-        let processes = snapshot.cached_processes_vec();
+        let processes = snapshot.cached_processes_arc();
         let (_, mem_total) = snapshot.memory_usage();
         let port_entries = port_map::scan_ports().unwrap_or_default();
 
-        let mut process_panel = ProcessPanel::new(&processes);
-        process_panel.init_tree(&processes, mem_total);
+        let mut process_panel = ProcessPanel::new(&processes[..]);
+        process_panel.init_tree(&processes[..], mem_total);
 
         let mut port_panel = PortPanel::new();
         port_panel.port_entries = port_entries;
 
         let is_windows = cfg!(target_os = "windows");
         let status_message = if crate::ui_state::load_first_run() {
-            // 首次启动（ui.toml 缺失或 first_run=true）：优先提示帮助入口，
-            // 覆盖 Linux/macOS 的降级清单。按 ? 后立即写盘 first_run=false，下次启动不再提示。
-            Some("首次使用？按 ? 查看快捷键".to_string())
+            // 首次启动：Windows 只提示帮助入口；Linux/macOS 把降级清单也带上，
+            // 否则用户按 ? 写盘 first_run=false 后再也看不到降级清单了。
+            if is_windows {
+                Some("首次使用？按 ? 查看快捷键".to_string())
+            } else {
+                Some(
+                    "首次使用？按 ? 查看快捷键 — Linux/macOS 模式：以下功能已降级 — 安全评分签名验证/DLL检查/特权检查、降频检测、U盘助手、Toast 通知、EStats 带宽、GPU；进程分类走启发式（按路径推断，无 Service Cache）。详见 README 平台支持表。"
+                        .to_string(),
+                )
+            }
         } else if is_windows {
             None
         } else {
@@ -177,7 +188,7 @@ impl App {
         Ok(Self {
             mode: AppMode::ProcessList,
             snapshot,
-            cached_processes: processes.clone(),
+            cached_processes: Arc::clone(&processes),
             should_quit: false,
             last_refresh: Instant::now(),
             last_heavy_refresh: Instant::now() - HEAVY_REFRESH_INTERVAL,
@@ -187,8 +198,9 @@ impl App {
             usb_panel: UsbPanel::new(),
             monitor_panel: MonitorPanel::new(),
             docker_panel: DockerPanel::new(),
+            port_worker: crate::port_worker::spawn(),
+            usb_worker: crate::eject::snapshot_worker::spawn(),
             detail_process: None,
-            detail_port_info: String::new(),
             status_message,
             kill_confirm: false,
             pending_kill: None,
@@ -396,7 +408,7 @@ impl App {
         let result = {
             let mut ctx = PanelContext {
                 snapshot: &self.snapshot,
-                cached_processes: &self.cached_processes,
+                cached_processes: &self.cached_processes[..],
                 cached_sorted: &self.cached_sorted,
                 security_scores: &self.security_scores,
                 status_message: &mut self.status_message,
@@ -448,7 +460,7 @@ impl App {
             self.process_panel.scroll_offset = 0;
         }
         if mode == AppMode::UsbAssistant && self.mode != AppMode::UsbAssistant {
-            self.usb_panel.scan_devices(&self.cached_processes);
+            self.usb_panel.scan_devices(&self.cached_processes[..]);
         }
         if mode == AppMode::DockerPanel && self.mode != AppMode::DockerPanel {
             self.docker_panel.refresh();
@@ -456,16 +468,20 @@ impl App {
                 self.docker_panel.start_watching();
             }
         }
-        // 进入详情页时预加载 Inspector 数据：env/dlls/net 一次采集（同步）。
+        // 进入详情页时预加载 Inspector 数据：env/dlls 一次采集（同步）。
+        // net 复用 port_panel.port_entries（后台 worker 每 ~3s 已推新），
+        // 避免再调一次 scan_ports 的几百毫秒 syscall 卡帧。
         // 失败的子项会退化为空 Vec，TUI 层在 Tab 内显示「无数据」。
         if mode == AppMode::ProcessDetail {
             self.inspection_tab = InspectionTab::Summary;
             self.inspection_scroll = 0;
             self.inspection_search.clear();
+            let ports_snapshot: Vec<crate::port_map::PortEntry> =
+                self.port_panel.port_entries.clone();
             self.inspection_data = self
                 .detail_process
                 .as_ref()
-                .map(|p| crate::inspect::inspect(p.pid));
+                .map(|p| crate::inspect::inspect_with_ports(p.pid, &ports_snapshot));
         }
         self.mode = mode;
         self.process_panel.search.clear();
@@ -531,7 +547,12 @@ impl App {
             // `r` 强制重新采集（用户怀疑数据过期 / 权限变化时）。
             KeyCode::Char('r') => {
                 if let Some(proc) = &self.detail_process {
-                    self.inspection_data = Some(crate::inspect::inspect(proc.pid));
+                    let ports_snapshot: Vec<crate::port_map::PortEntry> =
+                        self.port_panel.port_entries.clone();
+                    self.inspection_data = Some(crate::inspect::inspect_with_ports(
+                        proc.pid,
+                        &ports_snapshot,
+                    ));
                     self.inspection_scroll = 0;
                     self.status_message = Some(format!("已刷新 Inspector 数据 (PID {})", proc.pid));
                 }
@@ -588,7 +609,7 @@ impl App {
                             self.status_message = Some(format!("终止失败: {}", e));
                         }
                         Err(e) => {
-                            self.status_message = Some(format!("错误: {}", e));
+                            self.status_message = Some(format!("终止失败: {}", e));
                         }
                     }
                 }
@@ -726,7 +747,7 @@ impl App {
     }
 
     fn restore_replay_panel_data(&mut self, frame: &crate::record::frame::UiFrame) {
-        self.cached_processes = frame.processes.iter().map(ProcessInfo::from).collect();
+        self.cached_processes = Arc::new(frame.processes.iter().map(ProcessInfo::from).collect());
         self.process_panel.tree_nodes = frame.tree_nodes.iter().map(TreeNode::from).collect();
         self.port_panel.port_entries = frame.port_entries.iter().map(PortEntry::from).collect();
         self.port_panel.port_view_mode = NetworkViewMode::from_frame_code(frame.port_view_mode);
@@ -773,7 +794,7 @@ impl App {
 
         if self.process_panel.process_view_mode == ProcessViewMode::AppGroup {
             self.process_panel.app_groups = crate::app_group::compute_groups(
-                &self.cached_processes,
+                &self.cached_processes[..],
                 &mut self.process_panel.version_info_cache,
             );
             self.process_panel.app_group_sort_groups();
@@ -859,7 +880,7 @@ impl App {
                             Ok(crate::kill::KillResult::Failed(e)) => {
                                 results.push(format!("{} (PID {}) 失败: {}", name, pid, e))
                             }
-                            Err(e) => results.push(format!("{} (PID {}) 错误: {}", name, pid, e)),
+                            Err(e) => results.push(format!("{} (PID {}) 失败: {}", name, pid, e)),
                         }
                     }
                     self.status_message = Some(results.join("; "));
@@ -870,7 +891,7 @@ impl App {
                         tracing::warn!("刷新进程列表失败: {}", e);
                     }
                     self.process_panel
-                        .refresh_tree(&self.cached_processes, self.snapshot.memory_usage().1);
+                        .refresh_tree(&self.cached_processes[..], self.snapshot.memory_usage().1);
                 }
                 self.kill_confirm = false;
             }
@@ -1080,7 +1101,7 @@ impl App {
             self.last_heavy_refresh = Instant::now();
             match self.snapshot.refresh_heavy_incremental() {
                 Ok(true) => {
-                    self.cached_processes = self.snapshot.cached_processes_vec();
+                    self.cached_processes = self.snapshot.cached_processes_arc();
                     self.update_disk_speeds();
 
                     let alive_pids: HashSet<u32> =
@@ -1100,7 +1121,7 @@ impl App {
                     self.data_dirty = true;
 
                     if !self.scoring_pending {
-                        let procs = std::sync::Arc::new(self.cached_processes.clone());
+                        let procs = Arc::clone(&self.cached_processes);
                         let ports = std::sync::Arc::new(self.port_panel.port_entries.clone());
                         self.background_scorer.request(procs, ports);
                         self.scoring_pending = true;
@@ -1125,7 +1146,10 @@ impl App {
             .duration_since(self.prev_process_disk_time)
             .as_secs_f64()
             .max(0.001);
-        for proc in &mut self.cached_processes {
+        // Arc::make_mut: refcount==1 时 zero-cost 原地修改；scoring 持有旧 Arc 时
+        // 触发一次 COW 复制（每 heavy refresh 至多一次，可接受）。
+        let procs = Arc::make_mut(&mut self.cached_processes);
+        for proc in procs {
             let key = (proc.pid, proc.start_time);
             if let Some(&(prev_r, prev_w)) = self.prev_process_disk.get(&key) {
                 proc.disk_read_speed =
@@ -1185,7 +1209,7 @@ impl App {
         self.proc_history.retain(|pid, _| alive_pids.contains(pid));
 
         if had_heavy {
-            let processes = &self.cached_processes;
+            let processes: &[ProcessInfo] = &self.cached_processes[..];
             let mut sorted: Vec<&ProcessInfo> = processes.iter().collect();
             // 只对前 MAX_TRACKED 排序，剩余不排序（O(N) 而非 O(N log N)）。
             let cmp_cpu = |a: &&ProcessInfo, b: &&ProcessInfo| {
@@ -1217,7 +1241,7 @@ impl App {
     fn tick_alert_evaluate(&mut self) {
         let alert_events = self
             .alert_manager
-            .evaluate(&self.snapshot, &self.cached_processes);
+            .evaluate(&self.snapshot, &self.cached_processes[..]);
         for event in &alert_events {
             if let crate::alert::AlertEventType::Fired = event.event_type
                 && let crate::alert::AlertSeverity::Critical = event.severity
@@ -1228,9 +1252,13 @@ impl App {
     }
 
     fn tick_panels(&mut self) {
+        // 先从后台 worker 取最新 sockets(若有),注入 PortPanel 待处理队列。
+        // 把这步放在 ctx 构造之前,避免在 ctx 借用 self 期间再借 self.port_worker。
+        let new_sockets = self.port_worker.try_recv_latest().map(|s| s.sockets);
+
         let mut ctx = PanelContext {
             snapshot: &self.snapshot,
-            cached_processes: &self.cached_processes,
+            cached_processes: &self.cached_processes[..],
             cached_sorted: &self.cached_sorted,
             security_scores: &self.security_scores,
             status_message: &mut self.status_message,
@@ -1244,13 +1272,21 @@ impl App {
         if self.mode == AppMode::ProcessList {
             self.process_panel.tick(&mut ctx);
         } else if self.mode == AppMode::PortMap {
+            if let Some(sockets) = new_sockets {
+                self.port_panel.pending_sockets = Some(sockets);
+            }
             self.port_panel.tick(&mut ctx);
         }
     }
 
     fn tick_usb_monitor_docker(&mut self) {
-        if self.mode == AppMode::UsbAssistant || !self.usb_panel.devices.is_empty() {
-            self.usb_panel.refresh_device_list();
+        // USB 设备列表由后台 UsbSnapshotWorker 每 ~5s 推一次;主线程只 try_recv
+        // + 合并 is_occupied 状态。设备锁查询(scan_device_locks_with_processes)
+        // 仍按需在 UsbPanel 内同步触发(用户按 r / Enter)。
+        if self.mode == AppMode::UsbAssistant
+            && let Some(snap) = self.usb_worker.try_recv_latest()
+        {
+            self.usb_panel.merge_devices(snap.devices);
         }
         self.monitor_panel.poll_events();
         if self.mode == AppMode::DockerPanel {
@@ -1266,7 +1302,7 @@ impl App {
     }
 
     fn rebuild_sorted_cache(&mut self) {
-        let processes = &self.cached_processes;
+        let processes: &[ProcessInfo] = &self.cached_processes[..];
         let query = self.process_panel.search.query();
         let filtered: Vec<&ProcessInfo> = if query.is_empty() {
             processes.iter().collect()
@@ -1368,7 +1404,7 @@ impl App {
     }
 
     pub fn usb_scan_devices(&mut self) {
-        self.usb_panel.scan_devices(&self.cached_processes);
+        self.usb_panel.scan_devices(&self.cached_processes[..]);
     }
 
     pub fn docker_refresh(&mut self) {

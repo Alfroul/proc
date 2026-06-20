@@ -9,7 +9,7 @@
 
 本次发布聚焦于 Inspector：进程详情页升级为多 Tab 深挖视图（环境变量 / 网络连接 / 已加载模块）。阶段 12（数据层）+ 阶段 13（TUI）共 2 个阶段，5 modified + 3 new，核心 +482 / -13。无 API 破坏；详情页原有快捷键全部保留（向后兼容）。
 
-实测数据（来自 `docs/reviews/REVIEW-14.md`）：
+实测数据：
 
 - 测试 **325 passed / 0 failed / 2 ignored**（baseline 291 → +34）
 - pedantic `must_use_candidate`：**0**
@@ -49,9 +49,9 @@
 
 - ADR-0004（Inspector B2 升级详情页）Status: **Accepted**（阶段 12-13 落地，2026-06-17）
 
-### P2 改善建议（归档到 `docs/tech-debt.md`）
+### P2 改善建议（本仓库未单独维护 tech-debt.md，长期项记在此处）
 
-- P2-6：`detail_view::draw_summary` 每帧重扫端口 → 0.5.0+ 复用 `inspection_data.net`
+- P2-6：`detail_view::draw_summary` 每帧重扫端口 → 已在 0.5.0 打磨中修复（复用 `port_panel.port_entries`）
 - P2-7：`parse_utf16_env` 双 NUL 截断改 `find` → 0.5.0+ 可选
 - P2-8：`End` 设为 `usize::MAX / 2` 加注释 → 0.5.0+ 可选
 
@@ -59,7 +59,7 @@
 
 本次发布聚焦于资源生命周期治理、性能优化、CI 加固、文档/帮助打磨、错误链完善，并伴随二进制体积优化。阶段 5-9 共 5 个 Round 累积：69 文件，+1043 / -249。无 API 破坏；错误类型 `ProcError` 转 struct form 含 source chain（ADR-0005）。
 
-实测数据（来自 `docs/reviews/REVIEW-10.md`）：
+实测数据（来自内部 review 记录，未单独入仓）：
 
 - 测试 **291 passed / 0 failed / 2 ignored**（baseline 283 → +8）
 - 二进制体积 **-6.1%**（7.3 MB → 6.9 MB，ADR-0007 profile.release）
@@ -101,7 +101,6 @@
 ### 阶段 11 — 批量修复 + 发布（本次发布）
 
 - Fixed (REVIEW-10 P1-3): `SecurityScorer::invalidate_dead` 改用 `(pid, start_time)` 元组精确清理，避免 PID 复用场景下陈旧 entry 残留（之前仅靠 30s TTL `evict_expired` 兜底）。新增 `parse_alive_key` 解析键前两段。
-- Added: `docs/tech-debt.md` 归档 REVIEW-10 的 5 项 P2 长期改善建议。
 - Docs: README GPU 路线图补"AMD/Intel 列入 0.5.0+ 路线图"。
 
 ### 验证矩阵
@@ -145,7 +144,7 @@ Patch 版本，三阶段累积修复：跨平台编译（阶段 2 cfg-gate）+ �
 - Fixed (P1.23): `security::hash_cache::HashReputation::hash_file` 从 `std::fs::read` 改为 `BufReader` 流式 + 64 MB 上限 —— 多 GB 安装器 / 敌意文件不再能撑爆内存。新增 2 个单元测试（80 MB 大文件不爆 + 超 cap 字节不影响摘要）。
 - Fixed (P1.24): `local_offset_hours` 中 `-(bias + ...) as i64 / 60` 触发 `-(i32::MIN)` UB（Rust 一元 `-` 优先级高于 `as`）。抽出 `bias_minutes_to_offset_hours(i32) -> i64` 纯函数，先 `as i64` 再取负。新增针对 `i32::MIN` 的回归测试。
 - Fixed (P1.10): `monitor::watchdog` 收到 Ctrl+C 时 `child.kill()` 静默忽略错误 —— 改为 `tracing::warn!` 记录。
-- Fixed (#8): CHANGELOG 引用本 plan 重新编号前的 `docs/adr/0002-...` / `0003-...` / `0004-...` / `0005-...` / `docs/dirty-rect-analysis.md` 全部失效 —— 改为泛指（"详见 ADR-0001" / "详见 CHANGELOG 阶段记录"）。
+- Fixed (#8): CHANGELOG 引用本 plan 重新编号前的旧 ADR 编号 / dirty-rect 分析文档全部失效 —— 改为泛指（"详见 ADR-0001" / "详见 CHANGELOG 阶段记录"）。
 - Added (#10): tracing 补 6 处关键路径观测点 —— `tick_light_refresh` 重刷失败 warn（已有，保留）、`BackgroundScorer` 评分耗时 debug、`scan_ports` 耗时 debug、`find_volume_lockers` 耗时 debug、`record::writer` 每 100 帧写入字节数 debug、`docker::events` 断线重连 warn + 上限 10 次放弃。
 - Changed (#12): `init_tracing` 补注释说明 `File::create` 默认 truncate 行为 —— 启动时覆盖旧日志，防止长期运行后 `proc.log` 无限增长。如需保留历史请走 `tracing-appender`（ADR-0006 已规划）。
 - Added (#13): `init_tracing` 接入 `EnvFilter::try_from_default_env()`，默认级别 `info`，`RUST_LOG=proc=debug` 等环境变量生效（之前因缺 `env-filter` feature 不生效）。`tracing-subscriber` 启用 `env-filter` feature。README FAQ 增 RUST_LOG 用法说明。
@@ -178,7 +177,7 @@ Linux 端仍由 GitHub Actions `check-linux` job 验证；本机 WSL vhdx 仍损
 
 
 
-本次打磨按 8 个阶段组织，预期产出如下（细节见 `docs/stages/`，新阶段编号体系）。
+本次打磨按 8 个阶段组织，预期产出见下方各阶段小节。
 
 ### 阶段 1 — Spike：工程化基线 + 死代码清理
 
@@ -195,8 +194,7 @@ Linux 端仍由 GitHub Actions `check-linux` job 验证；本机 WSL vhdx 仍损
 - Fixed: VT100 录屏保留 RGB 颜色（之前所有 RGB 都被存为 Reset，导致回放褪色）。`CellDump.fg` / `bg` 扩为 `u32`，采用带标记位的可变编码（bit 31 = RGB 标记）。
 - Added: Ctrl+C 优雅退出（全局 `shutdown` 模块，TUI、回放、`monitor`、`docker watch` 均响应），确保录制文件正常 flush。
 - Added: `tests/test_record_color.rs`（7 个测试），覆盖 Reset / 16 基本色 / RGB / Indexed 的 roundtrip，以及完整 `Buffer → VtFrame → bincode → Buffer` 颜色一致性。
-- Changed: `VT100_VERSION` 提升到 2，旧版本 v1 文件回放时给出友好错误（详见 ADR 0003）。
-- Added: `docs/adr/` 中新增 VT100 RGB 颜色编码方案决策记录（旧编号 0003，新 plan 重新编号后请见 CHANGELOG 阶段记录）。
+- Changed: `VT100_VERSION` 提升到 2，旧版本 v1 文件回放时给出友好错误（详见「阶段 2 — 录制 RGB」小节的决策记录）。
 
 ### 阶段 3 — Slice：跨平台基础
 
@@ -215,7 +213,6 @@ Linux 端仍由 GitHub Actions `check-linux` job 验证；本机 WSL vhdx 仍损
 - Fixed: `proc monitor add --pid` 不再使用阻塞的 `stdin().read_line()`，改为 `shutdown::requested()` 200ms 轮询，Ctrl+C 立即退出。
 - Added: `proc pkill <name>` 子命令，按进程名（精确匹配、大小写不敏感）批量终止进程；`--force` 走 `kill_process_tree`，`--dry-run` 仅列出匹配项不终止。`src/kill.rs` 新增 `find_processes_by_name` / `kill_by_name` 公共 API。
 - Added: `tests/test_kill_tree.rs`（8 个测试）— 覆盖 `AlreadyGone` / `AccessDenied`（PID 4 System）/ 无匹配 / spawn 出来的进程能被 find / dry_run 不实际 kill / 结果结构契约。
-- Added: `docs/adr/` 中新增 Ctrl+C 优雅退出设计决策记录（旧编号 0005，新 plan 重新编号后请见 CHANGELOG 阶段记录）。
 - Updated: `README.md` 命令行章节补充 `proc pkill` 示例。
 
 ### 阶段 5 — Slice：性能优化

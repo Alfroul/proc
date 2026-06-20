@@ -18,6 +18,89 @@ impl std::fmt::Display for Protocol {
     }
 }
 
+/// TCP 连接状态归一化枚举。
+///
+/// `netstat2` 通过 `Display` 输出形如 `"Established"` / `"Listen"` /
+/// `"TimeWait"` / `"CLOSE_WAIT"` 的字符串（大小写不统一）。`PortEntry.state`
+/// 保留原始 `Option<String>` 以兼容录屏文件序列化；调用方做行为判断时
+/// 应该用 `TcpState::from_state_str` 解析一次，避免在 16+ 处重复写
+/// `s.contains("Established")` 这种既漏边界又难维护的字符串匹配。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpState {
+    Established,
+    Listen,
+    TimeWait,
+    CloseWait,
+    /// SynSent / FinWait1 / FinWait2 / Closing / LastAck / Delete / Unknown 等
+    /// 其它状态。具体来源字符串可在 `PortEntry.state` 里查到。
+    Other,
+}
+
+impl TcpState {
+    /// 把 `PortEntry.state` 的原始字符串解析成 [`TcpState`]。`None` 视为
+    /// UDP 或未采集 → `Other`。
+    ///
+    /// 大小写不敏感：兼容 netstat2 Display 的 `"Established"` 和某些路径
+    /// 残留的 `"ESTABLISHED"` / `"TIME_WAIT"` 等形式。
+    #[must_use]
+    pub fn from_state_str(state: Option<&str>) -> Self {
+        let Some(s) = state else {
+            return Self::Other;
+        };
+        // 全部转 ASCII 大写后做单次包含判断；netstat2 Display 当前是
+        // CamelCase（"Established"），但保留大小写不敏感以吸收 Windows
+        // 不同版本下的差异。
+        let upper: String = s.chars().map(|c| c.to_ascii_uppercase()).collect();
+        if upper.contains("ESTABLISHED") {
+            Self::Established
+        } else if upper.contains("TIME_WAIT") || upper.contains("TIMEWAIT") {
+            Self::TimeWait
+        } else if upper.contains("CLOSE_WAIT") || upper.contains("CLOSEWAIT") {
+            Self::CloseWait
+        } else if upper.contains("LISTEN") {
+            Self::Listen
+        } else {
+            Self::Other
+        }
+    }
+}
+
+#[cfg(test)]
+mod tcp_state_tests {
+    use super::TcpState;
+
+    #[test]
+    fn parses_common_states_case_insensitive() {
+        assert_eq!(
+            TcpState::from_state_str(Some("Established")),
+            TcpState::Established
+        );
+        assert_eq!(
+            TcpState::from_state_str(Some("ESTABLISHED")),
+            TcpState::Established
+        );
+        assert_eq!(TcpState::from_state_str(Some("Listen")), TcpState::Listen);
+        assert_eq!(
+            TcpState::from_state_str(Some("TimeWait")),
+            TcpState::TimeWait
+        );
+        assert_eq!(
+            TcpState::from_state_str(Some("TIME_WAIT")),
+            TcpState::TimeWait
+        );
+        assert_eq!(
+            TcpState::from_state_str(Some("CloseWait")),
+            TcpState::CloseWait
+        );
+        assert_eq!(
+            TcpState::from_state_str(Some("CLOSE_WAIT")),
+            TcpState::CloseWait
+        );
+        assert_eq!(TcpState::from_state_str(Some("SynSent")), TcpState::Other);
+        assert_eq!(TcpState::from_state_str(None), TcpState::Other);
+    }
+}
+
 /// 视图模式：按端口 / 按进程 / 按远程
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NetworkViewMode {
@@ -109,13 +192,12 @@ impl PortStateFilter {
 pub fn matches_filter(entry: &PortEntry, filter: &PortStateFilter) -> bool {
     match filter {
         PortStateFilter::All => true,
-        PortStateFilter::Established => entry
-            .state
-            .as_deref()
-            .is_some_and(|s| s.contains("Established")),
+        PortStateFilter::Established => {
+            TcpState::from_state_str(entry.state.as_deref()) == TcpState::Established
+        }
         PortStateFilter::Listening => {
             entry.protocol == Protocol::Tcp
-                && entry.state.as_deref().is_some_and(|s| s.contains("Listen"))
+                && TcpState::from_state_str(entry.state.as_deref()) == TcpState::Listen
         }
         PortStateFilter::Udp => entry.protocol == Protocol::Udp,
     }
@@ -126,9 +208,9 @@ pub fn state_group(state: &Option<String>, protocol: &Protocol) -> u8 {
     if *protocol == Protocol::Udp {
         return 3;
     }
-    match state.as_deref() {
-        Some(s) if s.contains("Established") => 0,
-        Some(s) if s.contains("Listen") => 1,
+    match TcpState::from_state_str(state.as_deref()) {
+        TcpState::Established => 0,
+        TcpState::Listen => 1,
         _ => 2,
     }
 }
@@ -290,16 +372,12 @@ impl ProcessNetSummary {
             match e.protocol {
                 Protocol::Tcp => {
                     s.tcp_connections += 1;
-                    match e.state.as_deref() {
-                        Some(st) if st.contains("Established") => s.established += 1,
-                        Some(st) if st.contains("CloseWait") || st.contains("CLOSE_WAIT") => {
-                            s.close_wait += 1
-                        }
-                        Some(st) if st.contains("Listen") => s.listening += 1,
-                        Some(st) if st.contains("TimeWait") || st.contains("TIME_WAIT") => {
-                            s.time_wait += 1
-                        }
-                        _ => {}
+                    match TcpState::from_state_str(e.state.as_deref()) {
+                        TcpState::Established => s.established += 1,
+                        TcpState::CloseWait => s.close_wait += 1,
+                        TcpState::Listen => s.listening += 1,
+                        TcpState::TimeWait => s.time_wait += 1,
+                        TcpState::Other => {}
                     }
                     if let Some(addr) = e.remote_addr
                         && !addr.is_unspecified()
@@ -367,18 +445,12 @@ impl ProcessNetGroup {
                     match e.protocol {
                         Protocol::Tcp => {
                             g.tcp_count += 1;
-                            match e.state.as_deref() {
-                                Some(st) if st.contains("Established") => g.established += 1,
-                                Some(st)
-                                    if st.contains("CloseWait") || st.contains("CLOSE_WAIT") =>
-                                {
-                                    g.close_wait += 1
-                                }
-                                Some(st) if st.contains("Listen") => g.listening += 1,
-                                Some(st) if st.contains("TimeWait") || st.contains("TIME_WAIT") => {
-                                    g.time_wait += 1
-                                }
-                                _ => {}
+                            match TcpState::from_state_str(e.state.as_deref()) {
+                                TcpState::Established => g.established += 1,
+                                TcpState::CloseWait => g.close_wait += 1,
+                                TcpState::Listen => g.listening += 1,
+                                TcpState::TimeWait => g.time_wait += 1,
+                                TcpState::Other => {}
                             }
                             if let Some(addr) = e.remote_addr
                                 && !addr.is_unspecified()
@@ -730,16 +802,12 @@ impl RemoteGroup {
                     g.process_names.insert(e.process_name.clone());
                     g.protocols.insert(e.protocol);
                     match e.protocol {
-                        Protocol::Tcp => match e.state.as_deref() {
-                            Some(st) if st.contains("Established") => g.established += 1,
-                            Some(st) if st.contains("CloseWait") || st.contains("CLOSE_WAIT") => {
-                                g.close_wait += 1
-                            }
-                            Some(st) if st.contains("Listen") => g.listening += 1,
-                            Some(st) if st.contains("TimeWait") || st.contains("TIME_WAIT") => {
-                                g.time_wait += 1
-                            }
-                            _ => {}
+                        Protocol::Tcp => match TcpState::from_state_str(e.state.as_deref()) {
+                            TcpState::Established => g.established += 1,
+                            TcpState::CloseWait => g.close_wait += 1,
+                            TcpState::Listen => g.listening += 1,
+                            TcpState::TimeWait => g.time_wait += 1,
+                            TcpState::Other => {}
                         },
                         Protocol::Udp => {}
                     }
@@ -825,19 +893,11 @@ pub fn diff_connections(prev: &[PortEntry], current: &[PortEntry]) -> Connection
     let active_count = current.len();
     let close_wait_count = current
         .iter()
-        .filter(|e| {
-            e.state
-                .as_deref()
-                .is_some_and(|s| s.contains("CloseWait") || s.contains("CLOSE_WAIT"))
-        })
+        .filter(|e| TcpState::from_state_str(e.state.as_deref()) == TcpState::CloseWait)
         .count();
     let time_wait_count = current
         .iter()
-        .filter(|e| {
-            e.state
-                .as_deref()
-                .is_some_and(|s| s.contains("TimeWait") || s.contains("TIME_WAIT"))
-        })
+        .filter(|e| TcpState::from_state_str(e.state.as_deref()) == TcpState::TimeWait)
         .count();
 
     ConnectionDiff {

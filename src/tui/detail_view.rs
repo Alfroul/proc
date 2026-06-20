@@ -107,10 +107,10 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
     let disk_read = format_bytes(proc.disk_usage.0);
     let disk_write = format_bytes(proc.disk_usage.1);
 
-    let net_summary = match port_map::scan_ports() {
-        Ok(entries) => port_map::ProcessNetSummary::from_pid(proc.pid, &entries),
-        Err(_) => port_map::ProcessNetSummary::default(),
-    };
+    // 复用 port_panel 后台 worker 维护的 port_entries（每 ~3s 刷新一次），
+    // 而不是每帧调 scan_ports()——后者走 netstat2 + sysinfo 全 PID 名表，
+    // 详情页打开期间能直接造成卡帧。进程维度按 PID 过滤即可。
+    let net_summary = port_map::ProcessNetSummary::from_pid(proc.pid, &app.port_panel.port_entries);
 
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
@@ -166,11 +166,6 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
         )),
         Line::from(Span::styled(
             format!("  工作目录: {}", proc.cwd.as_deref().unwrap_or("-")),
-            theme::style_normal(),
-        )),
-        Line::from(Span::raw("")),
-        Line::from(Span::styled(
-            format!("  占用端口: {}", app.detail_port_info),
             theme::style_normal(),
         )),
     ];

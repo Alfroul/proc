@@ -208,7 +208,10 @@ impl AnomalyDetector {
     fn detect_new_listen_port(&mut self, entries: &[PortEntry], anomalies: &mut Vec<Anomaly>) {
         let current_listen: HashSet<u16> = entries
             .iter()
-            .filter(|e| e.state.as_deref().is_some_and(|s| s.contains("Listen")))
+            .filter(|e| {
+                crate::port_map::TcpState::from_state_str(e.state.as_deref())
+                    == crate::port_map::TcpState::Listen
+            })
             .map(|e| e.local_port)
             .collect();
 
@@ -226,7 +229,8 @@ impl AnomalyDetector {
                     .iter()
                     .find(|e| {
                         e.local_port == port
-                            && e.state.as_deref().is_some_and(|s| s.contains("Listen"))
+                            && crate::port_map::TcpState::from_state_str(e.state.as_deref())
+                                == crate::port_map::TcpState::Listen
                     })
                     .map(|e| (e.process_name.clone(), e.pid));
 

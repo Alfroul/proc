@@ -136,10 +136,22 @@ impl CachedScore {
 /// WinVerifyTrust can involve network OCSP/CRL checks, so we cap it.
 const VERIFY_BUDGET_PER_PASS: usize = 50;
 
+/// DLL load check budget per full scoring pass.
+///
+/// `check_loaded_dlls` calls `CreateToolhelp32Snapshot` which is expensive
+/// (几十~几百毫秒/进程,且会临时持有目标进程的 loader lock)。1000+ 进程
+/// 全检查会让 BackgroundScorer worker 跑数分钟,期间持续占用一个 CPU 核,
+/// 间接拖累主线程帧率(用户感知为"每 ~4 秒一次卡顿")。
+///
+/// 每 pass 最多检查 20 个进程;多 pass 内会覆盖完整进程列表(进程顺序
+/// 由 cached_processes 决定,随 PID/compute 顺序自然轮换)。
+const DLL_CHECK_BUDGET_PER_PASS: usize = 20;
+
 /// Internal scorer — used by BackgroundScorer and tests.
 pub struct SecurityScorer {
     cache: CachedScore,
     verify_budget: usize,
+    dll_check_budget: usize,
     hash_reputation: super::hash_cache::HashReputation,
 }
 
@@ -155,12 +167,14 @@ impl SecurityScorer {
         Self {
             cache: CachedScore::new(),
             verify_budget: VERIFY_BUDGET_PER_PASS,
+            dll_check_budget: DLL_CHECK_BUDGET_PER_PASS,
             hash_reputation: super::hash_cache::HashReputation::new(),
         }
     }
 
     pub fn reset_budget(&mut self) {
         self.verify_budget = VERIFY_BUDGET_PER_PASS;
+        self.dll_check_budget = DLL_CHECK_BUDGET_PER_PASS;
     }
 
     pub fn flush(&mut self) {
@@ -240,8 +254,12 @@ impl SecurityScorer {
             factors.push(risk);
         }
 
-        // 12. DLL load check — no budget limit in background, but cap at 20 per pass
-        factors.extend(super::dll_check::check_loaded_dlls(proc.pid));
+        // 12. DLL load check — `CreateToolhelp32Snapshot` 慢且影响主线程
+        // 帧率,每 pass 最多 20 个进程(见 `DLL_CHECK_BUDGET_PER_PASS`)。
+        if self.dll_check_budget > 0 {
+            self.dll_check_budget -= 1;
+            factors.extend(super::dll_check::check_loaded_dlls(proc.pid));
+        }
 
         // 13. Token privilege check — fast API call, no budget needed
         if let Some(risk) =
