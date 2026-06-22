@@ -283,7 +283,10 @@ mod tests {
 
     #[test]
     fn pty_arrow_keys_produce_ansi_cursor_sequences() {
-        assert_eq!(key_event_to_pty_bytes(ev(KeyCode::Up)), Some(b"\x1b[A".to_vec()));
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Up)),
+            Some(b"\x1b[A".to_vec())
+        );
         assert_eq!(
             key_event_to_pty_bytes(ev(KeyCode::Down)),
             Some(b"\x1b[B".to_vec())

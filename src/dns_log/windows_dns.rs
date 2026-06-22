@@ -134,7 +134,7 @@ pub fn parse_powershell_event(line: &str) -> Option<DnsQuery> {
     Some(DnsQuery {
         timestamp: ts,
         pid: pid_u32,
-        start_time: 0, // reader 线程 lookup 时填（P1-A5）
+        start_time: 0,               // reader 线程 lookup 时填（P1-A5）
         process_name: String::new(), // reader 线程填充
         query_name: ev.name,
         query_type: parse_query_type(&ev.qtype),

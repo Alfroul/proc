@@ -649,8 +649,10 @@ impl App {
         let mut switch_with_err: Option<String> = None;
         if let Some(ce) = self.container_exec.as_mut() {
             if let Err(e) = ce.write_all(&bytes) {
-                switch_with_err =
-                    Some(format!("❌ 容器 {} 写入失败，已切回 Docker 面板: {e}", ce.container));
+                switch_with_err = Some(format!(
+                    "❌ 容器 {} 写入失败，已切回 Docker 面板: {e}",
+                    ce.container
+                ));
             }
         }
         if let Some(err_msg) = switch_with_err {

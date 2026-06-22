@@ -7,6 +7,46 @@
 
 ## [Unreleased]
 
+（0.6.0 候选见 `docs/0.6.0-roadmap.md`）
+
+## [0.5.0] - 2026-06-22
+
+### 最终交付摘要
+
+阶段 1-9 + 阶段 10 Review + 阶段 11 收尾，0.5.0 周期完整交付 14 项计划功能（A1/A3/A4 句柄/内存/优先级、B1/B2/B3 GPU/频率/SMART、D1/D2/D3 流量/TCP/DNS、E1/E2/E3/E4 Docker 深化、H4 Miri）。
+
+**最终基线**（2026-06-22 实测）：
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test --release` | ✅ **611 passed / 0 failed / 3 ignored**（baseline 595 + 阶段 11 新增 16 单测：14 key_event_to_pty_bytes + 2 SmartHealth Warning；33 binaries + 1 doctest） |
+| `cargo clippy --release --all-targets -- -D warnings` | ✅ 0 warnings |
+| `cargo build --release --no-default-features` | ✅ 编译通过（4m 41s） |
+| `cargo fmt --all -- --check` | ✅ fmt clean |
+| `cargo clippy --release --all-targets -- -W clippy::pedantic \| grep must_use_candidate` | ✅ 16（baseline，全在 src/app.rs 现有 getter，surgical 原则不动） |
+
+### 阶段 11 — 收尾：批量修复 + 0.5.0 发布
+
+- Fixed (P0-1): `Cargo.toml` version `0.4.0` → `0.5.0`
+- Changed (P0-2): `README.md` 完全重写，反映 0.5.0 全部能力（Inspector 6 Tab、GPU 多厂商、SMART、per-process 流量、DNS 日志、Docker 深化、容器 exec）。228 → 410 行（+182 / -46）。删除过时「GPU 路线图」段（阶段 6 已落地 AMD/Intel via nvtop）；快捷键 / CLI 子命令 / 平台支持表全部补齐。
+- Decision (P0-3): `.gitignore` 保持私有 —— `CONTEXT.md` / `plan.md` / `docs/` 不入仓库（用户确认，2026-06-22）。
+- Docs (P1-E2): `src/docker/logs_worker.rs:5` ADR 引用错误修正（ADR-0006 是 DNS PowerShell 选型，与 logs_worker 背压无关；改为「与 docker/events worker / monitor/port_watcher 同款 sync_channel(64) 设计」）。
+- Test (P1-E1): `src/tui/container_exec_view.rs::key_event_to_pty_bytes` 补 14 个单测覆盖每个分支（Enter/Tab/BackTab/Backspace/方向/Home/End/Delete/PageUp/PageDown/Ctrl 常用键/Ctrl xor 规则/Alt+x/普通 ASCII/非 ASCII UTF-8/F-keys/Null）。
+- Fixed (P1-X2): `src/app.rs::handle_container_exec_key` 写 PTY 失败时正确切回 DockerPanel + 保留错误原因（之前 switch_mode 覆盖 exit_msg 让用户看不到具体失败原因）。
+- CI (P1-C2): `.github/workflows/miri.yml` 删除 `continue-on-error: true` 两处（line 36 + 40），让 Miri 真正阻断 PR。阶段 2 H4 目标「Miri 并发 UB 检测」实际生效。
+- Fixed (P1-B1): `src/smart/mod.rs::parse_smartctl_json` 在 `when_failed=past` 时触发 `SmartHealth::Warning`（之前 Warning 变体永远拿不到，用户看不到「磁盘曾失败过」中间状态）。补 2 个单测覆盖 Warning 路径 + Failing 优先级。
+- Perf (P1-B3): `src/gpu.rs::NvmlProvider` 缓存 DXGI+NVML 聚合结果到 `cached: Vec<GpuInfo>`，`list_gpus` 直接 clone；`refresh` 跑完整枚举。sidebar 不再每秒重做 DXGI（`CreateDXGIFactory1` + `EnumAdapters1` + `QueryVideoMemoryInfo`）+ NVML `get_info` fuzzy match 遍历。
+- Perf (P1-A3): `src/tui/detail_view.rs::draw_summary` 优先级/affinity 走 `App::detail_priority` 缓存，避免每帧 4 次 syscall（`OpenProcess` + `GetPriorityClass` + `GetProcessAffinityMask` + `CloseHandle`，50ms tick 下 80 次/秒）。4 个更新点：`switch_mode` 进入详情页 / `r` 刷新 / `+/-` 调整 / heavy tick 周期。
+- Fixed (P1-A5/D4): `DnsQuery` 加 `start_time: u64` 字段（additive）。`PidNameLookup` cache value 含 start_time，每次 lookup 比对 sysinfo 当前 start_time，PID 复用时自动失效重查。`detail_view::draw_network_tab` DNS 过滤改 `(pid, start_time)` 元组比对，避免 PID 复用时新进程详情页显示旧进程 DNS 历史。
+- Docs: `docs/tech-debt.md` 归档 52 项 P2 + 14 项未做 P1 的处理建议（0.6.0 / 0.7.0+ 分组）。
+- Docs: `docs/0.6.0-roadmap.md` 列出 0.6.0 候选（Windows AMD/Intel GPU、Linux pcap DNS、Linux per-core 温度、Inspector v2 等，~12 周粗估）。
+- Note: 降级 P2 留 0.6.0 的 P1（14 项）—— P1-A1 Handles 对象名 / P1-A2 Memory 映射文件名 / P1-A4 HandleLocker 类型 / P1-A6 proc_maps 合并 / P1-A7 env/dlls 单测 / P1-B2 WMI 多磁盘 / P1-B4 PDH 多 GPU / P1-C1 per-core 温度 / P1-C3 sidebar 多盘 / P1-D1 estats 重复 enable / P1-D2 R9 seen_pids / P1-D3 net_flow 单测 / P1-D5 Anomaly.start_time / P1-D6 estats ConnKey local_addr。详见 `docs/tech-debt.md`。
+
+### 阶段 10 — Review
+
+- Added: `docs/reviews/REVIEW-10.md` 全局审查报告（read-only，3 P0 + 26 P1 + 52 P2）。覆盖 A/B/C/D/E 五切片 + 横切（架构/文档/测试/安全/性能）。
+- Note: 阶段 11 消费 P0/P1（13 项修复），P2 归档到 `docs/tech-debt.md`。
+
 ### 阶段 9 — Slice：E2 exec 进容器（PTY 集成）
 
 - Added (E2): `src/docker/exec.rs` 新模块 —— `ContainerExec` 句柄持有 portable-pty master / writer / child / reader 通道。`start(container, cmd, image)` 用本地 PTY spawn `docker exec -it <container> <shell>` 子进程；docker CLI 处理所有 daemon 通信（命名管道 / TCP / unix socket）+ 远端 PTY 分配。reader 线程循环 `master.reader.read` → `sync_channel(64)` 背压 → 主线程 tick `drain()` 拼接字节喂 `vt100::Parser::process`。`write_all(bytes)` 转发按键字节（含 ANSI 转义）到 PTY writer。`resize(cols, rows)` 同步 PTY 尺寸（SIGWINCH 由 `-t` 自动转发容器）。`is_finished()` 检测 child 退出。`detect_default_shell(image)` 纯函数按镜像名推断 shell（alpine/busybox → `/bin/sh`，ubuntu/debian/centos/fedora/rust/golang/python/node → `/bin/bash`，其它 → `/bin/sh` 兜底）。详见 `docs/adr/0007-container-exec-pty-bridge.md`。
