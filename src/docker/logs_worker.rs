@@ -2,7 +2,8 @@
 //!
 //! 调用 bollard `logs`（`follow=true`）流式拉日志，在独立线程跑 tokio runtime，
 //! 把每条 `LogOutput` 转 [`LogLine`] 攒到 chunk（最多 16 行或 4KB 字符），通过
-//! `sync_channel(64)` 推给主线程。ADR-0006 背压：消费者慢时丢新 chunk 保留历史。
+//! `sync_channel(64)` 推给主线程。背压策略：消费者慢时丢新 chunk 保留历史
+//! （与 docker/events worker / monitor/port_watcher 同款 `sync_channel(64)` 设计）。
 //!
 //! 用户切换容器 / 退出日志模式时 panel 把 [`LogsWorker`] drop → Drop 触发
 //! worker 退出（`shutdown_tx` drop → 主线程检测到 → 通过 `runtime` abort 停止）。
