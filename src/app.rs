@@ -7,6 +7,9 @@ use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 const SPARKLINE_LEN: usize = 30;
 const MAX_TRACKED: usize = 50;
 const MAX_OP_HISTORY: usize = 100;
+/// DNS 查询日志内存缓冲上限（FIFO 丢弃最旧）。stage-8.md 验收要求 cap=1000。
+/// 隐私：DNS 查询含敏感信息，永不持久化到磁盘（仅内存 + UI 实时显示）。
+const DNS_LOG_BUFFER_CAP: usize = 1000;
 
 // Re-export types that moved to app_panel
 pub use crate::app_panel::{
@@ -21,10 +24,11 @@ use crate::collect::{
     SystemSnapshot,
 };
 use crate::docker::ContainerInfo;
+use crate::docker::exec::ContainerExec;
 use crate::eject::classify::HandleRisk;
 use crate::eject::{HandleLock, RemovableDevice};
 use crate::error::Result;
-use crate::inspect::InspectionData;
+use crate::inspect::{HandleInfo, InspectionData, MemoryRegion};
 use crate::port_map::{self, NetworkViewMode, PortEntry};
 use crate::record::Player;
 use crate::search::SearchState;
@@ -84,6 +88,24 @@ pub struct App {
     // 后台采集 worker(netstat2、USB、Docker 等挪出主线程)
     pub port_worker: crate::port_worker::PortSnapshotWorker,
     pub usb_worker: crate::eject::snapshot_worker::UsbSnapshotWorker,
+    // 阶段 7 D1：per-process 网络流量 worker（Windows IP Helper / Linux nethogs）
+    // 平台不支持时为 None，net_sent_rate / net_recv_rate 保持 0
+    pub net_flow_worker: Option<crate::net_flow::worker::NetFlowWorker>,
+    // 阶段 8 D3：DNS 查询日志 worker（Windows PowerShell / Linux/macOS 不支持时为 None）。
+    // 主线程 tick 时 try_recv_latest drain，追加到 `dns_log_recent`（cap=1000 FIFO）。
+    // 仅内存缓冲；录屏（record/）路径不序列化任何 DNS 数据（隐私）。
+    pub dns_log_worker: Option<crate::dns_log::worker::DnsLogWorker>,
+    pub dns_log_recent: VecDeque<crate::dns_log::DnsQuery>,
+
+    // 阶段 9 E2：容器 exec 嵌入式 PTY。
+    // container_exec = Some 仅在 AppMode::ContainerExec 时；其他模式必须为 None。
+    // vt100 parser 同生命周期，避免重新创建丢历史输出。
+    pub container_exec: Option<ContainerExec>,
+    pub container_exec_vt: Option<vt100::Parser>,
+    /// DockerPanel 按 `e` 时设置目标容器名；App::switch_mode(ContainerExec) 取出启动。
+    pub pending_container_exec_target: Option<String>,
+    /// exec 模式退出时给用户的一次性提示（如「容器已退出」），渲染一次后清空。
+    pub container_exec_exit_msg: Option<String>,
 
     // Global state
     pub detail_process: Option<ProcessInfo>,
@@ -96,6 +118,9 @@ pub struct App {
     pub inspection_data: Option<InspectionData>,
     pub inspection_search: SearchState,
     pub inspection_scroll: usize,
+    // 阶段 1 占位字段：阶段 4 上线时填采集结果，本阶段始终 None。
+    pub inspection_handles_data: Option<Vec<HandleInfo>>,
+    pub inspection_memory_data: Option<Vec<MemoryRegion>>,
 
     // History tracking
     pub proc_history: HashMap<u32, ProcHistory>,
@@ -142,6 +167,10 @@ pub struct App {
 
     // Platform
     pub is_windows: bool,
+
+    // Sidebar 折叠/展开状态：阶段 2 B2，按 `c` 切换；持久化到 ui.toml。
+    // 折叠 = 现有 sidebar 视觉；展开 = per-core CPU 频率/温度表格。
+    pub sidebar_expanded: bool,
 }
 
 pub struct ProcHistory {
@@ -200,6 +229,14 @@ impl App {
             docker_panel: DockerPanel::new(),
             port_worker: crate::port_worker::spawn(),
             usb_worker: crate::eject::snapshot_worker::spawn(),
+            net_flow_worker: crate::net_flow::detect_collector()
+                .map(crate::net_flow::worker::spawn),
+            dns_log_worker: crate::dns_log::detect_collector().map(crate::dns_log::worker::spawn),
+            dns_log_recent: VecDeque::new(),
+            container_exec: None,
+            container_exec_vt: None,
+            pending_container_exec_target: None,
+            container_exec_exit_msg: None,
             detail_process: None,
             status_message,
             kill_confirm: false,
@@ -208,6 +245,8 @@ impl App {
             inspection_data: None,
             inspection_search: SearchState::new(),
             inspection_scroll: 0,
+            inspection_handles_data: None,
+            inspection_memory_data: None,
             proc_history: HashMap::new(),
             global_cpu_history: VecDeque::new(),
             global_mem_history: VecDeque::new(),
@@ -234,6 +273,7 @@ impl App {
             prev_process_disk_time: Instant::now(),
             self_proc: None,
             is_windows,
+            sidebar_expanded: crate::ui_state::load_sidebar_expanded(),
         })
     }
 
@@ -336,6 +376,18 @@ impl App {
                 crate::tui::theme::cycle_theme();
                 true
             }
+            KeyCode::Char('c') => {
+                // Sidebar 折叠/展开：阶段 2 B2。详情页的 'c'（复制进程信息）在
+                // `handle_detail_key` 里走 ProcessDetail 分支，不会被这里抢键。
+                self.sidebar_expanded = !self.sidebar_expanded;
+                crate::ui_state::save_sidebar_expanded(self.sidebar_expanded);
+                self.status_message = Some(if self.sidebar_expanded {
+                    "侧边栏：展开（per-core 频率/温度）".to_string()
+                } else {
+                    "侧边栏：折叠".to_string()
+                });
+                true
+            }
             KeyCode::Char('A') => {
                 self.alert_popup_open = !self.alert_popup_open;
                 self.alert_scroll = 0;
@@ -418,6 +470,8 @@ impl App {
                 pending_redraw: &mut self.pending_redraw,
                 alert_manager: &mut self.alert_manager,
                 op_history: &mut self.op_history,
+                dns_log_recent: &mut self.dns_log_recent,
+                pending_container_exec: &mut self.pending_container_exec_target,
             };
             match self.mode {
                 AppMode::ProcessList => self.process_panel.handle_key(key, &mut ctx),
@@ -431,6 +485,11 @@ impl App {
                 AppMode::UsbAssistant => self.usb_panel.handle_key(key, &mut ctx),
                 AppMode::MonitorPanel => self.monitor_panel.handle_key(key, &mut ctx),
                 AppMode::DockerPanel => self.docker_panel.handle_key(key, &mut ctx),
+                AppMode::ContainerExec => {
+                    let _ = ctx;
+                    self.handle_container_exec_key(key);
+                    return;
+                }
                 AppMode::Replay => {
                     let _ = ctx;
                     self.handle_replay_key(key);
@@ -454,6 +513,18 @@ impl App {
     }
 
     fn switch_mode(&mut self, mode: AppMode) {
+        // 退出 ContainerExec 时必须 drop PTY + parser，避免 fd 泄漏。
+        if self.mode == AppMode::ContainerExec && mode != AppMode::ContainerExec {
+            let exit_msg = self
+                .container_exec
+                .as_ref()
+                .map(|ce| format!("✅ 已退出容器 {}", ce.container));
+            self.container_exec = None;
+            self.container_exec_vt = None;
+            if let Some(m) = exit_msg {
+                self.container_exec_exit_msg = Some(m);
+            }
+        }
         if mode == AppMode::ProcessList {
             self.process_panel.process_view_mode = ProcessViewMode::List;
             self.process_panel.cursor_index = 0;
@@ -468,7 +539,7 @@ impl App {
                 self.docker_panel.start_watching();
             }
         }
-        // 进入详情页时预加载 Inspector 数据：env/dlls 一次采集（同步）。
+        // 进入详情页时预加载 Inspector 数据：env/dlls/handles/memory 一次采集（同步）。
         // net 复用 port_panel.port_entries（后台 worker 每 ~3s 已推新），
         // 避免再调一次 scan_ports 的几百毫秒 syscall 卡帧。
         // 失败的子项会退化为空 Vec，TUI 层在 Tab 内显示「无数据」。
@@ -478,15 +549,97 @@ impl App {
             self.inspection_search.clear();
             let ports_snapshot: Vec<crate::port_map::PortEntry> =
                 self.port_panel.port_entries.clone();
-            self.inspection_data = self
-                .detail_process
-                .as_ref()
-                .map(|p| crate::inspect::inspect_with_ports(p.pid, &ports_snapshot));
+            if let Some(p) = self.detail_process.as_ref() {
+                self.inspection_data =
+                    Some(crate::inspect::inspect_with_ports(p.pid, &ports_snapshot));
+                // 阶段 4 A1/A3：句柄 + 内存映射。失败的子模块退化为 None，
+                // Tab 渲染时显示「采集失败 / 权限不足」。
+                self.inspection_handles_data =
+                    Some(crate::inspect::handles::collect_handles(p.pid).unwrap_or_default());
+                self.inspection_memory_data =
+                    Some(crate::inspect::memory::collect_memory(p.pid).unwrap_or_default());
+            } else {
+                self.inspection_data = None;
+                self.inspection_handles_data = None;
+                self.inspection_memory_data = None;
+            }
         }
         self.mode = mode;
         self.process_panel.search.clear();
         self.status_message = None;
         self.data_dirty = true;
+
+        // 进入 ContainerExec：从 pending_container_exec_target 启动 PTY + vt100 parser。
+        if mode == AppMode::ContainerExec {
+            self.enter_container_exec();
+        }
+    }
+
+    /// 从 `pending_container_exec_target` 启动 ContainerExec + vt100 Parser。
+    /// 失败（Docker 未连接 / spawn 失败）时回退到 DockerPanel 并提示错误。
+    fn enter_container_exec(&mut self) {
+        let target = match self.pending_container_exec_target.take() {
+            Some(t) => t,
+            None => {
+                self.container_exec_exit_msg = Some("❌ 未指定 exec 目标容器".to_string());
+                self.mode = AppMode::DockerPanel;
+                return;
+            }
+        };
+
+        // 拿 image 用于 detect_default_shell（用户没显式传 cmd 时）。
+        let image = self
+            .docker_panel
+            .containers
+            .iter()
+            .find(|c| c.name == target || c.id.starts_with(&target))
+            .map(|c| c.image.clone());
+
+        // 检查容器在运行状态（docker exec 需要容器 running）。
+        let is_running = self
+            .docker_panel
+            .containers
+            .iter()
+            .find(|c| c.name == target || c.id.starts_with(&target))
+            .is_some_and(|c| c.state == "running");
+
+        if !is_running {
+            self.container_exec_exit_msg = Some(format!("❌ 容器 {target} 未运行，无法 exec"));
+            self.mode = AppMode::DockerPanel;
+            return;
+        }
+
+        let exec = match ContainerExec::start(&target, &[], image.as_deref()) {
+            Ok(e) => e,
+            Err(e) => {
+                self.container_exec_exit_msg = Some(format!("❌ exec 启动失败: {e}"));
+                self.mode = AppMode::DockerPanel;
+                return;
+            }
+        };
+        let (cols, rows) = exec.size();
+        // vt100 parser scrollback = 0：嵌入式视图不滚动历史（按 Esc 退出查日志）。
+        let parser = vt100::Parser::new(rows, cols, 0);
+        self.container_exec = Some(exec);
+        self.container_exec_vt = Some(parser);
+        self.container_exec_exit_msg = None;
+    }
+
+    /// 容器 exec 模式按键处理（不走 panel）。
+    ///
+    /// 把 [`KeyEvent`] 转 ANSI 字节序列（[`crate::tui::container_exec_view::key_event_to_pty_bytes`]）
+    /// 写进 PTY writer。Ctrl+C / Ctrl+D / Ctrl+\\ 在 exec 模式下转发到容器
+    /// （raw mode 下 crossterm 不传 SIGINT，ctrlc handler 不触发）。
+    fn handle_container_exec_key(&mut self, key: KeyEvent) {
+        let Some(bytes) = crate::tui::container_exec_view::key_event_to_pty_bytes(key) else {
+            return;
+        };
+        if let Some(ce) = self.container_exec.as_mut() {
+            if let Err(e) = ce.write_all(&bytes) {
+                self.container_exec_exit_msg = Some(format!("❌ 写入失败: {e}"));
+                self.switch_mode(AppMode::DockerPanel);
+            }
+        }
     }
 
     fn handle_help_key(&mut self, key: KeyEvent) {
@@ -553,8 +706,26 @@ impl App {
                         proc.pid,
                         &ports_snapshot,
                     ));
+                    // 阶段 4：handles/memory 也要刷一次（r 不应只刷新 env/dlls/net）。
+                    self.inspection_handles_data = Some(
+                        crate::inspect::handles::collect_handles(proc.pid).unwrap_or_default(),
+                    );
+                    self.inspection_memory_data =
+                        Some(crate::inspect::memory::collect_memory(proc.pid).unwrap_or_default());
                     self.inspection_scroll = 0;
                     self.status_message = Some(format!("已刷新 Inspector 数据 (PID {})", proc.pid));
+                }
+            }
+            // `+` / `-`：阶段 4 A4，在 Summary Tab 上调高/调低进程优先级。
+            // 仅详情页生效（避免与 Replay 速度调节冲突 —— replay 在另一个分支）。
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                if let Some(proc) = &self.detail_process {
+                    self.bump_priority(proc.pid, true);
+                }
+            }
+            KeyCode::Char('-') => {
+                if let Some(proc) = &self.detail_process {
+                    self.bump_priority(proc.pid, false);
                 }
             }
             // `/` 进入搜索（Env/Dlls 数据量大时必须）。
@@ -1054,12 +1225,20 @@ impl App {
             return self.tick_replay();
         }
 
+        // Container exec 模式：drain PTY → vt100 parser；child 退出则切回 DockerPanel。
+        // 每帧都跑（不等 REFRESH_INTERVAL），保证 docker exec 输出流畅。
+        if self.mode == AppMode::ContainerExec {
+            self.tick_container_exec();
+            return true;
+        }
+
         if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
             self.last_refresh = Instant::now();
             let had_heavy = self.tick_light_refresh();
             self.tick_throttle_check();
             self.tick_history_sample(had_heavy);
             self.tick_alert_evaluate();
+            self.tick_dns_log();
             self.tick_panels();
             self.tick_usb_monitor_docker();
             self.tick_self_monitor();
@@ -1103,6 +1282,7 @@ impl App {
                 Ok(true) => {
                     self.cached_processes = self.snapshot.cached_processes_arc();
                     self.update_disk_speeds();
+                    self.update_net_rates();
 
                     let alive_pids: HashSet<u32> =
                         self.cached_processes.iter().map(|p| p.pid).collect();
@@ -1166,6 +1346,67 @@ impl App {
         self.prev_process_disk_time = now;
     }
 
+    /// 阶段 7 D1：从 [`net_flow_worker`] drain 最新一份 per-PID 速率，贴回
+    /// `cached_processes.net_sent_rate` / `net_recv_rate`。
+    ///
+    /// 设计：
+    /// - worker 1s 推一份；主线程 tick 50ms，heavy refresh 2s。每次 heavy 都 drain，
+    ///   拿到的总是「最新一份」（worker 内部 sync_channel(1) 已 dedup）
+    /// - 没 worker / 没 snapshot → 全部置 0（之前可能有值但 worker 关闭了）
+    /// - 按 PID 匹配 cached_processes。PID 复用风险：worker 端 collector 已做
+    ///   「累计回退」检测；这里只贴当前 PID 即可
+    fn update_net_rates(&mut self) {
+        let snapshot = if let Some(worker) = &self.net_flow_worker {
+            worker.try_recv_latest()
+        } else {
+            None
+        };
+
+        let procs = Arc::make_mut(&mut self.cached_processes);
+
+        match snapshot {
+            Some(s) => {
+                let by_pid: HashMap<u32, (u64, u64)> = s
+                    .rates
+                    .iter()
+                    .map(|r| (r.pid, (r.bytes_sent_per_sec, r.bytes_recv_per_sec)))
+                    .collect();
+                for proc in procs {
+                    if let Some(&(sent, recv)) = by_pid.get(&proc.pid) {
+                        proc.net_sent_rate = sent;
+                        proc.net_recv_rate = recv;
+                    } else {
+                        proc.net_sent_rate = 0;
+                        proc.net_recv_rate = 0;
+                    }
+                }
+            }
+            None => {
+                // 无 worker / 无新帧：保留当前值，不强制清零。
+                // 进程列表里新加入的 ProcessInfo 默认就是 0。
+            }
+        }
+    }
+
+    /// 阶段 8 D3：从 [`dns_log_worker`] drain 最新一份 DNS 查询日志，
+    /// 追加到 `dns_log_recent`（cap=1000 FIFO）。worker 不存在时跳过。
+    ///
+    /// 隐私：DNS 查询不持久化；本方法只动内存 VecDeque，无 IO。
+    fn tick_dns_log(&mut self) {
+        let Some(worker) = &self.dns_log_worker else {
+            return;
+        };
+        let Some(snap) = worker.try_recv_latest() else {
+            return;
+        };
+        for q in snap.queries {
+            self.dns_log_recent.push_back(q);
+            if self.dns_log_recent.len() > DNS_LOG_BUFFER_CAP {
+                self.dns_log_recent.pop_front();
+            }
+        }
+    }
+
     fn tick_throttle_check(&mut self) {
         self.throttle_info = self.snapshot.throttle_info().cloned();
         self.throttle_reason = if let Some(ref ti) = self.throttle_info {
@@ -1174,6 +1415,62 @@ impl App {
         } else {
             crate::throttle::ThrottleReason::None
         };
+    }
+
+    /// 容器 exec tick：drain PTY 输出 → vt100 parser；child 退出则切回 DockerPanel。
+    fn tick_container_exec(&mut self) {
+        // 1) drain 所有 reader chunk → vt100 parser
+        let bytes: Vec<u8> = self
+            .container_exec
+            .as_ref()
+            .map(|ce| ce.drain())
+            .unwrap_or_default();
+        if !bytes.is_empty()
+            && let Some(parser) = self.container_exec_vt.as_mut()
+        {
+            parser.process(&bytes);
+        }
+
+        // 2) 检测 child 是否退出（用户输入 exit / Ctrl+D / Ctrl+\）
+        let exited = self
+            .container_exec
+            .as_mut()
+            .is_some_and(|ce| ce.is_finished());
+        if exited {
+            let name = self
+                .container_exec
+                .as_ref()
+                .map(|ce| ce.container.clone())
+                .unwrap_or_default();
+            self.container_exec_exit_msg = Some(format!("✅ 容器 {name} 会话已结束"));
+            self.switch_mode(AppMode::DockerPanel);
+        }
+    }
+
+    /// 终端 resize 事件：触发 ContainerExec PTY + vt100 parser 同步尺寸。
+    /// 实际尺寸从 ratatui draw 的 area 拿（run_app 在 draw 后调 resize_container_exec）。
+    pub fn notify_terminal_resized(&mut self) {
+        if self.mode == AppMode::ContainerExec {
+            self.pending_redraw = true;
+        }
+    }
+
+    /// 用 ratatui 渲染尺寸调整 PTY + vt100 parser。ContainerExec 模式下 run_app 调用。
+    pub fn resize_container_exec(&mut self, cols: u16, rows: u16) {
+        // 减去顶部 1 行 header + 底部 1 行 footer（layout.rs::draw 的 vertical split）。
+        let effective_rows = rows.saturating_sub(2);
+        if effective_rows == 0 || cols == 0 {
+            return;
+        }
+        if let Some(ce) = self.container_exec.as_mut() {
+            if let Err(e) = ce.resize(cols, effective_rows) {
+                tracing::warn!("PTY resize 失败: {e}");
+            }
+        }
+        if let Some(parser) = self.container_exec_vt.as_mut() {
+            // vt100 parser set_size(rows, cols)：注意顺序与 portable-pty 相反。
+            parser.set_size(effective_rows, cols);
+        }
     }
 
     /// 从 cached_processes 按 PID 取 proc 自身的 ProcessInfo 快照，供 sidebar 显示。
@@ -1268,6 +1565,8 @@ impl App {
             pending_redraw: &mut self.pending_redraw,
             alert_manager: &mut self.alert_manager,
             op_history: &mut self.op_history,
+            dns_log_recent: &mut self.dns_log_recent,
+            pending_container_exec: &mut self.pending_container_exec_target,
         };
         if self.mode == AppMode::ProcessList {
             self.process_panel.tick(&mut ctx);
@@ -1379,6 +1678,16 @@ impl App {
                 let sb = b.1.disk_write_speed;
                 sb.cmp(&sa).then(a.1.pid.cmp(&b.1.pid))
             }
+            SortField::NetSent => {
+                let sa = a.1.net_sent_rate;
+                let sb = b.1.net_sent_rate;
+                sb.cmp(&sa).then(a.1.pid.cmp(&b.1.pid))
+            }
+            SortField::NetRecv => {
+                let sa = a.1.net_recv_rate;
+                let sb = b.1.net_recv_rate;
+                sb.cmp(&sa).then(a.1.pid.cmp(&b.1.pid))
+            }
         });
 
         // 转换为 (idx, class) 索引形式；PID 查 O(1) 而非 O(N)
@@ -1400,7 +1709,13 @@ impl App {
     }
 
     pub fn sidebar_height(&self) -> u16 {
-        13
+        // 折叠：13 行（基线）。
+        // 展开：基线 + per-core 表头 + 最多 8 核 + 1 行间隔 = 13 + 1 + 8 + 1 = 23。
+        if self.sidebar_expanded {
+            13 + 1 + 8 + 1
+        } else {
+            13
+        }
     }
 
     pub fn usb_scan_devices(&mut self) {
@@ -1441,5 +1756,56 @@ impl App {
 
     pub fn dismiss_anomaly(&mut self, id: &str) {
         self.port_panel.dismiss_anomaly(id);
+    }
+
+    /// A4：进程优先级 +1 / -1 档（详情页 `+`/`-`、列表页 `+`/`-` 都走这里）。
+    /// 失败时把错误塞到 status_message，不退出详情页。
+    fn bump_priority(&mut self, pid: u32, up: bool) {
+        let current = match crate::process_control::get_priority(pid) {
+            Ok(c) => c,
+            Err(e) => {
+                self.status_message = Some(format!("读取优先级失败: {}", e));
+                return;
+            }
+        };
+        let next = if up {
+            current.bump_up()
+        } else {
+            current.bump_down()
+        };
+        if next == current {
+            self.status_message = Some(format!(
+                "已到达 {} 端，无法继续{}",
+                current.label(),
+                if up { "调高" } else { "调低" }
+            ));
+            return;
+        }
+        match crate::process_control::set_priority(pid, next) {
+            Ok(()) => {
+                let verb = if up { "调高至" } else { "调低至" };
+                self.status_message = Some(format!("PID {} 优先级 {} {}", pid, verb, next.label()));
+                self.record_op(format!(
+                    "PID {} 优先级 {} {} → {}",
+                    pid,
+                    if up { "调高" } else { "调低" },
+                    current.label(),
+                    next.label()
+                ));
+            }
+            Err(e) => {
+                self.status_message = Some(format!(
+                    "设置优先级失败 ({} → {}): {}",
+                    current.label(),
+                    next.label(),
+                    e
+                ));
+            }
+        }
+    }
+
+    /// A4：进程列表 `+`/`-` 公开入口 —— ProcessPanel 直接调，免去重复样板。
+    pub fn bump_selected_priority(&mut self, pid: u32, up: bool) {
+        self.bump_priority(pid, up);
     }
 }

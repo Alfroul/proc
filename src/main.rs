@@ -101,8 +101,13 @@ fn run_subcommand(cmd: &cli::Command) {
         cli::Command::Port {
             port,
             kill: do_kill,
-        } => run_port(port, do_kill),
+            stats,
+        } => run_port(port, do_kill, stats),
         cli::Command::Eject { drive, find_locks } => run_eject(drive, find_locks),
+        cli::Command::Who { target_path } => run_who(target_path),
+        cli::Command::Handles { pid, file } => run_handles(pid, file),
+        cli::Command::Priority { pid, set } => run_priority(*pid, set),
+        cli::Command::Affinity { pid, set } => run_affinity(*pid, set),
         cli::Command::Monitor {
             add,
             remove,
@@ -110,7 +115,9 @@ fn run_subcommand(cmd: &cli::Command) {
             pid,
             command,
         } => run_monitor(*add, remove, port, pid, command),
-        cli::Command::Docker { watch, container } => run_docker(watch, container),
+        cli::Command::Docker { sub } => run_docker(sub),
+        cli::Command::Smart { device } => run_smart(device.as_deref()),
+        cli::Command::Dns { tail, since } => run_dns(*tail, since.as_deref()),
         cli::Command::Record { output } => run_record(output),
         cli::Command::Replay { file } => run_replay(file),
         cli::Command::Export {
@@ -142,6 +149,10 @@ fn run_ls(sort: &str, limit: &Option<usize>) {
         "mem" | "memory" => SortField::Memory,
         "name" => SortField::Name,
         "pid" => SortField::Pid,
+        "disk_read" | "diskread" => SortField::DiskRead,
+        "disk_write" | "diskwrite" => SortField::DiskWrite,
+        "net_sent" | "netsent" => SortField::NetSent,
+        "net_recv" | "netrecv" => SortField::NetRecv,
         _ => SortField::Cpu,
     };
 
@@ -151,8 +162,23 @@ fn run_ls(sort: &str, limit: &Option<usize>) {
         processes.truncate(*n);
     }
 
+    let show_net = matches!(sort_field, SortField::NetSent | SortField::NetRecv);
+
     let mut table = comfy_table::Table::new();
-    table.set_header(vec!["PID", "CPU%", "MEM%", "内存", "分类", "名称"]);
+    if show_net {
+        table.set_header(vec![
+            "PID",
+            "CPU%",
+            "MEM%",
+            "内存",
+            "↑网络/s",
+            "↓网络/s",
+            "分类",
+            "名称",
+        ]);
+    } else {
+        table.set_header(vec!["PID", "CPU%", "MEM%", "内存", "分类", "名称"]);
+    }
 
     for proc in &processes {
         let class = classify::classify_process(proc);
@@ -167,14 +193,27 @@ fn run_ls(sort: &str, limit: &Option<usize>) {
             "0.0".to_string()
         };
 
-        table.add_row(vec![
-            proc.pid.to_string(),
-            cpu_str,
-            mem_pct,
-            mem_str,
-            class.label().to_string(),
-            proc.name.clone(),
-        ]);
+        if show_net {
+            table.add_row(vec![
+                proc.pid.to_string(),
+                cpu_str,
+                mem_pct,
+                mem_str,
+                proc::format::format_speed(proc.net_sent_rate),
+                proc::format::format_speed(proc.net_recv_rate),
+                class.label().to_string(),
+                proc.name.clone(),
+            ]);
+        } else {
+            table.add_row(vec![
+                proc.pid.to_string(),
+                cpu_str,
+                mem_pct,
+                mem_str,
+                class.label().to_string(),
+                proc.name.clone(),
+            ]);
+        }
     }
 
     println!("{table}");
@@ -311,7 +350,35 @@ fn run_tree() {
     println!("{output}");
 }
 
-fn run_port(port: &Option<u16>, do_kill: &bool) {
+fn run_port(port: &Option<u16>, do_kill: &bool, stats: &bool) {
+    if *stats {
+        let tcp = collect::SystemSnapshot::tcp_stats();
+        println!("{}", "TCP 传输质量摘要".cyan());
+        println!("已建立连接: {}", tcp.established);
+        println!("LISTEN:     {}", tcp.listen);
+        println!("TIME_WAIT:  {}", tcp.time_wait);
+        println!("CLOSE_WAIT: {}", tcp.close_wait);
+        println!("重传段数:   {}", tcp.retransmitted_segs);
+        println!("RST 段数:   {}", tcp.reset_segs);
+        println!("失败连接:   {}", tcp.failed_connections);
+        println!("输出段数:   {}", tcp.out_segs);
+        if tcp.out_segs > 0 {
+            println!(
+                "重传率:     {:.2}%",
+                tcp.retransmitted_segs as f64 / tcp.out_segs as f64 * 100.0
+            );
+            println!(
+                "RST 率:     {:.2}%",
+                tcp.reset_segs as f64 / tcp.out_segs as f64 * 100.0
+            );
+        } else {
+            println!(
+                "{} 当前无 TCP 传输计数（非 Windows / Linux 平台降级）",
+                "提示:".yellow()
+            );
+        }
+        return;
+    }
     if let Some(p) = port {
         match port_map::find_pid_by_port(*p) {
             Ok(entries) if entries.is_empty() => {
@@ -681,6 +748,10 @@ fn run_export(
         "mem" | "memory" => SortField::Memory,
         "name" => SortField::Name,
         "pid" => SortField::Pid,
+        "disk_read" | "diskread" => SortField::DiskRead,
+        "disk_write" | "diskwrite" => SortField::DiskWrite,
+        "net_sent" | "netsent" => SortField::NetSent,
+        "net_recv" | "netrecv" => SortField::NetRecv,
         _ => SortField::Cpu,
     };
     crate::collect::sort_processes(&mut processes, sort_field);
@@ -795,7 +866,7 @@ fn run_legacy_replay(file: &Path) {
     }
 }
 
-fn run_docker(watch: &bool, container: &Option<String>) {
+fn run_docker(sub: &cli::DockerSub) {
     let monitor = match docker::DockerMonitor::connect() {
         Ok(m) => m,
         Err(e) => {
@@ -805,88 +876,24 @@ fn run_docker(watch: &bool, container: &Option<String>) {
         }
     };
 
-    if let Some(name) = container {
-        match monitor.list_containers(true) {
-            Ok(containers) => {
-                let found = containers
-                    .iter()
-                    .find(|c| c.name == *name || c.id.starts_with(name));
-                match found {
-                    Some(c) => {
-                        println!("{}", format!("容器: {} ({})", c.name, c.id).cyan());
-                        println!("镜像: {}", c.image);
-                        println!("状态: {}", c.status);
-                        println!("健康: {}", c.health);
-
-                        match monitor.inspect_health(name) {
-                            Ok(health) => println!("健康详情: {}", health),
-                            Err(e) => println!("{} 健康检查失败: {}", "⚠".yellow(), e),
-                        }
-
-                        match monitor.get_stats(name) {
-                            Ok(stats) => {
-                                println!("CPU:  {:.1}%", stats.cpu_percent);
-                                println!(
-                                    "内存: {} / {}",
-                                    format_bytes(stats.memory_usage),
-                                    format_bytes(stats.memory_limit)
-                                );
-                                println!(
-                                    "网络: ↓{} ↑{}",
-                                    format_bytes(stats.network_in),
-                                    format_bytes(stats.network_out)
-                                );
-                            }
-                            Err(e) => println!("{} 获取统计失败: {}", "⚠".yellow(), e),
-                        }
-                    }
-                    None => {
-                        eprintln!("{}", format!("容器 '{}' 未找到", name).red());
-                        std::process::exit(1);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("{} {}", "获取容器列表失败:".red(), e);
-                std::process::exit(1);
-            }
+    match sub {
+        cli::DockerSub::Ps => run_docker_ps(&monitor),
+        cli::DockerSub::Inspect { name } => run_docker_inspect(&monitor, name),
+        cli::DockerSub::Top { name } => run_docker_top(&monitor, name),
+        cli::DockerSub::Logs { name, follow, tail } => {
+            run_docker_logs(&monitor, name, *follow, tail.as_deref())
         }
-        return;
+        cli::DockerSub::Images => run_docker_images(&monitor),
+        cli::DockerSub::Volumes => run_docker_volumes(&monitor),
+        cli::DockerSub::ImageRm { id, force } => run_docker_image_rm(&monitor, id, *force),
+        cli::DockerSub::VolumeRm { name, force } => run_docker_volume_rm(&monitor, name, *force),
+        cli::DockerSub::Compose { args } => run_docker_compose(args),
+        cli::DockerSub::Events => run_docker_events(&monitor),
+        cli::DockerSub::Exec { container, cmd } => run_docker_exec(&monitor, container, cmd),
     }
+}
 
-    if *watch {
-        let docker_client = monitor.docker();
-        let receiver = docker::events::spawn_event_watcher(docker_client);
-        println!("{}", "监听 Docker 事件中... (Ctrl+C 停止)".cyan());
-
-        loop {
-            if shutdown::requested() {
-                println!("{}", "停止事件监听".yellow());
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            while let Some(event) = receiver.try_recv() {
-                let name = event
-                    .container_name
-                    .as_deref()
-                    .unwrap_or(&event.container_id);
-                let style = match event.action.as_str() {
-                    "die" | "stop" => "red",
-                    "start" => "green",
-                    _ => "yellow",
-                };
-                let styled = match style {
-                    "red" => format!("{} {} ({})", event.action, name, event.container_id).red(),
-                    "green" => {
-                        format!("{} {} ({})", event.action, name, event.container_id).green()
-                    }
-                    _ => format!("{} {} ({})", event.action, name, event.container_id).yellow(),
-                };
-                println!("{}", styled);
-            }
-        }
-    }
-
+fn run_docker_ps(monitor: &docker::DockerMonitor) {
     match monitor.list_containers(true) {
         Ok(containers) => {
             let mut table = comfy_table::Table::new();
@@ -928,4 +935,637 @@ fn run_docker(watch: &bool, container: &Option<String>) {
             std::process::exit(1);
         }
     }
+}
+
+fn run_docker_inspect(monitor: &docker::DockerMonitor, name: &str) {
+    let container = monitor.list_containers(true).ok().and_then(|cs| {
+        cs.into_iter()
+            .find(|c| c.name == name || c.id.starts_with(name))
+    });
+
+    let Some(c) = container else {
+        eprintln!("{}", format!("容器 '{}' 未找到", name).red());
+        std::process::exit(1);
+    };
+    println!("{}", format!("容器: {} ({})", c.name, c.id).cyan());
+    println!("镜像: {}", c.image);
+    println!("状态: {}", c.status);
+    println!("健康: {}", c.health);
+
+    match monitor.inspect_health(name) {
+        Ok(health) => println!("健康详情: {}", health),
+        Err(e) => println!("{} 健康检查失败: {}", "⚠".yellow(), e),
+    }
+
+    match monitor.get_stats(name) {
+        Ok(stats) => {
+            println!("CPU:  {:.1}%", stats.cpu_percent);
+            println!(
+                "内存: {} / {}",
+                format_bytes(stats.memory_usage),
+                format_bytes(stats.memory_limit)
+            );
+            println!(
+                "网络: ↓{} ↑{}",
+                format_bytes(stats.network_in),
+                format_bytes(stats.network_out)
+            );
+        }
+        Err(e) => println!("{} 获取统计失败: {}", "⚠".yellow(), e),
+    }
+}
+
+fn run_docker_top(monitor: &docker::DockerMonitor, name: &str) {
+    match monitor.container_top(name) {
+        Ok(procs) => {
+            if procs.is_empty() {
+                println!("{}", "容器内无进程（可能未运行）".yellow());
+                return;
+            }
+            let mut table = comfy_table::Table::new();
+            table.set_header(vec!["PID", "USER", "START", "TIME", "CMD"]);
+            for p in &procs {
+                table.add_row(vec![
+                    p.pid.clone(),
+                    p.user.clone(),
+                    p.started.clone(),
+                    p.cpu_time.clone(),
+                    p.command.clone(),
+                ]);
+            }
+            println!("{table}");
+        }
+        Err(e) => {
+            eprintln!("{} {}", "获取进程列表失败:".red(), e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_docker_logs(monitor: &docker::DockerMonitor, name: &str, follow: bool, tail: Option<&str>) {
+    if follow {
+        // follow 模式：用 logs_worker 同样的策略（spawn thread + runtime）。
+        let docker_client = monitor.docker();
+        let worker =
+            docker::logs_worker::spawn(docker_client, name.to_string(), tail.map(str::to_string));
+        println!("{}", format!("跟随 {} 日志（Ctrl+C 停止）", name).cyan());
+        loop {
+            if shutdown::requested() {
+                println!();
+                return;
+            }
+            for chunk in worker.drain() {
+                for line in chunk.lines {
+                    let prefix = if line.is_stderr { "[stderr] " } else { "" };
+                    println!("{}{}", prefix, line.message);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    match monitor.collect_logs(name, tail) {
+        Ok(logs) => {
+            for line in logs {
+                let prefix = if line.is_stderr { "[stderr] " } else { "" };
+                println!("{}{}", prefix, line.message);
+            }
+        }
+        Err(e) => {
+            eprintln!("{} {}", "获取日志失败:".red(), e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_docker_images(monitor: &docker::DockerMonitor) {
+    match monitor.list_images() {
+        Ok(images) => {
+            if images.is_empty() {
+                println!("{}", "暂无镜像".yellow());
+                return;
+            }
+            let mut table = comfy_table::Table::new();
+            table.set_header(vec!["ID", "Tags", "大小", "容器数", "创建"]);
+            for img in &images {
+                let tags = if img.repo_tags.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    img.repo_tags.join(", ")
+                };
+                table.add_row(vec![
+                    img.short_id.clone(),
+                    tags,
+                    format_bytes(img.size),
+                    img.containers.to_string(),
+                    format!("{}", img),
+                ]);
+            }
+            println!("{table}");
+        }
+        Err(e) => {
+            eprintln!("{} {}", "获取镜像列表失败:".red(), e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_docker_volumes(monitor: &docker::DockerMonitor) {
+    match monitor.list_volumes() {
+        Ok(volumes) => {
+            if volumes.is_empty() {
+                println!("{}", "暂无 volume".yellow());
+                return;
+            }
+            let mut table = comfy_table::Table::new();
+            table.set_header(vec!["名称", "驱动", "挂载点", "大小", "使用"]);
+            for v in &volumes {
+                let size = if v.size > 0 {
+                    format_bytes(v.size)
+                } else {
+                    "-".to_string()
+                };
+                let used = if v.in_use { "使用中" } else { "未使用" };
+                table.add_row(vec![
+                    v.name.clone(),
+                    v.driver.clone(),
+                    v.mountpoint.clone(),
+                    size,
+                    used.to_string(),
+                ]);
+            }
+            println!("{table}");
+        }
+        Err(e) => {
+            eprintln!("{} {}", "获取 volume 列表失败:".red(), e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_docker_image_rm(monitor: &docker::DockerMonitor, id: &str, force: bool) {
+    match monitor.remove_image(id, force) {
+        Ok(()) => println!("{}", format!("镜像 {} 已删除", id).green()),
+        Err(e) => {
+            eprintln!("{} {}", "删除失败:".red(), e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_docker_volume_rm(monitor: &docker::DockerMonitor, name: &str, force: bool) {
+    match monitor.remove_volume(name, force) {
+        Ok(()) => println!("{}", format!("volume {} 已删除", name).green()),
+        Err(e) => {
+            eprintln!("{} {}", "删除失败:".red(), e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_docker_compose(args: &[String]) {
+    use std::process::Command;
+    let bin = std::env::var("PROC_DOCKER_COMPOSE").unwrap_or_else(|_| "docker-compose".to_string());
+    let status = Command::new(&bin).args(args).status().unwrap_or_else(|e| {
+        eprintln!(
+            "{} 调用 {} 失败: {}（请确认已安装 docker-compose）",
+            "错误:".red(),
+            bin,
+            e
+        );
+        std::process::exit(127);
+    });
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+fn run_docker_events(monitor: &docker::DockerMonitor) {
+    let docker_client = monitor.docker();
+    let receiver = docker::events::spawn_event_watcher(docker_client);
+    println!("{}", "监听 Docker 事件中... (Ctrl+C 停止)".cyan());
+
+    loop {
+        if shutdown::requested() {
+            println!("{}", "停止事件监听".yellow());
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        while let Some(event) = receiver.try_recv() {
+            let name = event
+                .container_name
+                .as_deref()
+                .unwrap_or(&event.container_id);
+            let style = match event.action.as_str() {
+                "die" | "stop" => "red",
+                "start" => "green",
+                _ => "yellow",
+            };
+            let styled = match style {
+                "red" => format!("{} {} ({})", event.action, name, event.container_id).red(),
+                "green" => format!("{} {} ({})", event.action, name, event.container_id).green(),
+                _ => format!("{} {} ({})", event.action, name, event.container_id).yellow(),
+            };
+            println!("{}", styled);
+        }
+    }
+}
+
+/// CLI `proc docker exec <container> [cmd...]`（阶段 9 E2）。
+///
+/// 直接 spawn `docker exec -it <container> <cmd>`，docker CLI 接管 stdio，
+/// 用户的终端 = 远端 PTY（无需 proc 自身的 PTY 桥接）。
+///
+/// TUI 内按 `e` 走另一条路：[`crate::tui::container_exec_view`] 嵌入式 PTY 视图。
+fn run_docker_exec(monitor: &docker::DockerMonitor, container: &str, cmd: &[String]) {
+    use std::process::Command;
+
+    // 容器存在性检查：友好错误优于 docker CLI 的晦涩报错。
+    let containers = monitor.list_containers(true).unwrap_or_default();
+    let found = containers
+        .iter()
+        .find(|c| c.name == container || c.id.starts_with(container));
+    let Some(found) = found else {
+        eprintln!("{}", format!("容器 '{}' 未找到", container).red());
+        std::process::exit(1);
+    };
+
+    // cmd 为空时根据 image 推断 shell；非空时透传用户命令。
+    let inferred_shell = if cmd.is_empty() {
+        docker::exec::detect_default_shell(&found.image)
+    } else {
+        ""
+    };
+
+    let mut command = Command::new("docker");
+    command.arg("exec").arg("-it").arg(container);
+    if cmd.is_empty() {
+        for token in inferred_shell.split_whitespace() {
+            command.arg(token);
+        }
+    } else {
+        for token in cmd {
+            command.arg(token);
+        }
+    }
+
+    match command.status() {
+        Ok(status) => {
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+        Err(e) => {
+            eprintln!("{} {}", "exec 失败（确认 PATH 有 docker）:".red(), e);
+            std::process::exit(1);
+        }
+    }
+}
+
+// ── 阶段 4 CLI：who / handles / priority / affinity ─────────────────────────
+
+fn run_who(path: &std::path::Path) {
+    let handles = match proc::inspect::handles::find_lockers(path) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{} {}", "反查失败:".red(), e);
+            std::process::exit(1);
+        }
+    };
+    if handles.is_empty() {
+        // filelocksmith 在非管理员账户下看不到系统进程句柄；空结果绝大多数是这个原因。
+        println!(
+            "{}",
+            "未发现占用此路径的进程（提示：枚举系统进程句柄需要管理员权限）".yellow()
+        );
+        return;
+    }
+    let mut table = comfy_table::Table::new();
+    table.set_header(vec!["PID", "进程名", "类型", "路径"]);
+    for h in &handles {
+        // find_lockers 反查路径下 raw_handle 字段被借用来存 PID（见模块注释）。
+        let pid = h.raw_handle;
+        let name = pid_to_name(pid as u32);
+        table.add_row(vec![
+            pid.to_string(),
+            name,
+            h.kind.label().to_string(),
+            h.name.clone(),
+        ]);
+    }
+    println!("{table}");
+}
+
+fn run_handles(pid: &Option<u32>, file: &Option<std::path::PathBuf>) {
+    match (pid, file) {
+        (Some(pid), None) => run_handles_pid(*pid),
+        (None, Some(path)) => run_who(path),
+        (Some(_), Some(_)) => {
+            eprintln!("{}", "--pid 与 --file 互斥，请二选一".red());
+            std::process::exit(1);
+        }
+        (None, None) => {
+            eprintln!(
+                "{}",
+                "用法: proc handles --pid <PID>   或   proc handles --file <PATH>".red()
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_handles_pid(pid: u32) {
+    let handles = match proc::inspect::handles::collect_handles(pid) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{} {}", "枚举句柄失败:".red(), e);
+            std::process::exit(1);
+        }
+    };
+    if handles.is_empty() {
+        println!(
+            "{}",
+            format!("PID {} 当前无可见句柄（权限不足或进程已退出）", pid).yellow()
+        );
+        return;
+    }
+    let mut table = comfy_table::Table::new();
+    table.set_header(vec!["类型", "名称", "句柄", "访问"]);
+    for h in &handles {
+        let name = if h.name.is_empty() {
+            "-".to_string()
+        } else {
+            h.name.clone()
+        };
+        let access = if h.granted_access == 0 {
+            "-".to_string()
+        } else {
+            format!("0x{:08X}", h.granted_access)
+        };
+        table.add_row(vec![
+            h.kind.label().to_string(),
+            name,
+            format!("0x{:X}", h.raw_handle),
+            access,
+        ]);
+    }
+    println!("{table}");
+}
+
+fn run_priority(pid: u32, set: &Option<String>) {
+    use proc::process_control::{get_priority, set_priority};
+    match set {
+        None => match get_priority(pid) {
+            Ok(class) => println!("PID {} 优先级: {}", pid, class.label()),
+            Err(e) => {
+                eprintln!("{} {}", "查询失败:".red(), e);
+                std::process::exit(1);
+            }
+        },
+        Some(class_str) => {
+            let class = match parse_priority_class(class_str) {
+                Ok(c) => c,
+                Err(msg) => {
+                    eprintln!("{} {}", "参数错误:".red(), msg);
+                    std::process::exit(1);
+                }
+            };
+            match set_priority(pid, class) {
+                Ok(()) => println!(
+                    "{}",
+                    format!("PID {} 优先级已设置为 {}", pid, class.label()).green()
+                ),
+                Err(e) => {
+                    eprintln!("{} {}", "设置失败:".red(), e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+fn parse_priority_class(
+    s: &str,
+) -> std::result::Result<proc::process_control::PriorityClass, String> {
+    use proc::process_control::PriorityClass;
+    match s.to_lowercase().as_str() {
+        "idle" => Ok(PriorityClass::Idle),
+        "belownormal" | "below_normal" | "below" => Ok(PriorityClass::BelowNormal),
+        "normal" => Ok(PriorityClass::Normal),
+        "abovenormal" | "above_normal" | "above" => Ok(PriorityClass::AboveNormal),
+        "high" => Ok(PriorityClass::High),
+        "realtime" => Ok(PriorityClass::Realtime),
+        _ => Err(format!(
+            "未知优先级 '{}'（合法值：idle / belownormal / normal / abovenormal / high / realtime）",
+            s
+        )),
+    }
+}
+
+fn run_affinity(pid: u32, set: &Option<String>) {
+    use proc::process_control::{get_affinity, set_affinity};
+    match set {
+        None => match get_affinity(pid) {
+            Ok(mask) => println!(
+                "PID {} affinity: 0x{:X} ({} 核)",
+                pid,
+                mask,
+                u64::count_ones(mask)
+            ),
+            Err(e) => {
+                eprintln!("{} {}", "查询失败:".red(), e);
+                std::process::exit(1);
+            }
+        },
+        Some(hex_str) => {
+            let trimmed = hex_str.trim_start_matches("0x").trim_start_matches("0X");
+            let mask = match u64::from_str_radix(trimmed, 16) {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!(
+                        "{}",
+                        format!("--set 期望 16 进制（如 0xFF），实际 '{}'", hex_str).red()
+                    );
+                    std::process::exit(1);
+                }
+            };
+            match set_affinity(pid, mask) {
+                Ok(()) => println!(
+                    "{}",
+                    format!("PID {} affinity 已设置为 0x{:X}", pid, mask).green()
+                ),
+                Err(e) => {
+                    eprintln!("{} {}", "设置失败:".red(), e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+/// 用 sysinfo 反查 PID → 进程名。失败时返回 "?"。
+fn pid_to_name(pid: u32) -> String {
+    proc::collect::sysinfo_with(|sys| {
+        sys.process(sysinfo::Pid::from_u32(pid))
+            .map(|p| p.name().to_string_lossy().to_string())
+            .unwrap_or_else(|| "?".to_string())
+    })
+}
+
+// ── 阶段 8 CLI:dns ───────────────────────────────────────────────────────
+
+/// `proc dns` 子命令：流式输出 DNS 查询日志。仅 Windows 平台（其它平台
+/// [`proc::dns_log::detect_collector`] 返回 None，给出降级提示）。
+fn run_dns(tail: bool, since: Option<&str>) {
+    if let Some(s) = since {
+        // 隐私约束：DNS 查询不持久化；`--since` 需要从持久化源（Windows EventLog）
+        // 读历史。本阶段未实现历史读取（需要单独的 Get-WinEvent 一次性查询路径），
+        // 留作未来工作 —— stage-8.md §7 明确「需要持久化？本阶段不做，留 TODO」。
+        eprintln!(
+            "{}",
+            "--since 暂未实现：DNS 日志仅内存缓冲，不持久化。请用 --tail 实时跟随。".yellow()
+        );
+        let _ = s;
+        return;
+    }
+
+    let Some(collector) = proc::dns_log::detect_collector() else {
+        eprintln!(
+            "{}",
+            "DNS 日志采集在此平台不可用（Windows 走 PowerShell Get-WinEvent，其它见 ADR-0006）"
+                .yellow()
+        );
+        return;
+    };
+
+    println!("{}", "DNS 日志跟随中（仅内存 · Ctrl+C 退出）...".cyan());
+    let mut collector = collector;
+
+    // tail 模式：每 500ms drain collector，新事件打 stdout。
+    // 非 tail 模式：drain 一次拿现有事件，然后退出（与 --since 互补）。
+    let poll = std::time::Duration::from_millis(500);
+    let mut printed_any = false;
+    loop {
+        let queries = collector.drain();
+        for q in &queries {
+            println!("{q}");
+            printed_any = true;
+        }
+        if proc::shutdown::requested() {
+            break;
+        }
+        if !tail {
+            if !printed_any {
+                eprintln!(
+                    "{}",
+                    "当前暂无 DNS 查询日志（启动浏览器或 curl 触发，或用 --tail 持续跟随）"
+                        .yellow()
+                );
+            }
+            break;
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+// ── 阶段 5 CLI:smart ──────────────────────────────────────────────────────
+
+fn run_smart(device: Option<&str>) {
+    match device {
+        Some(dev) => run_smart_detail(dev),
+        None => run_smart_list(),
+    }
+}
+
+fn run_smart_list() {
+    let disks = proc::smart::list_disks();
+    if disks.is_empty() {
+        println!(
+            "{}",
+            "未发现可查询的磁盘(Linux 看 /sys/block,Windows 走 WMI Win32_DiskDrive)".yellow()
+        );
+        return;
+    }
+    let mut table = comfy_table::Table::new();
+    table.set_header(vec!["设备", "型号", "序列号", "健康", "温度", "属性数"]);
+    let mut any_data = false;
+    for dev in &disks {
+        match proc::smart::read_smart(dev) {
+            Ok(data) => {
+                any_data = true;
+                let temp = data
+                    .temperature
+                    .map(|t| format!("{:.1}\u{00B0}C", t))
+                    .unwrap_or_else(|| "-".to_string());
+                table.add_row(vec![
+                    data.device.clone(),
+                    data.model.clone(),
+                    data.serial.clone(),
+                    format!("{} {:?}", data.health.badge(), data.health),
+                    temp,
+                    data.attributes.len().to_string(),
+                ]);
+            }
+            Err(e) => {
+                table.add_row(vec![
+                    dev.clone(),
+                    "-".to_string(),
+                    "-".to_string(),
+                    "无数据".to_string(),
+                    "-".to_string(),
+                    format!("（{}）", e),
+                ]);
+            }
+        }
+    }
+    println!("{table}");
+    if !any_data {
+        println!(
+            "{}",
+            "提示: 多数 Linux 装包带 smartmontools,Windows 装上 smartmontools 后 JSON 解析更完整"
+                .yellow()
+        );
+    }
+}
+
+fn run_smart_detail(device: &str) {
+    let data = match proc::smart::read_smart(device) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{} 读取 {} SMART 数据失败: {}", "错误:".red(), device, e);
+            std::process::exit(1);
+        }
+    };
+    println!("{}", format!("磁盘: {}", data.device).cyan());
+    println!("型号: {}", data.model);
+    println!("序列号: {}", data.serial);
+    println!(
+        "温度: {}",
+        data.temperature
+            .map(|t| format!("{:.1}\u{00B0}C", t))
+            .unwrap_or_else(|| "未知".to_string())
+    );
+    println!("健康: {} {:?}", data.health.badge(), data.health);
+    if data.attributes.is_empty() {
+        println!(
+            "{}",
+            "（无详细 SMART 属性 —— Windows 走 WMI 降级时常见,装 smartmontools 可拿完整表）"
+                .yellow()
+        );
+        return;
+    }
+    println!();
+    let mut table = comfy_table::Table::new();
+    table.set_header(vec!["ID", "名称", "当前值", "阈值", "原始值", "失败"]);
+    for attr in &data.attributes {
+        table.add_row(vec![
+            format!("{:3}", attr.id),
+            attr.name.clone(),
+            attr.value.to_string(),
+            attr.threshold.to_string(),
+            attr.raw_value.to_string(),
+            if attr.failing { "✗" } else { "-" }.to_string(),
+        ]);
+    }
+    println!("{table}");
 }

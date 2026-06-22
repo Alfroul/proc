@@ -1,0 +1,41 @@
+name: Miri
+
+# 阶段 2 — H4：Miri 并发 UB 检测 CI。
+# 仅跑 Linux（Miri 对 Windows 支持差），覆盖 BackgroundScorer 与 SnapshotWorker
+# 两个并发单元的 5 + 4 共 9 个并发测试。Miri 不支持 --release，跑 debug 即可。
+#
+# 首次接入用 continue-on-error: true 容错；若 Miri 报 UB 则在 PR 内修复，
+# 修复稳定后再把 continue-on-error 去掉。
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+
+      # Cargo.lock 里 sysinfo / bollard 等 dev-dependency 偶尔依赖 nightly 特性。
+      # 这里只测试 tests/test_scorer_concurrency.rs 和 tests/test_workers.rs 两个
+      # 集成测试二进制，避免把整个 workspace 喂给 Miri（编译时间长 + 无关测试多）。
+      - name: cargo miri setup
+        run: cargo +nightly miri setup
+
+      - name: miri test_scorer_concurrency
+        continue-on-error: true
+        run: cargo +nightly miri test --tests --test test_scorer_concurrency
+
+      - name: miri test_workers
+        continue-on-error: true
+        run: cargo +nightly miri test --tests --test test_workers

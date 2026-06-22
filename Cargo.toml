@@ -35,6 +35,11 @@ toml = "0.8"
 sha2 = "0.10"
 ctrlc = "3"
 unicode-width = "0.2"
+# 阶段 9 E2：exec 进容器（PTY 集成）
+# portable-pty 跨平台 PTY 抽象（Windows ConPTY / Linux POSIX PTY）；
+# vt100 解析 docker exec 输出字节流，提供 Screen 状态用于 ratatui 渲染。
+portable-pty = "0.9"
+vt100 = "0.15"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.57", features = [
@@ -56,6 +61,7 @@ windows = { version = "0.57", features = [
     "Win32_Security_WinTrust",
     "Win32_System_Power",
     "Win32_System_Time",
+    "Win32_System_LibraryLoader",
     "Wdk_System_Threading",
 ] }
 filelocksmith = "2"
@@ -68,8 +74,13 @@ optional = true
 libc = "0.2"
 
 [features]
-default = ["nvidia"]
+default = ["nvidia", "nvtop", "nethogs"]
 nvidia = ["nvml-wrapper"]
+# nvtop 走子进程（无新 native 依赖）；feature 关闭时 NvtopProvider 不编译。
+nvtop = []
+# nethogs 走子进程（无新 native 依赖）；feature 关闭时 NethogsCollector 不编译。
+# 仅 Linux 平台生效；Windows / macOS 上 detect_collector 直接返回 None。
+nethogs = []
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,7 +1,7 @@
 use proc::alert::{AlertManager, AlertSeverity, ComparisonOp, MetricName};
 use proc::app::{App, AppMode};
 use proc::app_group::{AppGroup, AppGroupProcess, VersionInfo};
-use proc::cli::{Cli, Command};
+use proc::cli::{Cli, Command, DockerSub};
 use proc::collect::{DiskIoInfo, ProcessInfo, ProcessViewMode, SystemSnapshot};
 use proc::error::ProcError;
 use proc::record::{FrameProcess, UiFrame};
@@ -126,7 +126,7 @@ fn test_cli_port_parsing() {
     let cli = Cli::try_parse_from(["proc", "port", "--port", "8080", "--kill"]);
     let cli = cli.expect("CLI parse should succeed");
     match cli.command {
-        Some(Command::Port { port, kill }) => {
+        Some(Command::Port { port, kill, .. }) => {
             assert_eq!(port, Some(8080));
             assert!(kill);
         }
@@ -175,12 +175,12 @@ fn test_cli_monitor_parsing() {
 
 #[test]
 fn test_cli_docker_parsing() {
-    let cli = Cli::try_parse_from(["proc", "docker", "--watch"]);
+    let cli = Cli::try_parse_from(["proc", "docker", "events"]);
     let cli = cli.expect("CLI parse should succeed");
     match cli.command {
-        Some(Command::Docker { watch, container }) => {
-            assert!(watch);
-            assert!(container.is_none());
+        Some(Command::Docker { sub }) => {
+            // 阶段 3 改成嵌套子命令：原 `--watch` 现在是 `docker events`。
+            assert!(matches!(sub, DockerSub::Events));
         }
         _ => panic!("Expected Docker command"),
     }
@@ -236,6 +236,8 @@ fn test_process_info_construction() {
         disk_usage: (100, 50),
         disk_read_speed: 0,
         disk_write_speed: 0,
+        net_sent_rate: 0,
+        net_recv_rate: 0,
         status: "Running".to_string(),
         exe: Some("C:\\test.exe".to_string()),
         cmd: vec!["test.exe".to_string(), "--flag".to_string()],
@@ -449,6 +451,23 @@ fn test_alert_manager_default() {
     assert!(mgr.active_alerts().is_empty());
 }
 
+// --- Stage 1 (0.5.0 Spike): Inspector 占位字段 ---
+
+#[test]
+fn test_app_inspection_handles_and_memory_default_none() {
+    // 阶段 1 只声明 Handles / Memory 占位字段 —— App::new() 必须保证两个都 None。
+    // 阶段 4 上线采集后，这里仍应保持 None（采集后由 switch_mode / r 键填入 Some）。
+    let app = App::new().expect("App::new() should not panic");
+    assert!(
+        app.inspection_handles_data.is_none(),
+        "fresh App should not preload handles data"
+    );
+    assert!(
+        app.inspection_memory_data.is_none(),
+        "fresh App should not preload memory data"
+    );
+}
+
 #[test]
 fn test_security_scorer_returns_100() {
     let mut scorer = SecurityScorer::new();
@@ -461,6 +480,8 @@ fn test_security_scorer_returns_100() {
         disk_usage: (0, 0),
         disk_read_speed: 0,
         disk_write_speed: 0,
+        net_sent_rate: 0,
+        net_recv_rate: 0,
         status: "Running".to_string(),
         exe: Some("C:\\Windows\\System32\\test.exe".to_string()),
         cmd: vec![],

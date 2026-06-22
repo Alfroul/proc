@@ -28,6 +28,8 @@ impl From<&FrameProcess> for ProcessInfo {
             disk_usage: (fp.disk_read, fp.disk_write),
             disk_read_speed: 0,
             disk_write_speed: 0,
+            net_sent_rate: 0,
+            net_recv_rate: 0,
             status: String::new(),
             exe: None,
             cmd: Vec::new(),
@@ -88,6 +90,8 @@ impl From<&FramePortEntry> for PortEntry {
             state: e.state.clone(),
             pid: e.pid,
             process_name: e.process_name.clone(),
+            // 录屏文件未保存 RTT（阶段 5 之前格式），回放时一律按未知。
+            rtt_ms: None,
         }
     }
 }

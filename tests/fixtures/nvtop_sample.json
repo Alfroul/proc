@@ -1,0 +1,23 @@
+[
+  {
+    "device": "NVIDIA GeForce RTX 4070",
+    "temperature": 62.5,
+    "memory": { "used": 2048, "total": 12288 },
+    "gpu_utilization": 78.0,
+    "power": { "used": 175, "total": 285 }
+  },
+  {
+    "device": "AMD Radeon RX 7900 XTX",
+    "temperature": 70.0,
+    "memory": { "used": 4096, "total": 24576 },
+    "gpu_utilization": 45.0,
+    "power": { "used": 230, "total": 355 }
+  },
+  {
+    "device": "Intel Arc A770",
+    "temperature": 55.0,
+    "memory": { "used": 512, "total": 16384 },
+    "gpu_utilization": 12.0,
+    "power": { "used": 45, "total": 225 }
+  }
+]

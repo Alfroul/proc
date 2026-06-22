@@ -5,7 +5,7 @@
 //! 层无状态。
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
@@ -45,6 +45,232 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             let data = app.inspection_data.as_ref();
             draw_dlls_tab(f, body_area, app, data)
         }
+        InspectionTab::Handles => draw_handles_tab(f, body_area, app),
+        InspectionTab::Memory => draw_memory_tab(f, body_area, app),
+    }
+}
+
+// ── Handles Tab（阶段 4，A1） ─────────────────────────────────────────────────
+
+fn draw_handles_tab(f: &mut Frame, area: Rect, app: &App) {
+    use crate::inspect::HandleInfo;
+    use crate::inspect::HandleKind;
+
+    let query = app.inspection_search.query();
+    let mut handles: Vec<&HandleInfo> = match app.inspection_handles_data {
+        None => Vec::new(),
+        Some(ref v) => v
+            .iter()
+            .filter(|h| {
+                if query.is_empty() {
+                    return true;
+                }
+                // 搜类型 / 名称 / 句柄值的 16 进制；name 字段在 Windows v1 上常为空。
+                let q = query.to_lowercase();
+                h.kind.label().to_lowercase().contains(&q)
+                    || h.name.to_lowercase().contains(&q)
+                    || format!("{:x}", h.raw_handle).contains(&q)
+            })
+            .collect(),
+    };
+    // 按类型分组、组内按句柄值排序，UI 稳定。
+    handles.sort_by(|a, b| {
+        a.kind
+            .label()
+            .cmp(b.kind.label())
+            .then(a.raw_handle.cmp(&b.raw_handle))
+    });
+
+    let rows_visible = area.height.saturating_sub(4) as usize;
+    let scroll = app.inspection_scroll.min(handles.len().saturating_sub(1));
+
+    let title = format!(" 句柄列表 ({} 项) | /=搜索 ↑↓=滚动 ", handles.len());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(theme::style_normal());
+
+    if handles.is_empty() {
+        let msg = if app.inspection_handles_data.is_none() {
+            "数据采集中… 按 r 刷新"
+        } else if !query.is_empty() {
+            "无匹配句柄 — 修改搜索或按 Esc 清空"
+        } else {
+            "⚠ 此进程当前无可见句柄 — 可能权限不足或进程已退出（按 r 刷新）"
+        };
+        let p = Paragraph::new(Span::styled(msg, theme::style_warning())).block(block);
+        f.render_widget(p, area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("类型"),
+        Cell::from("名称"),
+        Cell::from("句柄"),
+        Cell::from("访问"),
+    ])
+    .style(theme::style_header());
+
+    let rows: Vec<Row> = handles
+        .iter()
+        .skip(scroll)
+        .take(rows_visible)
+        .map(|h| {
+            let kind_style = match h.kind {
+                HandleKind::File => Style::default().fg(Color::Cyan),
+                HandleKind::RegistryKey | HandleKind::Directory => {
+                    Style::default().fg(Color::Magenta)
+                }
+                HandleKind::Mutant | HandleKind::Semaphore | HandleKind::Event => {
+                    Style::default().fg(Color::Yellow)
+                }
+                _ => theme::style_normal(),
+            };
+            let name = if h.name.is_empty() {
+                "-".to_string()
+            } else {
+                h.name.clone()
+            };
+            let access = if h.granted_access == 0 {
+                "-".to_string()
+            } else {
+                format!("0x{:08X}", h.granted_access)
+            };
+            Row::new(vec![
+                Cell::from(h.kind.label()).style(kind_style),
+                Cell::from(name).style(theme::style_normal()),
+                Cell::from(format!("0x{:X}", h.raw_handle)).style(theme::style_muted()),
+                Cell::from(access).style(theme::style_muted()),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(14),
+            Constraint::Min(30),
+            Constraint::Length(18),
+            Constraint::Length(12),
+        ],
+    )
+    .header(header)
+    .block(block);
+
+    f.render_widget(table, area);
+}
+
+// ── Memory Tab（阶段 4，A3） ─────────────────────────────────────────────────
+
+fn draw_memory_tab(f: &mut Frame, area: Rect, app: &App) {
+    use crate::inspect::MemoryRegion;
+
+    let query = app.inspection_search.query();
+    let mut regions: Vec<&MemoryRegion> = match app.inspection_memory_data {
+        None => Vec::new(),
+        Some(ref v) => v
+            .iter()
+            .filter(|r| {
+                if query.is_empty() {
+                    return true;
+                }
+                // 搜保护字符串 / 名称；base/size 数字不搜。
+                let q = query.to_lowercase();
+                r.protection.to_lowercase().contains(&q) || r.name.to_lowercase().contains(&q)
+            })
+            .collect(),
+    };
+    // 按基址升序，让相邻 region 视觉上靠在一起。
+    regions.sort_by_key(|r| r.base_addr);
+
+    let rows_visible = area.height.saturating_sub(4) as usize;
+    let scroll = app.inspection_scroll.min(regions.len().saturating_sub(1));
+
+    let total_size: u64 = regions.iter().map(|r| r.size).sum();
+    let title = format!(
+        " 内存映射 ({} 区域 / 共 {}) | /=搜索 ↑↓=滚动 ",
+        regions.len(),
+        format_bytes(total_size)
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(theme::style_normal());
+
+    if regions.is_empty() {
+        let msg = if app.inspection_memory_data.is_none() {
+            "数据采集中… 按 r 刷新"
+        } else if !query.is_empty() {
+            "无匹配区域 — 修改搜索或按 Esc 清空"
+        } else {
+            "⚠ 此进程当前无可见内存区域 — 可能权限不足或进程已退出（按 r 刷新）"
+        };
+        let p = Paragraph::new(Span::styled(msg, theme::style_warning())).block(block);
+        f.render_widget(p, area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("基址"),
+        Cell::from("大小"),
+        Cell::from("状态"),
+        Cell::from("保护"),
+        Cell::from("映射文件"),
+    ])
+    .style(theme::style_header());
+
+    let rows: Vec<Row> = regions
+        .iter()
+        .skip(scroll)
+        .take(rows_visible)
+        .map(|r| {
+            let state_style = match r.state {
+                crate::inspect::MemoryState::Commit => Style::default().fg(Color::Green),
+                crate::inspect::MemoryState::Reserve => Style::default().fg(Color::Yellow),
+                crate::inspect::MemoryState::Free => Style::default().fg(Color::DarkGray),
+                _ => theme::style_normal(),
+            };
+            let name = if r.name.is_empty() {
+                "-".to_string()
+            } else {
+                r.name.clone()
+            };
+            Row::new(vec![
+                Cell::from(format!("0x{:016X}", r.base_addr)).style(theme::style_muted()),
+                Cell::from(format_bytes(r.size)).style(theme::style_normal()),
+                Cell::from(state_label(r.state)).style(state_style),
+                Cell::from(r.protection.clone()).style(theme::style_normal()),
+                Cell::from(name).style(theme::style_muted()),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(20),
+            Constraint::Length(12),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Min(30),
+        ],
+    )
+    .header(header)
+    .block(block);
+
+    f.render_widget(table, area);
+}
+
+#[must_use]
+fn state_label(state: crate::inspect::MemoryState) -> &'static str {
+    use crate::inspect::MemoryState;
+    match state {
+        MemoryState::Commit => "Commit",
+        MemoryState::Reserve => "Reserve",
+        MemoryState::Free => "Free",
+        MemoryState::Private => "Private",
+        MemoryState::Shared => "Shared",
+        MemoryState::Unknown => "?",
     }
 }
 
@@ -170,6 +396,25 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
         )),
     ];
 
+    // 阶段 4 A4：Summary 显示优先级 + affinity（同步查 OpenProcess + Get*Class，
+    // 单次 < 1ms，每帧调可接受；用户切 +/- 即时反馈）。
+    let priority_label = match crate::process_control::get_priority(proc.pid) {
+        Ok(class) => class.label().to_string(),
+        Err(_) => "-".to_string(),
+    };
+    let affinity_label = match crate::process_control::get_affinity(proc.pid) {
+        Ok(mask) => format!("0x{:X} (CPU 数: {})", mask, u64::count_ones(mask)),
+        Err(_) => "-".to_string(),
+    };
+    lines.push(Line::from(Span::styled(
+        format!("  优先级:   {}  (+/- 调整)", priority_label),
+        theme::style_normal(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  Affinity: {}", affinity_label),
+        theme::style_muted(),
+    )));
+
     if net_summary.tcp_connections > 0 || net_summary.udp_connections > 0 {
         let close_wait_style = if net_summary.close_wait >= 10 {
             theme::style_danger()
@@ -250,7 +495,7 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
         theme::style_normal(),
     )));
     lines.push(Line::from(Span::styled(
-        "  Tab=切Tab  /=搜索  r=刷新  k=终止  w=监控  c=复制  Esc=返回".to_string(),
+        "  Tab=切Tab  /=搜索  r=刷新  k=终止  w=监控  c=复制  +/-=优先级  Esc=返回".to_string(),
         theme::style_normal(),
     )));
 
@@ -328,6 +573,110 @@ fn draw_env_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&InspectionDa
 // ── Network Tab ──────────────────────────────────────────────────────────────
 
 fn draw_network_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&InspectionData>) {
+    // 阶段 8 D3：顶部加「最近 5 条 DNS 查询」（按 PID 过滤）。
+    // 没有 DNS 数据时（worker 未启动 / 此 PID 未查 DNS）省略，避免占垂直空间。
+    let pid = app.detail_process.as_ref().map(|p| p.pid);
+    let dns_recent_for_pid: Vec<&crate::dns_log::DnsQuery> = match pid {
+        Some(pid) => app
+            .dns_log_recent
+            .iter()
+            .rev()
+            .filter(|q| q.pid == pid)
+            .take(5)
+            .collect(),
+        None => Vec::new(),
+    };
+
+    let inner_area = if dns_recent_for_pid.is_empty() {
+        area
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(8), Constraint::Min(0)])
+            .split(area);
+        draw_dns_recent_for_pid(f, chunks[0], &dns_recent_for_pid);
+        chunks[1]
+    };
+
+    draw_network_connections(f, inner_area, app, data);
+}
+
+/// 阶段 8 D3：Network Tab 顶部「最近 5 条 DNS 查询」面板。
+fn draw_dns_recent_for_pid(f: &mut Frame, area: Rect, queries: &[&crate::dns_log::DnsQuery]) {
+    use crate::dns_log::DnsResult;
+
+    let header = Row::new(vec![
+        Cell::from("时间"),
+        Cell::from("类型"),
+        Cell::from("域名"),
+        Cell::from("结果"),
+    ])
+    .style(theme::style_header());
+
+    let rows: Vec<Row> = queries
+        .iter()
+        .map(|q| {
+            let ts = format_system_time_short(q.timestamp);
+            let result_str = match &q.result {
+                DnsResult::Success(ips) => {
+                    if ips.is_empty() {
+                        "OK".to_string()
+                    } else {
+                        let joined = ips
+                            .iter()
+                            .map(std::net::IpAddr::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!("OK:{joined}")
+                    }
+                }
+                DnsResult::NxDomain => "NXDOMAIN".to_string(),
+                DnsResult::Timeout => "TIMEOUT".to_string(),
+                DnsResult::Error(s) => format!("ERR:{s}"),
+            };
+            Row::new(vec![
+                Cell::from(ts),
+                Cell::from(q.query_type.clone()),
+                Cell::from(q.query_name.clone()),
+                Cell::from(result_str),
+            ])
+            .style(theme::style_normal())
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(6),
+            Constraint::Min(20),
+            Constraint::Length(30),
+        ],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" 最近 DNS 查询（仅内存 · 最多 5 条） "),
+    );
+    f.render_widget(table, area);
+}
+
+fn format_system_time_short(t: std::time::SystemTime) -> String {
+    let dur = match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d,
+        Err(_) => return "?".into(),
+    };
+    let secs = dur.as_secs();
+    let offset = crate::local_offset_hours() * 3600;
+    let local = (secs as i64 + offset).max(0) as u64;
+    let h = ((local % 86_400) / 3600) as u32;
+    let m = ((local % 3600) / 60) as u32;
+    let s = (local % 60) as u32;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+fn draw_network_connections(f: &mut Frame, area: Rect, app: &App, data: Option<&InspectionData>) {
     // Network Tab 不接搜索 —— 数据量通常很小；用户可走主面板 PortMap 深查。
     let entries: Vec<&crate::port_map::PortEntry> = match data {
         None => Vec::new(),
@@ -359,6 +708,7 @@ fn draw_network_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&Inspecti
         Cell::from("本地"),
         Cell::from("远程"),
         Cell::from("状态"),
+        Cell::from("RTT"),
         Cell::from("PID"),
         Cell::from("进程名"),
     ])
@@ -379,11 +729,18 @@ fn draw_network_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&Inspecti
                 (Some(addr), Some(port)) => format!("{}:{}", addr, port),
                 _ => "-".to_string(),
             };
+            // RTT:Windows 管理员模式下由 GetPerTcpConnectionEStats 填充;
+            // 其它平台 / 非 admin 默认 None → 显示 "-" 避免误读为"零延迟"。
+            let rtt_cell = match e.rtt_ms {
+                Some(ms) => Cell::from(format!("{}ms", ms)),
+                None => Cell::from("-"),
+            };
             Row::new(vec![
                 Cell::from(format!("[{}]", e.protocol)).style(proto_style),
                 Cell::from(local),
                 Cell::from(remote),
                 Cell::from(e.state.clone().unwrap_or_else(|| "-".to_string())),
+                rtt_cell,
                 Cell::from(e.pid.to_string()),
                 Cell::from(e.process_name.clone()),
             ])
@@ -395,11 +752,12 @@ fn draw_network_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&Inspecti
         rows,
         [
             Constraint::Length(6),
-            Constraint::Min(22),
-            Constraint::Min(22),
-            Constraint::Length(12),
+            Constraint::Min(20),
+            Constraint::Min(20),
+            Constraint::Length(11),
+            Constraint::Length(8),
             Constraint::Length(7),
-            Constraint::Min(12),
+            Constraint::Min(10),
         ],
     )
     .header(header)

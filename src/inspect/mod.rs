@@ -9,6 +9,8 @@
 
 pub mod dlls;
 pub mod env;
+pub mod handles;
+pub mod memory;
 pub mod net;
 
 /// 单条环境变量。
@@ -24,6 +26,88 @@ pub struct DllInfo {
     pub path: String,
     pub base_addr: u64,
     pub size: u64,
+}
+
+/// 进程打开的一条句柄（阶段 4 上线，阶段 1 仅声明骨架）。
+///
+/// 阶段 4 计划字段：
+/// - `raw_handle`：Windows HANDLE / Linux fd
+/// - `kind`：File / RegistryKey / Event / Semaphore / Mutant / Section / Process / Thread / ...
+/// - `name`：可读对象名（NT 路径 / Win32 路径 / 注册表路径 / 空）
+/// - `granted_access`：访问掩码（仅 Windows 有意义）
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HandleInfo {
+    pub raw_handle: u64,
+    pub kind: HandleKind,
+    pub name: String,
+    pub granted_access: u32,
+}
+
+/// 句柄对象分类（阶段 4 上线时填具体采集路径）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HandleKind {
+    #[default]
+    Unknown,
+    File,
+    Directory,
+    RegistryKey,
+    Event,
+    Semaphore,
+    Mutant,
+    Section,
+    Process,
+    Thread,
+    Token,
+    Other,
+}
+
+impl HandleKind {
+    /// UI / CLI 渲染用的稳定文字（与 InspectionTab::label 同样的设计：测试 anchor）。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::File => "File",
+            Self::Directory => "Directory",
+            Self::RegistryKey => "RegistryKey",
+            Self::Event => "Event",
+            Self::Semaphore => "Semaphore",
+            Self::Mutant => "Mutant",
+            Self::Section => "Section",
+            Self::Process => "Process",
+            Self::Thread => "Thread",
+            Self::Token => "Token",
+            Self::Other => "Other",
+        }
+    }
+}
+
+/// 一条内存映射区域（阶段 4 上线，阶段 1 仅声明骨架）。
+///
+/// 阶段 4 计划字段：
+/// - `base_addr` / `size`：区域范围（字节）
+/// - `state`：Commit / Reserve / Free（Win32）；Linux 取自 maps 第 2 列
+/// - `protection`：rwx 字符串（Linux）或 Win32 PAGE_PROTECTION_FLAGS
+/// - `name`：映射名（文件路径 / heap / stack / 匿名）
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MemoryRegion {
+    pub base_addr: u64,
+    pub size: u64,
+    pub state: MemoryState,
+    pub protection: String,
+    pub name: String,
+}
+
+/// 内存区域状态（阶段 4 上线时填具体采集路径）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryState {
+    #[default]
+    Unknown,
+    Commit,
+    Reserve,
+    Free,
+    Private,
+    Shared,
 }
 
 /// Inspector 一次采集的完整快照。三个 Vec 互不依赖，单 Tab 失败不影响其它。

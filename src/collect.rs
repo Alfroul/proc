@@ -233,6 +233,8 @@ fn collect_missing_processes(
                     disk_usage: (0, 0),
                     disk_read_speed: 0,
                     disk_write_speed: 0,
+                    net_sent_rate: 0,
+                    net_recv_rate: 0,
                     status: "Run".to_string(),
                     exe,
                     cmd: Vec::new(),
@@ -285,13 +287,29 @@ pub struct NetAdapterInfo {
     pub ipv4: Option<String>,
 }
 
-/// TCP 连接统计
+/// TCP 连接统计。
+///
+/// `retransmitted_segs` / `reset_segs` / `failed_connections` 是阶段 5 D2
+/// 引入的「传输质量」指标：
+/// - retransmitted_segs：累计重传段数（Windows `dwRetransSegs` / Linux
+///   `/proc/net/snmp` 的 `RetransSegs`）。
+/// - reset_segs：累计发送的 RST 段数（Windows `dwOutRsts` / Linux `OutRsts`）。
+/// - failed_connections：失败的连接尝试（Windows `dwAttemptFails` / Linux
+///   `AttemptFails`）。Windows / Linux 都能在普通权限下拿到。
+///
+/// 这些是**累计计数**，不是速率；UI 显示时需要做 delta 来换算成速率。
 #[derive(Debug, Clone, Default)]
 pub struct TcpStats {
     pub established: usize,
     pub time_wait: usize,
     pub close_wait: usize,
     pub listen: usize,
+    pub retransmitted_segs: u64,
+    pub reset_segs: u64,
+    pub failed_connections: u64,
+    /// 累计输出段数,作为重传率 / RST 率的分母。Windows `dw64OutSegs`
+    /// / Linux `/proc/net/snmp` 的 `OutSegs`。
+    pub out_segs: u64,
 }
 
 /// 查询所有网卡的 IPv4 地址（Windows API GetAdaptersAddresses）
@@ -376,9 +394,17 @@ fn query_adapter_ipv4_addresses() -> Vec<NetAdapterInfo> {
     Vec::new()
 }
 
-/// 查询 TCP 连接状态统计（轻量版，只计数不关联进程）
+/// 查询 TCP 连接状态统计（轻量版，只计数不关联进程）+ 传输质量计数。
+///
+/// 传输质量指标（`retransmitted_segs` / `reset_segs` / `failed_connections`）
+/// 来自 `GetTcpStatisticsEx2` 的 `MIB_TCPSTATS2`，按 IPv4 + IPv6 各跑一次
+/// 再累加 —— 同样的值在 `GetTcpStatistics2` 上会重复（family-agnostic 时
+/// Windows 内部把两栈合并），所以这里只读 Ex2。
 #[cfg(target_os = "windows")]
 fn query_tcp_stats() -> TcpStats {
+    use windows::Win32::NetworkManagement::IpHelper::{GetTcpStatisticsEx2, MIB_TCPSTATS2};
+    use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+
     let af_flags = netstat2::AddressFamilyFlags::IPV4 | netstat2::AddressFamilyFlags::IPV6;
     let proto_flags = netstat2::ProtocolFlags::TCP;
 
@@ -402,14 +428,58 @@ fn query_tcp_stats() -> TcpStats {
         }
     }
 
+    // IPv4 + IPv6 各一份，累加。GetTcpStatisticsEx2 返回 0 表示成功；
+    // 失败（非管理员 / 无 TCP 协议栈）时静默保留 0 —— 不影响 established 计数。
+    for family in [AF_INET.0 as u32, AF_INET6.0 as u32] {
+        let mut raw: MIB_TCPSTATS2 = unsafe { std::mem::zeroed() };
+        let rv = unsafe { GetTcpStatisticsEx2(&mut raw, family) };
+        if rv != 0 {
+            continue;
+        }
+        stats.retransmitted_segs += raw.dwRetransSegs as u64;
+        stats.reset_segs += raw.dwOutRsts as u64;
+        stats.failed_connections += raw.dwAttemptFails as u64;
+        stats.out_segs += raw.dw64OutSegs;
+    }
+
     stats
 }
 
 #[cfg(not(target_os = "windows"))]
 fn query_tcp_stats() -> TcpStats {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| tracing::warn!("query_tcp_stats is not supported on this platform"));
-    TcpStats::default()
+    use crate::port_map::TcpState;
+
+    let mut stats = TcpStats::default();
+
+    // 连接状态计数：Linux 上 netstat2 同样能跑（走 /proc/net/tcp），所以
+    // 与 Windows 一样在状态机里统计。失败时降级为 0。
+    let af_flags = netstat2::AddressFamilyFlags::IPV4 | netstat2::AddressFamilyFlags::IPV6;
+    let proto_flags = netstat2::ProtocolFlags::TCP;
+    if let Ok(sockets_info) = netstat2::get_sockets_info(af_flags, proto_flags) {
+        for si in &sockets_info {
+            if let netstat2::ProtocolSocketInfo::Tcp(tcp) = &si.protocol_socket_info {
+                let state_str = format!("{}", tcp.state);
+                match TcpState::from_state_str(Some(&state_str)) {
+                    TcpState::Established => stats.established += 1,
+                    TcpState::TimeWait => stats.time_wait += 1,
+                    TcpState::CloseWait => stats.close_wait += 1,
+                    TcpState::Listen => stats.listen += 1,
+                    TcpState::Other => {}
+                }
+            }
+        }
+    }
+
+    // 传输质量：/proc/net/snmp 路径有则解析，无则静默保留 0。
+    if let Ok(snmp) = std::fs::read_to_string("/proc/net/snmp") {
+        let parsed = crate::port_map::parse_proc_net_snmp_tcp(&snmp);
+        stats.retransmitted_segs += parsed.retrans_segs;
+        stats.reset_segs += parsed.out_rsts;
+        stats.failed_connections += parsed.attempt_fails;
+        stats.out_segs += parsed.out_segs;
+    }
+
+    stats
 }
 
 /// 进程信息
@@ -426,6 +496,10 @@ pub struct ProcessInfo {
     pub disk_read_speed: u64,
     /// Disk write speed in bytes/sec (computed from delta / elapsed)
     pub disk_write_speed: u64,
+    /// 上行字节速率 bytes/sec（阶段 7 D1，net_flow worker 推送；worker 不可用时保持 0）
+    pub net_sent_rate: u64,
+    /// 下行字节速率 bytes/sec（阶段 7 D1，net_flow worker 推送；worker 不可用时保持 0）
+    pub net_recv_rate: u64,
     pub status: String,
     pub exe: Option<String>,
     pub cmd: Vec<String>,
@@ -486,6 +560,10 @@ pub enum SortField {
     Security,
     DiskRead,
     DiskWrite,
+    /// 阶段 7 D1：按上行字节速率排序
+    NetSent,
+    /// 阶段 7 D1：按下行字节速率排序
+    NetRecv,
 }
 
 impl SortField {
@@ -499,6 +577,8 @@ impl SortField {
             Self::Security => "安全分",
             Self::DiskRead => "磁盘R",
             Self::DiskWrite => "磁盘W",
+            Self::NetSent => "↑网络",
+            Self::NetRecv => "↓网络",
         }
     }
 
@@ -512,7 +592,9 @@ impl SortField {
             Self::Name => Self::Security,
             Self::Security => Self::DiskRead,
             Self::DiskRead => Self::DiskWrite,
-            Self::DiskWrite => Self::Cpu,
+            Self::DiskWrite => Self::NetSent,
+            Self::NetSent => Self::NetRecv,
+            Self::NetRecv => Self::Cpu,
         }
     }
 
@@ -520,13 +602,15 @@ impl SortField {
     #[must_use]
     pub fn prev(&self) -> Self {
         match self {
-            Self::Cpu => Self::DiskWrite,
+            Self::Cpu => Self::NetRecv,
             Self::Memory => Self::Cpu,
             Self::Pid => Self::Memory,
             Self::Name => Self::Pid,
             Self::Security => Self::Name,
             Self::DiskRead => Self::Security,
             Self::DiskWrite => Self::DiskRead,
+            Self::NetSent => Self::DiskWrite,
+            Self::NetRecv => Self::NetSent,
         }
     }
 
@@ -541,6 +625,8 @@ impl SortField {
             Self::Security => "security",
             Self::DiskRead => "disk_read",
             Self::DiskWrite => "disk_write",
+            Self::NetSent => "net_sent",
+            Self::NetRecv => "net_recv",
         }
     }
 
@@ -555,6 +641,8 @@ impl SortField {
             "security" => Some(Self::Security),
             "disk_read" => Some(Self::DiskRead),
             "disk_write" => Some(Self::DiskWrite),
+            "net_sent" => Some(Self::NetSent),
+            "net_recv" => Some(Self::NetRecv),
             _ => None,
         }
     }
@@ -591,6 +679,16 @@ pub fn sort_processes(procs: &mut Vec<ProcessInfo>, sort_field: SortField) {
         SortField::DiskWrite => procs.sort_by(|a, b| {
             b.disk_write_speed
                 .cmp(&a.disk_write_speed)
+                .then(a.pid.cmp(&b.pid))
+        }),
+        SortField::NetSent => procs.sort_by(|a, b| {
+            b.net_sent_rate
+                .cmp(&a.net_sent_rate)
+                .then(a.pid.cmp(&b.pid))
+        }),
+        SortField::NetRecv => procs.sort_by(|a, b| {
+            b.net_recv_rate
+                .cmp(&a.net_recv_rate)
                 .then(a.pid.cmp(&b.pid))
         }),
     }
@@ -674,6 +772,8 @@ impl HeavyWorker {
                                 disk_usage: (disk.total_read_bytes, disk.total_written_bytes),
                                 disk_read_speed: 0,
                                 disk_write_speed: 0,
+                                net_sent_rate: 0,
+                                net_recv_rate: 0,
                                 status: format!("{:?}", proc.status()),
                                 exe: proc.exe().map(|p| p.to_string_lossy().to_string()),
                                 cmd: proc
@@ -741,6 +841,13 @@ struct LightSnapshot {
     /// 系统盘 (used, total)
     disk_usage: (u64, u64),
     throttle_info: Option<crate::throttle::ThrottleInfo>,
+    /// Per-core CPU 频率（MHz），按 logical CPU 顺序对齐 `sys.cpus()`。
+    /// 跨平台：Linux sysfs / Windows sysinfo / macOS sysinfo 都走 sysinfo。
+    per_core_freq: Vec<u64>,
+    /// Per-core CPU 温度（°C），与 `per_core_freq` 同长度；None 表示该核不可用。
+    /// 当前实现：sysinfo 的 Components 通常只给一个全局 CPU 温度，无法分核；
+    /// 把全局温度填到第 0 核，其余留 None。Sidebar 折叠模式仍用 `temperatures`。
+    per_core_temp: Vec<Option<f32>>,
 }
 
 struct LightWorker {
@@ -813,12 +920,23 @@ fn light_worker_loop(
     let mut disks = sysinfo::Disks::new_with_refreshed_list();
     let mut components = sysinfo::Components::new_with_refreshed_list();
     let mut gpu_collector = crate::gpu::GpuCollector::new();
+    // 用于 per-core 频率采样：worker 自己持有一份 sysinfo::System，避免和主线程的
+    // SysinfoRegistry 抢锁。频率只读不 refresh（sysinfo 在 Linux 上读 sysfs /
+    // Windows 上读注册表，本身就是 syscall）。
+    let mut sys_for_freq = sysinfo::System::new();
     let mut prev_disk_io: HashMap<String, (u64, u64)> = HashMap::new();
     let mut prev_disk_io_time = Instant::now();
 
     loop {
         components.refresh(true);
         let gpu_info = gpu_collector.refresh();
+
+        // per-core 频率：refresh_cpu_usage 在 Linux 上需要一个 tick 才能 stabilize，
+        // 这里只调 refresh_cpu_usage 是为了让 frequency() 字段被填到；实际上 sysinfo
+        // 在 Linux 的 frequency 走 sysfs（不依赖两次 refresh 间隔），Windows 走注册表。
+        sys_for_freq.refresh_cpu_usage();
+        let per_core_freq = collect_per_core_freq(&sys_for_freq);
+        let per_core_temp = collect_per_core_temp(&components, per_core_freq.len());
 
         let throttle_info = if let Some(info) = crate::throttle::query_processor_power_info() {
             crate::throttle::detect_throttle(&info)
@@ -902,6 +1020,8 @@ fn light_worker_loop(
             all_disks,
             disk_usage,
             throttle_info,
+            per_core_freq,
+            per_core_temp,
         };
 
         match snap_tx.try_send(snapshot) {
@@ -911,6 +1031,108 @@ fn light_worker_loop(
         }
 
         match shutdown_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(_) => break,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+/// SMART 磁盘健康后台 worker（阶段 5 B3）。
+///
+/// 模式照搬 [`LightWorker`]:独立线程 + `sync_channel(1)` + Drop 时
+/// shutdown + join。poll 间隔 30s —— 比 LightWorker 慢,因为 SMART
+/// 数据不需要秒级刷新,而 smartctl 子进程 / WMI 调用都不便宜。
+struct SmartWorker {
+    snapshot_rx: std::sync::mpsc::Receiver<Vec<crate::smart::SmartData>>,
+    shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SmartWorker {
+    fn start() -> Self {
+        let (snap_tx, snap_rx) = std::sync::mpsc::sync_channel::<Vec<crate::smart::SmartData>>(1);
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+
+        let handle = std::thread::Builder::new()
+            .name("proc-smart-refresh".into())
+            .spawn(move || smart_worker_loop(snap_tx, shutdown_rx))
+            .expect("failed to spawn smart-refresh thread");
+
+        Self {
+            snapshot_rx: snap_rx,
+            shutdown_tx: Some(shutdown_tx),
+            thread: Some(handle),
+        }
+    }
+
+    fn try_recv_latest(&self) -> Option<Vec<crate::smart::SmartData>> {
+        let mut latest = None;
+        while let Ok(s) = self.snapshot_rx.try_recv() {
+            latest = Some(s);
+        }
+        latest
+    }
+
+    /// 首帧同步等(最多 timeout),避免启动 sidebar SMART 徽章空白。
+    fn recv_first(&self, timeout: Duration) -> Option<Vec<crate::smart::SmartData>> {
+        match self.snapshot_rx.recv_timeout(timeout) {
+            Ok(first) => {
+                let mut latest = first;
+                while let Ok(s) = self.snapshot_rx.try_recv() {
+                    latest = s;
+                }
+                Some(latest)
+            }
+            Err(_) => None,
+        }
+    }
+}
+
+impl Drop for SmartWorker {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+            drop(tx);
+        }
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// SMART worker 主循环。30s 一轮;每轮列出磁盘 → 各调 `read_smart` →
+/// 收集到一个 Vec 推给主线程。单盘失败不阻塞其它盘。
+///
+/// 第一帧不等 30s —— 立即采集一次,sidebar 能在启动几秒内拿到徽章。
+fn smart_worker_loop(
+    snap_tx: std::sync::mpsc::SyncSender<Vec<crate::smart::SmartData>>,
+    shutdown_rx: std::sync::mpsc::Receiver<()>,
+) {
+    use std::sync::mpsc::{RecvTimeoutError, TrySendError};
+
+    const POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+    loop {
+        let disks = crate::smart::list_disks();
+        let snapshot: Vec<crate::smart::SmartData> = disks
+            .iter()
+            .filter_map(|dev| match crate::smart::read_smart(dev) {
+                Ok(data) => Some(data),
+                Err(e) => {
+                    tracing::debug!("SMART 读取失败 ({}): {}", dev, e);
+                    None
+                }
+            })
+            .collect();
+
+        match snap_tx.try_send(snapshot) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Disconnected(_)) => break,
+        }
+
+        match shutdown_rx.recv_timeout(POLL_INTERVAL) {
             Ok(_) => break,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
@@ -939,6 +1161,9 @@ pub struct SystemSnapshot {
     // 这些字段是 last-known 缓存,由 worker 每 1s 推送更新;
     // 主线程 `refresh_light()` 只 try_recv,不再做同步系统调用。
     light_worker: LightWorker,
+    // SMART 磁盘健康后台 worker —— 阶段 5 B3 新增。30s 一次,
+    // 比 LightWorker 慢,因为 SMART 数据不需要秒级刷新。
+    smart_worker: SmartWorker,
     gpu_info: Vec<crate::gpu::GpuInfo>,
     temperatures_cache: (Option<f32>, Option<f32>),
     disk_io_speeds: Vec<DiskIoInfo>,
@@ -946,6 +1171,12 @@ pub struct SystemSnapshot {
     /// 系统盘 (used, total) —— 由 worker 推送
     disk_usage_cache: (u64, u64),
     throttle_info: Option<crate::throttle::ThrottleInfo>,
+    /// Per-core CPU 频率（MHz）—— 由 worker 推送
+    per_core_freq_cache: Vec<u64>,
+    /// Per-core CPU 温度（°C，None=该核不可用）—— 由 worker 推送
+    per_core_temp_cache: Vec<Option<f32>>,
+    /// SMART 数据缓存 —— 由 SmartWorker 30s 推送一次
+    smart_cache: Vec<crate::smart::SmartData>,
     // Replay mode overrides
     replay_cpu: Option<f32>,
     replay_memory: Option<(u64, u64)>,
@@ -1015,6 +1246,11 @@ impl SystemSnapshot {
         // worker 后续仍会异步推上来。
         let first_snap = light_worker.recv_first(Duration::from_secs(5));
 
+        let smart_worker = SmartWorker::start();
+        // SMART 首帧只等 2s —— read_smart 走子进程 / WMI,通常 1s 内能拿到;
+        // 拿不到就先空,sidebar 显示 "-",worker 后续 30s 推上来。
+        let first_smart = smart_worker.recv_first(Duration::from_secs(2));
+
         Ok(Self {
             sys,
             networks,
@@ -1032,6 +1268,7 @@ impl SystemSnapshot {
             net_total_rx: total_rx,
             net_total_tx: total_tx,
             light_worker,
+            smart_worker,
             gpu_info: first_snap
                 .as_ref()
                 .map(|s| s.gpu_info.clone())
@@ -1049,7 +1286,16 @@ impl SystemSnapshot {
                 .map(|s| s.all_disks.clone())
                 .unwrap_or_default(),
             disk_usage_cache: first_snap.as_ref().map(|s| s.disk_usage).unwrap_or((0, 0)),
-            throttle_info: first_snap.and_then(|s| s.throttle_info),
+            throttle_info: first_snap.as_ref().and_then(|s| s.throttle_info.clone()),
+            per_core_freq_cache: first_snap
+                .as_ref()
+                .map(|s| s.per_core_freq.clone())
+                .unwrap_or_default(),
+            per_core_temp_cache: first_snap
+                .as_ref()
+                .map(|s| s.per_core_temp.clone())
+                .unwrap_or_default(),
+            smart_cache: first_smart.unwrap_or_default(),
             replay_cpu: None,
             replay_memory: None,
             replay_net: None,
@@ -1091,6 +1337,14 @@ impl SystemSnapshot {
             self.disks_cache = s.all_disks;
             self.disk_usage_cache = s.disk_usage;
             self.throttle_info = s.throttle_info;
+            self.per_core_freq_cache = s.per_core_freq;
+            self.per_core_temp_cache = s.per_core_temp;
+        }
+
+        // SMART 数据 —— 30s 推一次,这里只是 try_recv 缓存覆盖。
+        // 没新帧不报错,UI 显示旧值。
+        if let Some(s) = self.smart_worker.try_recv_latest() {
+            self.smart_cache = s;
         }
     }
 
@@ -1347,6 +1601,19 @@ impl SystemSnapshot {
         self.throttle_info.as_ref()
     }
 
+    /// Per-core CPU 频率（MHz）。空 Vec 表示该平台 / 当前会话不可用
+    /// （如 Linux 无 cpufreq 驱动的虚拟机、或 sysinfo 读注册表失败的 Windows）。
+    #[must_use]
+    pub fn per_core_freq(&self) -> &[u64] {
+        &self.per_core_freq_cache
+    }
+
+    /// Per-core CPU 温度（°C，None=该核不可用）。与 [`per_core_freq`] 同长度。
+    #[must_use]
+    pub fn per_core_temp(&self) -> &[Option<f32>] {
+        &self.per_core_temp_cache
+    }
+
     /// 获取上次刷新时间
     #[must_use]
     pub fn last_refresh(&self) -> Instant {
@@ -1382,6 +1649,17 @@ impl SystemSnapshot {
     #[must_use]
     pub fn all_disks(&self) -> Vec<DiskInfo> {
         self.disks_cache.clone()
+    }
+
+    /// 获取后台 SmartWorker 缓存的磁盘 SMART 数据(30s 一帧)。
+    ///
+    /// 返回 Vec 是因为多盘系统会有多条 SmartData。空 Vec 表示:
+    /// - 系统无支持 SMART 的磁盘(USB / 虚拟磁盘);或
+    /// - smartctl 未装 + WMI 无预测数据;或
+    /// - 首帧还没回来(启动 2s 内)。
+    #[must_use]
+    pub fn smart_data(&self) -> Vec<crate::smart::SmartData> {
+        self.smart_cache.clone()
     }
 
     /// 获取活跃网卡信息（过滤 APIPA 169.254.x.x 和回环 127.0.0.1）
@@ -1454,4 +1732,110 @@ fn sum_network_totals(networks: &sysinfo::Networks) -> (u64, u64) {
         total_tx += data.transmitted();
     }
     (total_rx, total_tx)
+}
+
+/// 解析 Linux `/sys/devices/system/cpu/cpuN/cpufreq/scaling_cur_freq` 内容。
+///
+/// sysfs 写入的格式是 kHz 的纯数字 + 一个换行符（例 `"3400000\n"`）。
+/// 我们要 MHz：`/1000`。返回 None 表示文件内容非数字或为空，
+/// 调用方按"该核频率不可用"处理。
+///
+/// 单独抽出来是因为它跨平台可测——Windows / macOS 也能跑这个纯函数测试。
+#[must_use]
+pub fn parse_scaling_cur_freq(content: &str) -> Option<u64> {
+    let trimmed = content.trim_ascii_end();
+    let khz: u64 = trimmed.parse().ok()?;
+    Some(khz / 1000)
+}
+
+/// 读 per-core CPU 频率（MHz），与 `sysinfo::System::cpus()` 顺序对齐。
+///
+/// 跨平台实现：
+/// - **Linux**：优先走 sysfs `/sys/devices/system/cpu/cpu{N}/cpufreq/scaling_cur_freq`，
+///   拿不到（虚拟机 / 无 cpufreq 驱动）退回 sysinfo 的 `Cpu::frequency()`（启动时读
+///   `/proc/cpuinfo`，运行期不变）。
+/// - **Windows**：sysinfo 走 `RegQueryValueEx` 读 `~MHz` 注册表项，per-processor。
+/// - **macOS**：sysinfo 走 sysctl，per-core。返回空 Vec 时 sidebar 显示"不可用"。
+fn collect_per_core_freq(sys: &sysinfo::System) -> Vec<u64> {
+    let cpus = sys.cpus();
+    if cpus.is_empty() {
+        return Vec::new();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // 尝试 sysfs 读每个逻辑核；任一失败就退回 sysinfo 频率。
+        let mut from_sysfs: Vec<Option<u64>> = (0..cpus.len()).map(|_| None).collect();
+        let mut all_ok = true;
+        for (idx, _) in cpus.iter().enumerate() {
+            let path = format!("/sys/devices/system/cpu/cpu{idx}/cpufreq/scaling_cur_freq");
+            if let Ok(content) = std::fs::read_to_string(&path)
+                && let Some(mhz) = parse_scaling_cur_freq(&content)
+            {
+                from_sysfs[idx] = Some(mhz);
+            } else {
+                all_ok = false;
+            }
+        }
+        if all_ok {
+            return from_sysfs.into_iter().map(Option::unwrap).collect();
+        }
+    }
+
+    cpus.iter().map(|c| c.frequency()).collect()
+}
+
+/// 读 per-core CPU 温度。sysinfo 的 Components API 通常只暴露一个全局 CPU
+/// 温度（ACPI ThermalZone / lm-sensors 的 "Core 0" 等），无法稳定分核。
+///
+/// 当前实现：
+/// - 找到含 "cpu" / "core" 字样的 component，把温度填到第 0 核；
+/// - 其余核留 `None`。
+///
+/// 这保证「至少有一个值」的视觉一致性，避免 sidebar 渲染 N 个 N/A。阶段 5
+/// 可以考虑接 Win32 MSAcpi_ThermalZoneTemperature 或 Linux hwmon per-core 路径。
+fn collect_per_core_temp(components: &sysinfo::Components, num_cores: usize) -> Vec<Option<f32>> {
+    if num_cores == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<Option<f32>> = (0..num_cores).map(|_| None).collect();
+    for component in components.iter() {
+        let label = component.label().to_lowercase();
+        if (label.contains("cpu") || label.contains("core"))
+            && let Some(t) = component.temperature()
+            && t >= 0.0
+        {
+            out[0] = Some(t);
+            break;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod collect_tests {
+    use super::parse_scaling_cur_freq;
+
+    #[test]
+    fn parse_scaling_cur_freq_khz_to_mhz() {
+        // Linux sysfs: 3400000 kHz → 3400 MHz
+        assert_eq!(parse_scaling_cur_freq("3400000\n"), Some(3400));
+        assert_eq!(parse_scaling_cur_freq("2500000"), Some(2500));
+        // 超低频（idle 降频）也按整数除法处理。
+        assert_eq!(parse_scaling_cur_freq("800000\n"), Some(800));
+    }
+
+    #[test]
+    fn parse_scaling_cur_freq_rejects_garbage() {
+        assert_eq!(parse_scaling_cur_freq(""), None);
+        assert_eq!(parse_scaling_cur_freq("not a number\n"), None);
+        assert_eq!(parse_scaling_cur_freq("3.4 GHz\n"), None);
+    }
+
+    #[test]
+    fn parse_scaling_cur_freq_handles_trailing_whitespace() {
+        // 内核有时带 \r\n 或多个空格
+        assert_eq!(parse_scaling_cur_freq("2400000  \n"), Some(2400));
+        assert_eq!(parse_scaling_cur_freq("  1600000\n"), None); // 前导空格 parse 失败
+    }
 }

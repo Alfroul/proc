@@ -2,11 +2,77 @@ use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::app_panel::{KeyResult, Panel, PanelContext};
+use crate::app_panel::{AppMode, KeyResult, Panel, PanelContext};
 use crate::docker::events::{self, DockerEvent, DockerEventReceiver};
+use crate::docker::images::ImageInfo;
+use crate::docker::logs::LogLine;
+use crate::docker::logs_worker::{self, LogChunk, LogsWorker};
 use crate::docker::snapshot_worker::DockerSnapshotWorker;
 use crate::docker::stats::ContainerStats;
+use crate::docker::top::ContainerTopProcess;
+use crate::docker::volumes::VolumeInfo;
 use crate::docker::{ContainerInfo, DockerMonitor};
+
+/// E3 — Docker 面板 3 视图：容器 / 镜像 / volume。`Tab` 循环。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DockerViewMode {
+    #[default]
+    Containers,
+    Images,
+    Volumes,
+}
+
+impl DockerViewMode {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Containers => "容器",
+            Self::Images => "镜像",
+            Self::Volumes => "卷",
+        }
+    }
+
+    /// `Tab` 循环到下一个视图。
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Containers => Self::Images,
+            Self::Images => Self::Volumes,
+            Self::Volumes => Self::Containers,
+        }
+    }
+}
+
+/// 日志查看模式状态：是否激活 + 缓冲 + 滚动 + follow 标志。
+#[derive(Debug, Default)]
+pub struct LogViewer {
+    /// 已收到的日志行（环形缓冲，上限 5000 行）。
+    pub buffer: Vec<LogLine>,
+    /// 用户当前滚动位置（从底部算起，0 = 最底）。`None` 表示自动跟随底部。
+    pub scroll_from_bottom: Option<usize>,
+    /// follow 模式（新日志到达时是否滚到底）。
+    pub follow: bool,
+    /// 当前正在跟随的容器名（None = 未跟随）。
+    pub container: Option<String>,
+}
+
+impl LogViewer {
+    const MAX_BUFFER_LINES: usize = 5_000;
+
+    fn append_chunk(&mut self, chunk: LogChunk) {
+        self.buffer.extend(chunk.lines);
+        // 环形截断（保留最新 5000 行）。
+        if self.buffer.len() > Self::MAX_BUFFER_LINES {
+            let drop = self.buffer.len() - Self::MAX_BUFFER_LINES;
+            self.buffer.drain(..drop);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buffer.clear();
+        self.scroll_from_bottom = None;
+    }
+}
 
 pub struct DockerPanel {
     pub monitor: Option<Arc<Mutex<DockerMonitor>>>,
@@ -22,6 +88,36 @@ pub struct DockerPanel {
     /// 后台快照 worker(在 monitor 初始化时 spawn,持有 Arc::clone)。
     /// 字段必须留在 panel 上,drop 时 worker 才会退出。
     pub snapshot_worker: Option<DockerSnapshotWorker>,
+
+    // ───── E4：容器内进程列表 ─────
+    /// 详情视图里是否展示进程子区块（按 `t` 切换）。
+    pub show_top_processes: bool,
+    /// 当前详情容器的进程列表（`t` 触发采集）。
+    pub top_processes: Vec<ContainerTopProcess>,
+
+    // ───── E1：日志查看模式 ─────
+    /// 日志模式（按 `l` 进入 / `Esc` 退出）。
+    pub log_viewer: Option<LogViewer>,
+    /// 当前激活的日志 worker（与 `log_viewer.container` 对应）。
+    /// Drop 时 worker 退出。
+    pub logs_worker: Option<LogsWorker>,
+
+    // ───── E3：镜像 / volume ─────
+    pub view_mode: DockerViewMode,
+    pub images: Vec<ImageInfo>,
+    pub volumes: Vec<VolumeInfo>,
+    /// 镜像/volume 视图的 cursor（与容器列表独立，切换视图保留位置）。
+    pub images_cursor: usize,
+    pub volumes_cursor: usize,
+    /// 删除确认状态：等用户再按一次 `d` 触发真删除。
+    pub delete_pending: Option<DeleteTarget>,
+}
+
+/// 删除确认的目标。第一次按 `d` 进入确认态，第二次按 `d` 真删，其它键取消。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteTarget {
+    Image { id: String, display: String },
+    Volume { name: String },
 }
 
 impl Default for DockerPanel {
@@ -45,6 +141,16 @@ impl DockerPanel {
             detail: None,
             detail_stats: None,
             snapshot_worker: None,
+            show_top_processes: false,
+            top_processes: Vec::new(),
+            log_viewer: None,
+            logs_worker: None,
+            view_mode: DockerViewMode::Containers,
+            images: Vec::new(),
+            volumes: Vec::new(),
+            images_cursor: 0,
+            volumes_cursor: 0,
+            delete_pending: None,
         }
     }
 
@@ -94,18 +200,39 @@ impl DockerPanel {
     }
 
     fn move_cursor(&mut self, delta: i32) {
-        let total = self.containers.len();
+        let total = match self.view_mode {
+            DockerViewMode::Containers => self.containers.len(),
+            DockerViewMode::Images => self.images.len(),
+            DockerViewMode::Volumes => self.volumes.len(),
+        };
         if total == 0 {
             return;
         }
-        let new = self.cursor as i32 + delta;
-        self.cursor = if new < 0 {
+        let new = self.active_cursor() as i32 + delta;
+        let next = if new < 0 {
             total - 1
         } else if new as usize >= total {
             0
         } else {
             new as usize
         };
+        self.set_active_cursor(next);
+    }
+
+    fn active_cursor(&self) -> usize {
+        match self.view_mode {
+            DockerViewMode::Containers => self.cursor,
+            DockerViewMode::Images => self.images_cursor,
+            DockerViewMode::Volumes => self.volumes_cursor,
+        }
+    }
+
+    fn set_active_cursor(&mut self, idx: usize) {
+        match self.view_mode {
+            DockerViewMode::Containers => self.cursor = idx,
+            DockerViewMode::Images => self.images_cursor = idx,
+            DockerViewMode::Volumes => self.volumes_cursor = idx,
+        }
     }
 
     fn restart_selected(&mut self) {
@@ -171,6 +298,8 @@ impl DockerPanel {
         if self.detail.is_some() {
             self.detail = None;
             self.detail_stats = None;
+            self.top_processes.clear();
+            self.show_top_processes = false;
             return;
         }
         let container = self.containers.get(self.cursor).cloned();
@@ -179,6 +308,257 @@ impl DockerPanel {
             self.detail = Some(c);
             if let Some(ref monitor) = self.monitor {
                 self.detail_stats = monitor.lock().ok().and_then(|m| m.get_stats(&name).ok());
+            }
+        }
+    }
+
+    /// `t` 触发：在容器详情视图中切换进程区块显示。第一次开启时同步采集。
+    fn toggle_top_processes(&mut self) {
+        if self.detail.is_none() {
+            self.status_message = Some("❌ 先按 Enter 进入容器详情".to_string());
+            return;
+        }
+        self.show_top_processes = !self.show_top_processes;
+        if self.show_top_processes {
+            self.refresh_top_processes();
+        } else {
+            self.top_processes.clear();
+        }
+    }
+
+    fn refresh_top_processes(&mut self) {
+        let Some(name) = self.detail.as_ref().map(|c| c.name.clone()) else {
+            return;
+        };
+        if let Some(ref monitor) = self.monitor {
+            match monitor
+                .lock()
+                .ok()
+                .and_then(|m| m.container_top(&name).ok())
+            {
+                Some(procs) => {
+                    self.top_processes = procs;
+                    let n = self.top_processes.len();
+                    self.status_message = Some(format!("✅ 拉到 {n} 个进程"));
+                }
+                None => {
+                    self.status_message = Some(format!("❌ 获取 {} 进程列表失败", name));
+                }
+            }
+        }
+    }
+
+    /// `l` 触发：进入日志模式 + 启动 worker。
+    fn enter_logs_mode(&mut self) {
+        let name = match self.detail.as_ref().map(|c| c.name.clone()) {
+            Some(n) => n,
+            None => {
+                self.status_message = Some("❌ 先按 Enter 进入容器详情".to_string());
+                return;
+            }
+        };
+
+        // 已在跟随同一容器：无操作（避免重复 spawn worker）。
+        if let Some(ref lv) = self.log_viewer
+            && lv.container.as_deref() == Some(&name)
+        {
+            return;
+        }
+
+        // 切换容器：drop 旧 worker。
+        self.logs_worker = None;
+
+        let docker_client = self
+            .monitor
+            .as_ref()
+            .and_then(|m| m.lock().ok())
+            .map(|m| m.docker());
+
+        let Some(docker_client) = docker_client else {
+            self.status_message = Some("❌ Docker 未连接".to_string());
+            return;
+        };
+
+        self.logs_worker = Some(logs_worker::spawn(docker_client, name.clone(), None));
+        self.log_viewer = Some(LogViewer {
+            buffer: Vec::new(),
+            scroll_from_bottom: None,
+            follow: true,
+            container: Some(name),
+        });
+        self.status_message = Some("✅ 日志模式（f 切换 follow / c 清屏 / Esc 退出）".to_string());
+    }
+
+    fn exit_logs_mode(&mut self) {
+        self.logs_worker = None;
+        self.log_viewer = None;
+    }
+
+    /// `e` 触发：选中容器 → 设置 ctx.pending_container_exec → SwitchMode(ContainerExec)。
+    /// App::switch_mode 拿到目标后启动 PTY（详见 app.rs::enter_container_exec）。
+    /// 退出容器 exec 模式时同样走 ctx.pending_container_exec（None 表示「不要启动」，
+    /// 但 SwitchMode 永远带 Some；进入 App 后立刻 take）。
+    fn enter_exec_mode(&mut self, ctx: &mut PanelContext) -> KeyResult {
+        if self.view_mode != DockerViewMode::Containers {
+            self.status_message = Some("❌ exec 仅支持容器视图（Tab 切回容器）".to_string());
+            return KeyResult::Consumed;
+        }
+        let name = match self.containers.get(self.cursor).map(|c| c.name.clone()) {
+            Some(n) => n,
+            None => {
+                self.status_message = Some("❌ 没有选中的容器".to_string());
+                return KeyResult::Consumed;
+            }
+        };
+        let running = self
+            .containers
+            .get(self.cursor)
+            .is_some_and(|c| c.state == "running");
+        if !running {
+            self.status_message = Some(format!("❌ 容器 {name} 未运行，无法 exec"));
+            return KeyResult::Consumed;
+        }
+        *ctx.pending_container_exec = Some(name);
+        KeyResult::SwitchMode(AppMode::ContainerExec)
+    }
+
+    /// `f` 切换 follow（仅日志模式有效）。
+    fn toggle_logs_follow(&mut self) {
+        if let Some(ref mut lv) = self.log_viewer {
+            lv.follow = !lv.follow;
+            if lv.follow {
+                lv.scroll_from_bottom = None;
+            }
+            self.status_message = Some(format!(
+                "✅ follow: {}",
+                if lv.follow { "开" } else { "关" }
+            ));
+        }
+    }
+
+    /// `c` 清空日志缓冲（仅日志模式有效）。
+    fn clear_logs(&mut self) {
+        if let Some(ref mut lv) = self.log_viewer {
+            lv.clear();
+            self.status_message = Some("✅ 日志已清屏".to_string());
+        }
+    }
+
+    /// `Tab` 循环视图模式。
+    fn cycle_view_mode(&mut self) {
+        self.view_mode = self.view_mode.next();
+        self.detail = None;
+        self.detail_stats = None;
+        self.top_processes.clear();
+        self.show_top_processes = false;
+        self.exit_logs_mode();
+        self.delete_pending = None;
+        self.status_message = Some(format!("✅ 视图：{}", self.view_mode.label()));
+        // 切到 Images/Volumes 时立刻拉一次列表。
+        match self.view_mode {
+            DockerViewMode::Containers => {}
+            DockerViewMode::Images => self.refresh_images(),
+            DockerViewMode::Volumes => self.refresh_volumes(),
+        }
+    }
+
+    fn refresh_images(&mut self) {
+        if let Some(ref monitor) = self.monitor {
+            match monitor.lock().ok().and_then(|m| m.list_images().ok()) {
+                Some(imgs) => {
+                    self.images = imgs;
+                    let total = self.images.len();
+                    if self.images_cursor >= total && total > 0 {
+                        self.images_cursor = total - 1;
+                    }
+                }
+                None => {
+                    self.status_message = Some("❌ 获取镜像列表失败".to_string());
+                }
+            }
+        }
+    }
+
+    fn refresh_volumes(&mut self) {
+        if let Some(ref monitor) = self.monitor {
+            match monitor.lock().ok().and_then(|m| m.list_volumes().ok()) {
+                Some(vols) => {
+                    self.volumes = vols;
+                    let total = self.volumes.len();
+                    if self.volumes_cursor >= total && total > 0 {
+                        self.volumes_cursor = total - 1;
+                    }
+                }
+                None => {
+                    self.status_message = Some("❌ 获取 volume 列表失败".to_string());
+                }
+            }
+        }
+    }
+
+    /// `d` 删除当前选中的镜像 / volume（两次按键确认）。
+    fn handle_delete(&mut self) {
+        // 第二次按 `d`：执行删除。
+        if let Some(target) = self.delete_pending.take() {
+            self.execute_delete(target);
+            return;
+        }
+        // 第一次按 `d`：进入确认态。
+        match self.view_mode {
+            DockerViewMode::Images => {
+                if let Some(img) = self.images.get(self.images_cursor).cloned() {
+                    self.delete_pending = Some(DeleteTarget::Image {
+                        id: img.id.clone(),
+                        display: img.display_name(),
+                    });
+                    self.status_message = Some(format!(
+                        "⚠ 再按 d 删除镜像 {}（Esc 取消）",
+                        img.display_name()
+                    ));
+                }
+            }
+            DockerViewMode::Volumes => {
+                if let Some(v) = self.volumes.get(self.volumes_cursor).cloned() {
+                    self.delete_pending = Some(DeleteTarget::Volume {
+                        name: v.name.clone(),
+                    });
+                    self.status_message =
+                        Some(format!("⚠ 再按 d 删除 volume {}（Esc 取消）", v.name));
+                }
+            }
+            DockerViewMode::Containers => {
+                self.status_message = Some("❌ 容器删除尚未实现，请用 docker rm".to_string());
+            }
+        }
+    }
+
+    fn execute_delete(&mut self, target: DeleteTarget) {
+        let Some(ref monitor) = self.monitor else {
+            self.status_message = Some("❌ Docker 未连接".to_string());
+            return;
+        };
+        let result: crate::error::Result<()> = monitor
+            .lock()
+            .map_err(|_| crate::error::ProcError::docker("DockerMonitor mutex poisoned"))
+            .and_then(|guard| match &target {
+                DeleteTarget::Image { id, .. } => guard.remove_image(id, true),
+                DeleteTarget::Volume { name } => guard.remove_volume(name, true),
+            });
+        match result {
+            Ok(()) => {
+                let msg = match target {
+                    DeleteTarget::Image { display, .. } => format!("✅ 已删镜像 {}", display),
+                    DeleteTarget::Volume { name } => format!("✅ 已删 volume {}", name),
+                };
+                self.status_message = Some(msg);
+                match self.view_mode {
+                    DockerViewMode::Images => self.refresh_images(),
+                    DockerViewMode::Volumes => self.refresh_volumes(),
+                    _ => {}
+                }
+            }
+            Err(e) => {
+                self.status_message = Some(format!("❌ 删除失败: {}", e));
             }
         }
     }
@@ -225,8 +605,6 @@ impl DockerPanel {
         }
 
         // 2) 应用后台 snapshot worker 推送的容器列表(每 ~5s 一份)。
-        //    **不再**调 self.refresh() — 旧实现每秒同步 block_on list_containers
-        //    是 DockerPanel 卡顿的根因。
         if let Some(ref worker) = self.snapshot_worker
             && let Some(snap) = worker.try_recv_latest()
         {
@@ -234,7 +612,6 @@ impl DockerPanel {
                 Ok(containers) => {
                     self.containers = containers;
                     self.connected = true;
-                    // 容器列表变短时 clamp cursor,避免越界。
                     let total = self.containers.len();
                     if total == 0 {
                         self.cursor = 0;
@@ -254,23 +631,91 @@ impl DockerPanel {
                 }
             }
         }
+
+        // 3) 日志 worker 推送的 chunk（仅日志模式）。
+        if let Some(ref worker) = self.logs_worker {
+            let chunks: Vec<LogChunk> = worker.drain();
+            if !chunks.is_empty()
+                && let Some(ref mut lv) = self.log_viewer
+            {
+                for c in chunks {
+                    lv.append_chunk(c);
+                }
+                // follow 时保持 scroll_from_bottom = None（自动到底）。
+            }
+        }
     }
 }
 
 impl Panel for DockerPanel {
-    fn handle_key(&mut self, key: KeyEvent, _ctx: &mut PanelContext) -> KeyResult {
+    fn handle_key(&mut self, key: KeyEvent, ctx: &mut PanelContext) -> KeyResult {
+        // 日志模式优先吃快捷键。
+        if self.log_viewer.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.exit_logs_mode();
+                    return KeyResult::Consumed;
+                }
+                KeyCode::Char('f') => {
+                    self.toggle_logs_follow();
+                    return KeyResult::Consumed;
+                }
+                KeyCode::Char('c') => {
+                    self.clear_logs();
+                    return KeyResult::Consumed;
+                }
+                KeyCode::Char('q') => return KeyResult::Quit,
+                KeyCode::Up => {
+                    if let Some(ref mut lv) = self.log_viewer {
+                        let cur = lv.scroll_from_bottom.unwrap_or(0);
+                        lv.scroll_from_bottom = Some(cur + 1);
+                    }
+                    return KeyResult::Consumed;
+                }
+                KeyCode::Down => {
+                    if let Some(ref mut lv) = self.log_viewer {
+                        match lv.scroll_from_bottom {
+                            Some(0) | None => lv.scroll_from_bottom = None,
+                            Some(n) => lv.scroll_from_bottom = Some(n.saturating_sub(1)),
+                        }
+                    }
+                    return KeyResult::Consumed;
+                }
+                _ => return KeyResult::Ignored,
+            }
+        }
+
         match key.code {
             KeyCode::Char('q') => return KeyResult::Quit,
+            KeyCode::Tab => self.cycle_view_mode(),
             KeyCode::Up => self.move_cursor(-1),
             KeyCode::Down => self.move_cursor(1),
-            KeyCode::Enter => self.show_detail(),
-            KeyCode::Char('r') => self.restart_selected(),
+            KeyCode::Enter => {
+                // 镜像/volume 视图不进详情（详情视图只服务容器）。
+                if self.view_mode == DockerViewMode::Containers {
+                    self.show_detail();
+                }
+            }
+            KeyCode::Char('r') => match self.view_mode {
+                DockerViewMode::Containers => self.restart_selected(),
+                DockerViewMode::Images => self.refresh_images(),
+                DockerViewMode::Volumes => self.refresh_volumes(),
+            },
             KeyCode::Char('s') => self.stop_selected(),
             KeyCode::Char('a') => self.start_watching(),
+            KeyCode::Char('t') => self.toggle_top_processes(),
+            KeyCode::Char('l') => self.enter_logs_mode(),
+            KeyCode::Char('e') => return self.enter_exec_mode(ctx),
+            KeyCode::Char('d') => self.handle_delete(),
             KeyCode::Esc => {
-                if self.detail.is_some() {
+                if self.delete_pending.is_some() {
+                    self.delete_pending = None;
+                    self.status_message = Some("✅ 已取消删除".to_string());
+                } else if self.detail.is_some() {
                     self.detail = None;
                     self.detail_stats = None;
+                    self.top_processes.clear();
+                    self.show_top_processes = false;
                 } else {
                     self.status_message = None;
                 }
@@ -283,11 +728,15 @@ impl Panel for DockerPanel {
     fn tick(&mut self, _ctx: &mut PanelContext) -> bool {
         self.poll_events();
         // 容器消失后（被删 / 停 → list 不再返回）cursor 必须收紧，避免越界渲染。
-        let total = self.containers.len();
+        let total = match self.view_mode {
+            DockerViewMode::Containers => self.containers.len(),
+            DockerViewMode::Images => self.images.len(),
+            DockerViewMode::Volumes => self.volumes.len(),
+        };
         if total == 0 {
-            self.cursor = 0;
-        } else if self.cursor >= total {
-            self.cursor = total - 1;
+            self.set_active_cursor(0);
+        } else if self.active_cursor() >= total {
+            self.set_active_cursor(total - 1);
         }
         false
     }
@@ -298,5 +747,113 @@ impl Panel for DockerPanel {
 
     fn scroll(&self) -> usize {
         self.scroll
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_mode_cycle_wraps() {
+        assert_eq!(DockerViewMode::Containers.next(), DockerViewMode::Images);
+        assert_eq!(DockerViewMode::Images.next(), DockerViewMode::Volumes);
+        assert_eq!(DockerViewMode::Volumes.next(), DockerViewMode::Containers);
+    }
+
+    #[test]
+    fn view_mode_default_is_containers() {
+        assert_eq!(DockerViewMode::default(), DockerViewMode::Containers);
+    }
+
+    #[test]
+    fn view_mode_labels_distinct() {
+        let labels: Vec<_> = [
+            DockerViewMode::Containers,
+            DockerViewMode::Images,
+            DockerViewMode::Volumes,
+        ]
+        .iter()
+        .map(|m| m.label())
+        .collect();
+        assert_eq!(labels, ["容器", "镜像", "卷"]);
+    }
+
+    #[test]
+    fn log_viewer_append_chunk_grows_buffer() {
+        let mut lv = LogViewer::default();
+        let chunk = LogChunk {
+            lines: vec![
+                LogLine {
+                    timestamp: None,
+                    message: "a".to_string(),
+                    is_stderr: false,
+                },
+                LogLine {
+                    timestamp: None,
+                    message: "b".to_string(),
+                    is_stderr: true,
+                },
+            ],
+        };
+        lv.append_chunk(chunk);
+        assert_eq!(lv.buffer.len(), 2);
+    }
+
+    #[test]
+    fn log_viewer_caps_at_max_lines() {
+        let mut lv = LogViewer::default();
+        for _ in 0..(LogViewer::MAX_BUFFER_LINES + 100) {
+            lv.append_chunk(LogChunk {
+                lines: vec![LogLine {
+                    timestamp: None,
+                    message: "x".to_string(),
+                    is_stderr: false,
+                }],
+            });
+        }
+        assert_eq!(lv.buffer.len(), LogViewer::MAX_BUFFER_LINES);
+    }
+
+    #[test]
+    fn log_viewer_clear_empties_buffer() {
+        let mut lv = LogViewer {
+            buffer: vec![LogLine {
+                timestamp: None,
+                message: "a".to_string(),
+                is_stderr: false,
+            }],
+            ..Default::default()
+        };
+        lv.clear();
+        assert!(lv.buffer.is_empty());
+    }
+
+    #[test]
+    fn delete_target_image_eq() {
+        let a = DeleteTarget::Image {
+            id: "sha256:abc".to_string(),
+            display: "nginx:latest".to_string(),
+        };
+        let b = DeleteTarget::Image {
+            id: "sha256:abc".to_string(),
+            display: "nginx:latest".to_string(),
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn new_panel_has_clean_state() {
+        let p = DockerPanel::new();
+        assert!(p.monitor.is_none());
+        assert!(p.containers.is_empty());
+        assert!(!p.show_top_processes);
+        assert!(p.top_processes.is_empty());
+        assert!(p.log_viewer.is_none());
+        assert!(p.logs_worker.is_none());
+        assert_eq!(p.view_mode, DockerViewMode::Containers);
+        assert!(p.images.is_empty());
+        assert!(p.volumes.is_empty());
+        assert!(p.delete_pending.is_none());
     }
 }

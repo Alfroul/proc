@@ -581,6 +581,19 @@ impl ProcessPanel {
                 let label = self.toggle_view_mode(ctx.cached_processes);
                 *ctx.status_message = Some(format!("视图: {}", label));
             }
+            // 阶段 4 A4：进程列表 `+`/`-` 调整选中进程的优先级。
+            // 不依赖 App::bump_selected_priority，直接调 process_control 把
+            // 错误/成功写到 status_message，保持 PanelContext 不需要新增字段。
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                if let Some(pid) = self.focused_pid(ctx.cached_sorted, ctx.cached_processes) {
+                    bump_priority_into(pid, true, ctx.status_message);
+                }
+            }
+            KeyCode::Char('-') => {
+                if let Some(pid) = self.focused_pid(ctx.cached_sorted, ctx.cached_processes) {
+                    bump_priority_into(pid, false, ctx.status_message);
+                }
+            }
             KeyCode::PageUp => self.page_up(),
             KeyCode::PageDown => self.page_down(ctx.cached_sorted),
             KeyCode::Esc => {
@@ -733,6 +746,62 @@ impl ProcessPanel {
             self.app_group_expanded = None;
         } else {
             self.app_group_expanded = prev_expanded;
+        }
+    }
+
+    /// 列表视图下当前焦点 PID：优先用多选集合里的「最后选中」，否则用 cursor。
+    /// 用于 `+`/`-` 调优先级等单进程操作。
+    fn focused_pid(
+        &self,
+        cached_sorted: &[(usize, classify::ProcessClass)],
+        cached_processes: &[ProcessInfo],
+    ) -> Option<u32> {
+        if let Some(&last) = self.selected_pids.iter().last() {
+            return Some(last);
+        }
+        let (idx, _) = cached_sorted.get(self.cursor_index)?;
+        cached_processes.get(*idx).map(|p| p.pid)
+    }
+}
+
+/// A4：把 get/set_priority 的结果直接写进 `status_message`。失败原因可能是
+/// 权限不足（非管理员）、进程已退出、或平台不支持（macOS）。把状态往上调比
+/// ProcessPanel 自己拼字符串省事。
+fn bump_priority_into(pid: u32, up: bool, status: &mut Option<String>) {
+    use crate::process_control::{get_priority, set_priority};
+    let current = match get_priority(pid) {
+        Ok(c) => c,
+        Err(e) => {
+            *status = Some(format!("读取优先级失败: {}", e));
+            return;
+        }
+    };
+    let next = if up {
+        current.bump_up()
+    } else {
+        current.bump_down()
+    };
+    if next == current {
+        *status = Some(format!(
+            "PID {} 已到达 {} 端",
+            pid,
+            if up { "Realtime" } else { "Idle" }
+        ));
+        return;
+    }
+    match set_priority(pid, next) {
+        Ok(()) => {
+            let verb = if up { "调高至" } else { "调低至" };
+            *status = Some(format!("PID {} 优先级 {} {}", pid, verb, next.label()));
+        }
+        Err(e) => {
+            *status = Some(format!(
+                "PID {} 设置优先级失败 ({} → {}): {}",
+                pid,
+                current.label(),
+                next.label(),
+                e
+            ));
         }
     }
 }

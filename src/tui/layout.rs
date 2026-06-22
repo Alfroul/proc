@@ -22,7 +22,7 @@ fn tab_index(mode: &AppMode) -> usize {
         AppMode::PortMap => 2,
         AppMode::UsbAssistant => 3,
         AppMode::MonitorPanel => 4,
-        AppMode::DockerPanel => 5,
+        AppMode::DockerPanel | AppMode::ContainerExec => 5,
         AppMode::Replay => {
             // Use the recorded frame's mode for tab highlighting
             unreachable!("Replay uses replay_frame_mode for tab index")
@@ -185,6 +185,9 @@ fn draw_main_panel(f: &mut Frame, app: &App, area: Rect) {
         AppMode::DockerPanel => {
             crate::tui::docker_panel::draw(f, area, app);
         }
+        AppMode::ContainerExec => {
+            crate::tui::container_exec_view::draw(f, area, app);
+        }
         AppMode::Replay => {
             crate::tui::replay_panel::draw_timeline(f, area, app);
         }
@@ -199,9 +202,15 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             " ↑↓移动  Enter选择设备  k终止安全进程  r刷新  w持续监测  Tab切换设备  q退出"
         }
         AppMode::MonitorPanel => " ↑↓移动  a添加监控  d删除  r重启  s暂停/恢复  q退出",
-        AppMode::DockerPanel => " ↑↓移动  Enter详情  r重启  s停止  a监听事件  q退出",
+        AppMode::DockerPanel => " ↑↓移动  Enter详情  r重启  s停止  a监听事件  e进容器 exec  q退出",
+        AppMode::ContainerExec => {
+            " Ctrl+D/Ctrl+\\ 退出  Ctrl+C 中断容器  按键透传容器  q 退出 exec"
+        }
+        AppMode::PortMap if app.port_panel.dns_view_active => {
+            " ↑↓滚动  /搜索  c清空  f切换follow  D/Esc退出DNS视图  q退出"
+        }
         AppMode::PortMap => {
-            " ↑↓移动  Enter展开/详情  g切换视图  a异常  f过滤  s排序  d诊断  /搜索  k终止  q退出"
+            " ↑↓移动  Enter展开/详情  g切换视图  a异常  f过滤  s排序  d诊断  DDNS日志  /搜索  k终止  q退出"
         }
         AppMode::Replay => " Space播放/暂停  ←→快退/快进  +/-速度  q退出回放",
         AppMode::Help => " ↑↓/PgUp/PgDn滚动  Esc/q/? 返回  Home/End 顶/底",
@@ -226,8 +235,17 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     } else {
         ""
     };
+    // 阶段 8 D3：DNS worker 活动时，状态栏左侧显示「仅内存」指示（隐私）。
+    let dns_indicator = if app.dns_log_worker.is_some() {
+        " 📡DNS(仅内存) "
+    } else {
+        ""
+    };
     let theme_label = format!(" [T] {} ", theme::theme_name());
-    let help =
-        Paragraph::new(format!("{}{}{}", msg, kill_msg, theme_label)).style(theme::style_muted());
+    let help = Paragraph::new(format!(
+        "{}{}{}{}",
+        dns_indicator, msg, kill_msg, theme_label
+    ))
+    .style(theme::style_muted());
     f.render_widget(help, area);
 }

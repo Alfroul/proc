@@ -1,0 +1,294 @@
+{
+  "jsonrpc": {
+    "version": "1.0"
+  },
+  "smartctl": {
+    "version": [
+      7,
+      3
+    ],
+    "svn_revision": "5338",
+    "platform_info": "x86_64-linux-5.15.0-76-generic",
+    "build_info": "(local build)",
+    "argv": [
+      "smartctl",
+      "--json",
+      "--attributes",
+      "/dev/sda"
+    ],
+    "exit_status": 0
+  },
+  "device": {
+    "name": "/dev/sda",
+    "info_name": "/dev/sda [SAT]",
+    "type": "sat",
+    "protocol": "ATA"
+  },
+  "model_family": "Samsung based SSDs",
+  "model_name": "Samsung SSD 850 EVO 500GB",
+  "serial_number": "S2RANX0J123456A",
+  "wwn": {
+    "naa": 5,
+    "oui": 9528,
+    "id": 338928003
+  },
+  "firmware_version": "3B6Q6XX2",
+  "user_capacity": {
+    "blocks": 976773168,
+    "bytes": 500107862016
+  },
+  "logical_block_size": 512,
+  "physical_block_size": 512,
+  "rotation_rate": 0,
+  "form_factor": {
+    "ata_value": 2,
+    "name": "3.5 inches"
+  },
+  "in_smartctl_database": true,
+  "ata_version": {
+    "string": "ACS-2, ACS-3 T13/2161-D revision 3b",
+    "major_value": 1020,
+    "minor_value": 5655
+  },
+  "sata_version": {
+    "string": "SATA 3.1",
+    "value": 127
+  },
+  "interface_speed": {
+    "string": "6.0 Gb/s",
+    "current": {
+      "string": "6.0 Gb/s",
+      "value": 600
+    },
+    "max": {
+      "string": "6.0 Gb/s",
+      "value": 600
+    }
+  },
+  "local_time": {
+    "time_t": 1718956800,
+    "asctime": "Fri Jun 21 09:00:00 2026 CST"
+  },
+  "smart_status": {
+    "passed": true,
+    "raw_value": 0
+  },
+  "temperature": {
+    "current": 35
+  },
+  "ata_smart_attributes": {
+    "revision": 1,
+    "table": [
+      {
+        "id": 5,
+        "name": "Reallocated_Sector_Ct",
+        "value": 100,
+        "worst": 100,
+        "thresh": 10,
+        "raw": {
+          "value": 0,
+          "string": "0"
+        },
+        "flags": {
+          "value": 50,
+          "string": "PO-CK ",
+          "prefailure": true,
+          "updated_online": true,
+          "performance": false,
+          "error_rate": false,
+          "event_count": true,
+          "auto_keep": true
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 9,
+        "name": "Power_On_Hours",
+        "value": 99,
+        "worst": 99,
+        "thresh": 0,
+        "raw": {
+          "value": 12345,
+          "string": "12345"
+        },
+        "flags": {
+          "value": 50,
+          "string": "PO-CK ",
+          "prefailure": true,
+          "updated_online": true,
+          "performance": false,
+          "error_rate": false,
+          "event_count": true,
+          "auto_keep": true
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 12,
+        "name": "Power_Cycle_Count",
+        "value": 99,
+        "worst": 99,
+        "thresh": 0,
+        "raw": {
+          "value": 567,
+          "string": "567"
+        },
+        "flags": {
+          "value": 50,
+          "string": "PO-CK ",
+          "prefailure": true,
+          "updated_online": true,
+          "performance": false,
+          "error_rate": false,
+          "event_count": true,
+          "auto_keep": true
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 177,
+        "name": "Wear_Leveling_Count",
+        "value": 99,
+        "worst": 99,
+        "thresh": 0,
+        "raw": {
+          "value": 17,
+          "string": "17"
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 179,
+        "name": "Used_Rsvd_Blk_Cnt_Tot",
+        "value": 100,
+        "worst": 100,
+        "thresh": 10,
+        "raw": {
+          "value": 0,
+          "string": "0"
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 181,
+        "name": "Program_Fail_Cnt_Total",
+        "value": 100,
+        "worst": 100,
+        "thresh": 10,
+        "raw": {
+          "value": 0,
+          "string": "0"
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 182,
+        "name": "Erase_Fail_Count_Total",
+        "value": 100,
+        "worst": 100,
+        "thresh": 10,
+        "raw": {
+          "value": 0,
+          "string": "0"
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 183,
+        "name": "Runtime_Bad_Block",
+        "value": 100,
+        "worst": 100,
+        "thresh": 10,
+        "raw": {
+          "value": 0,
+          "string": "0"
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 187,
+        "name": "Uncorrectable_Error_Cnt",
+        "value": 100,
+        "worst": 100,
+        "thresh": 0,
+        "raw": {
+          "value": 0,
+          "string": "0"
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 190,
+        "name": "Airflow_Temperature_Cel",
+        "value": 65,
+        "worst": 41,
+        "thresh": 0,
+        "raw": {
+          "value": 35,
+          "string": "35"
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 194,
+        "name": "Temperature_Celsius",
+        "value": 65,
+        "worst": 99,
+        "thresh": 0,
+        "raw": {
+          "value": 35,
+          "string": "35"
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 195,
+        "name": "ECC_Error_Rate",
+        "value": 200,
+        "worst": 200,
+        "thresh": 0,
+        "raw": {
+          "value": 0,
+          "string": "0"
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 199,
+        "name": "CRC_Error_Count",
+        "value": 100,
+        "worst": 100,
+        "thresh": 0,
+        "raw": {
+          "value": 0,
+          "string": "0"
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 241,
+        "name": "Total_LBAs_Written",
+        "value": 99,
+        "worst": 99,
+        "thresh": 0,
+        "raw": {
+          "value": 89123456789,
+          "string": "89123456789"
+        },
+        "when_failed": "-"
+      },
+      {
+        "id": 242,
+        "name": "Total_LBAs_Read",
+        "value": 99,
+        "worst": 99,
+        "thresh": 0,
+        "raw": {
+          "value": 44567890123,
+          "string": "44567890123"
+        },
+        "when_failed": "-"
+      }
+    ]
+  }
+}

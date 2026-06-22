@@ -11,6 +11,8 @@ fn make_process(pid: u32, name: &str, parent_pid: Option<u32>) -> ProcessInfo {
         disk_usage: (0, 0),
         disk_read_speed: 0,
         disk_write_speed: 0,
+        net_sent_rate: 0,
+        net_recv_rate: 0,
         status: "Run".to_string(),
         exe: None,
         cmd: vec![],

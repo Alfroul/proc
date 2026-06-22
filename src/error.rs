@@ -59,6 +59,13 @@ pub enum ProcError {
         #[source]
         source: Option<Box<dyn StdError + Send + Sync>>,
     },
+
+    #[error("SMART error: {message}")]
+    Smart {
+        message: String,
+        #[source]
+        source: Option<Box<dyn StdError + Send + Sync>>,
+    },
 }
 
 impl ProcError {
@@ -178,6 +185,30 @@ impl ProcError {
         Self::PermissionDenied {
             message: msg.into(),
             source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn smart(msg: impl Into<String>) -> Self {
+        Self::Smart {
+            message: msg.into(),
+            source: None,
+        }
+    }
+
+    pub fn smart_with(
+        msg: impl Into<String>,
+        source: impl StdError + Send + Sync + 'static,
+    ) -> Self {
+        Self::Smart {
+            message: msg.into(),
+            source: Some(Box::new(source)),
+        }
+    }
+
+    pub fn smart_msg(msg: impl Into<String>) -> Self {
+        Self::Smart {
+            message: msg.into(),
+            source: None,
         }
     }
 }

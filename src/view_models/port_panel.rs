@@ -83,6 +83,41 @@ pub struct PortPanel {
     // 后台 worker 推送的待处理 sockets(由 App::tick_panels 注入)。
     // `None` = 本 tick 无新数据,跳过 ports 重算。
     pub pending_sockets: Option<Vec<netstat2::SocketInfo>>,
+
+    // 阶段 8 D3：DNS 查询日志子视图（stage-8.md §5.1）。按 `D`（大写）切换。
+    // 独立子模式：dns_view_active=true 时 port_table 渲染 DNS 日志列表，
+    // 不显示端口/连接视图。`dns_follow` 默认 true（自动跟随最新一行）。
+    pub dns_view_active: bool,
+    pub dns_cursor: usize,
+    pub dns_scroll: usize,
+    pub dns_follow: bool,
+    pub dns_search: crate::search::SearchState,
+}
+
+/// DNS 子视图列表行数（每行一条 DnsQuery）。filtered = 搜索过滤后剩余条数。
+impl PortPanel {
+    pub(crate) fn dns_move_cursor(&mut self, delta: i32, total: usize) {
+        if total == 0 {
+            self.dns_cursor = 0;
+            self.dns_scroll = 0;
+            return;
+        }
+        let new_cursor = (self.dns_cursor as i32 + delta).clamp(0, (total - 1) as i32) as usize;
+        self.dns_cursor = new_cursor;
+        // 简单跟随：cursor < scroll → scroll = cursor；cursor >= scroll+window → scroll 跟进
+        // 这里不知窗口高度，由渲染层用 scroll 锚定；保守起见直接同步 scroll = cursor。
+        let abs = delta.unsigned_abs() as usize;
+        if delta < 0 {
+            self.dns_scroll = self.dns_scroll.saturating_sub(abs);
+        } else {
+            self.dns_scroll = self.dns_scroll.saturating_add(abs);
+        }
+        if self.dns_scroll > self.dns_cursor {
+            self.dns_scroll = self.dns_cursor;
+        }
+        // 关闭 follow —— 用户主动移动光标 = 不再自动跟随最新
+        self.dns_follow = false;
+    }
 }
 
 impl Default for PortPanel {
@@ -148,6 +183,11 @@ impl PortPanel {
             diagnostic_rx: None,
             diagnostic_thread: None,
             pending_sockets: None,
+            dns_view_active: false,
+            dns_cursor: 0,
+            dns_scroll: 0,
+            dns_follow: true,
+            dns_search: crate::search::SearchState::new(),
         }
     }
 
@@ -564,6 +604,99 @@ impl PortPanel {
         }
     }
 
+    /// 阶段 8 D3：DNS 子视图按键处理。stage-8.md §5.1：
+    /// - `↑/↓` 移动光标 / `/` 搜索查询名 / `c` 清空 / `f` 切换 follow
+    /// - `Esc` 或 `D` 退出 DNS 子视图
+    fn handle_dns_view_key(&mut self, key: KeyEvent, ctx: &mut PanelContext) -> KeyResult {
+        // 搜索激活时优先消费
+        if self.dns_search.is_active() {
+            if self.dns_search.handle_input(key) {
+                self.dns_cursor = 0;
+                self.dns_scroll = 0;
+            }
+            return KeyResult::Consumed;
+        }
+
+        let total = self.dns_filtered_indices(ctx.dns_log_recent).len();
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('D') => {
+                self.dns_view_active = false;
+                KeyResult::Consumed
+            }
+            KeyCode::Char('/') => {
+                self.dns_search.active = true;
+                KeyResult::Consumed
+            }
+            KeyCode::Char('c') => {
+                ctx.dns_log_recent.clear();
+                self.dns_cursor = 0;
+                self.dns_scroll = 0;
+                *ctx.status_message = Some("DNS 日志已清空".to_string());
+                KeyResult::Consumed
+            }
+            KeyCode::Char('f') => {
+                self.dns_follow = !self.dns_follow;
+                *ctx.status_message = Some(format!(
+                    "DNS follow: {}",
+                    if self.dns_follow { "开" } else { "关" }
+                ));
+                KeyResult::Consumed
+            }
+            KeyCode::Up => {
+                self.dns_move_cursor(-1, total);
+                KeyResult::Consumed
+            }
+            KeyCode::Down => {
+                self.dns_move_cursor(1, total);
+                KeyResult::Consumed
+            }
+            KeyCode::PageUp => {
+                self.dns_move_cursor(-10, total);
+                KeyResult::Consumed
+            }
+            KeyCode::PageDown => {
+                self.dns_move_cursor(10, total);
+                KeyResult::Consumed
+            }
+            KeyCode::Home => {
+                self.dns_cursor = 0;
+                self.dns_scroll = 0;
+                self.dns_follow = false;
+                KeyResult::Consumed
+            }
+            KeyCode::End => {
+                if total > 0 {
+                    self.dns_cursor = total - 1;
+                    self.dns_follow = true;
+                }
+                KeyResult::Consumed
+            }
+            _ => KeyResult::Ignored,
+        }
+    }
+
+    /// DNS 子视图当前可见条目的索引列表（按搜索 query 过滤）。
+    /// 跨调用方共享，避免 view + key handler 各算一次。
+    pub(crate) fn dns_filtered_indices(
+        &self,
+        recent: &VecDeque<crate::dns_log::DnsQuery>,
+    ) -> Vec<usize> {
+        let q = self.dns_search.query().trim().to_lowercase();
+        if q.is_empty() {
+            return (0..recent.len()).collect();
+        }
+        recent
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| {
+                d.query_name.to_lowercase().contains(&q)
+                    || d.process_name.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     fn handle_anomaly_detail_key(&mut self, key: KeyEvent) -> KeyResult {
         let visible = self.visible_anomalies();
         match key.code {
@@ -650,6 +783,11 @@ impl Panel for PortPanel {
             return KeyResult::Consumed;
         }
 
+        // 阶段 8 D3 DNS 子视图：激活后接管所有按键（除 `D`/`Esc` 退出外）。
+        if self.dns_view_active {
+            return self.handle_dns_view_key(key, ctx);
+        }
+
         // Anomaly detail overlay
         if self.show_anomaly_detail {
             return self.handle_anomaly_detail_key(key);
@@ -661,6 +799,15 @@ impl Panel for PortPanel {
         }
 
         match key.code {
+            KeyCode::Char('D') => {
+                // 大写 D：进入 DNS 子视图（小写 d 留给 anomaly dismiss）
+                self.dns_view_active = true;
+                self.dns_cursor = 0;
+                self.dns_scroll = 0;
+                self.dns_follow = true;
+                self.dns_search.clear();
+                return KeyResult::Consumed;
+            }
             KeyCode::Char('q') => return KeyResult::Quit,
             KeyCode::Char('g') => {
                 self.port_view_mode = self.port_view_mode.toggle();
@@ -862,12 +1009,16 @@ impl Panel for PortPanel {
 
             self.port_filter_dirty = true;
 
-            // Anomaly detection
-            let new_anomalies = self.anomaly_detector.detect(
+            // Anomaly detection — 阶段 5 D2: 把 TCP 传输质量计数一起喂给 detector,
+            // 让 R7(高重传率) / R8(高 RST 率) 在阈值触发时生成告警。
+            // 系统调用开销亚毫秒级,3s 一次零成本。
+            let tcp_stats = crate::collect::SystemSnapshot::tcp_stats();
+            let new_anomalies = self.anomaly_detector.detect_with_tcp_stats(
                 &self.port_entries,
                 &self.connection_diff,
                 &self.port_process_groups,
                 &self.port_remote_groups,
+                Some(&tcp_stats),
             );
 
             let critical_ids: HashSet<String> = new_anomalies

@@ -18,6 +18,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         app.process_panel.sort_field,
         SortField::DiskRead | SortField::DiskWrite
     );
+    let show_net = matches!(
+        app.process_panel.sort_field,
+        SortField::NetSent | SortField::NetRecv
+    );
 
     let header = if show_disk {
         Row::new(vec![
@@ -28,6 +32,21 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             Cell::from("内存"),
             Cell::from("磁盘R"),
             Cell::from("磁盘W"),
+            Cell::from("状态"),
+            Cell::from("分类"),
+            Cell::from("安全"),
+            Cell::from("名称"),
+        ])
+        .style(theme::style_header())
+    } else if show_net {
+        Row::new(vec![
+            Cell::from("  "),
+            Cell::from("PID"),
+            Cell::from("CPU%"),
+            Cell::from("MEM%"),
+            Cell::from("内存"),
+            Cell::from("↑网络"),
+            Cell::from("↓网络"),
             Cell::from("状态"),
             Cell::from("分类"),
             Cell::from("安全"),
@@ -111,6 +130,23 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(proc.name.clone()),
                 ])
                 .style(row_style)
+            } else if show_net {
+                let net_up = crate::format::format_speed(proc.net_sent_rate);
+                let net_down = crate::format::format_speed(proc.net_recv_rate);
+                Row::new(vec![
+                    Cell::from(checkbox),
+                    Cell::from(proc.pid.to_string()),
+                    Cell::from(cpu_str),
+                    Cell::from(mem_pct),
+                    Cell::from(mem_str),
+                    Cell::from(net_up),
+                    Cell::from(net_down),
+                    Cell::from(proc.status.clone()),
+                    Cell::from(class.label()).style(class_style(class)),
+                    sec_cell,
+                    Cell::from(proc.name.clone()),
+                ])
+                .style(row_style)
             } else {
                 Row::new(vec![
                     Cell::from(checkbox),
@@ -128,7 +164,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let widths: Vec<ratatui::layout::Constraint> = if show_disk {
+    let widths: Vec<ratatui::layout::Constraint> = if show_disk || show_net {
+        // 磁盘 / 网络两列宽度相同（都 9 字符 Length），合并分支避免重复
         vec![
             ratatui::layout::Constraint::Length(2),
             ratatui::layout::Constraint::Length(7),

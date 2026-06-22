@@ -12,6 +12,8 @@ fn make_process(pid: u32, name: &str, cpu: f32, memory: u64) -> ProcessInfo {
         disk_usage: (0, 0),
         disk_read_speed: 0,
         disk_write_speed: 0,
+        net_sent_rate: 0,
+        net_recv_rate: 0,
         status: "Running".to_string(),
         exe: Some(format!("C:\\{}", name)),
         cmd: vec![name.to_string()],
@@ -162,14 +164,50 @@ fn test_sort_field_cycle() {
     );
     assert_eq!(
         field.next().next().next().next().next().next().next(),
+        SortField::NetSent
+    );
+    assert_eq!(
+        field
+            .next()
+            .next()
+            .next()
+            .next()
+            .next()
+            .next()
+            .next()
+            .next(),
+        SortField::NetRecv
+    );
+    assert_eq!(
+        field
+            .next()
+            .next()
+            .next()
+            .next()
+            .next()
+            .next()
+            .next()
+            .next()
+            .next(),
         SortField::Cpu
     );
 
-    assert_eq!(field.prev(), SortField::DiskWrite);
-    assert_eq!(field.prev().prev(), SortField::DiskRead);
-    assert_eq!(field.prev().prev().prev(), SortField::Security);
-    assert_eq!(field.prev().prev().prev().prev(), SortField::Name);
-    assert_eq!(field.prev().prev().prev().prev().prev(), SortField::Pid);
+    assert_eq!(field.prev(), SortField::NetRecv);
+    assert_eq!(field.prev().prev(), SortField::NetSent);
+    assert_eq!(field.prev().prev().prev(), SortField::DiskWrite);
+    assert_eq!(field.prev().prev().prev().prev(), SortField::DiskRead);
+    assert_eq!(
+        field.prev().prev().prev().prev().prev(),
+        SortField::Security
+    );
+    assert_eq!(
+        field.prev().prev().prev().prev().prev().prev(),
+        SortField::Name
+    );
+    assert_eq!(
+        field.prev().prev().prev().prev().prev().prev().prev(),
+        SortField::Pid
+    );
 }
 
 #[test]

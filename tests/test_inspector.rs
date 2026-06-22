@@ -19,22 +19,26 @@ use proc::inspect;
 // ── InspectionTab unit ───────────────────────────────────────────────────────
 
 #[test]
-fn inspection_tab_all_has_four_v1_tabs() {
+fn inspection_tab_all_has_six_variants() {
     let all = InspectionTab::all();
-    assert_eq!(all.len(), 4);
+    assert_eq!(all.len(), 6);
     assert!(all.contains(&InspectionTab::Summary));
     assert!(all.contains(&InspectionTab::Env));
     assert!(all.contains(&InspectionTab::Network));
     assert!(all.contains(&InspectionTab::Dlls));
+    assert!(all.contains(&InspectionTab::Handles));
+    assert!(all.contains(&InspectionTab::Memory));
 }
 
 #[test]
-fn inspection_tab_next_cycles() {
+fn inspection_tab_next_cycles_all_six() {
     assert_eq!(InspectionTab::Summary.next(), InspectionTab::Env);
     assert_eq!(InspectionTab::Env.next(), InspectionTab::Network);
     assert_eq!(InspectionTab::Network.next(), InspectionTab::Dlls);
-    // 循环：Dlls → Summary
-    assert_eq!(InspectionTab::Dlls.next(), InspectionTab::Summary);
+    assert_eq!(InspectionTab::Dlls.next(), InspectionTab::Handles);
+    assert_eq!(InspectionTab::Handles.next(), InspectionTab::Memory);
+    // 循环：Memory → Summary
+    assert_eq!(InspectionTab::Memory.next(), InspectionTab::Summary);
 }
 
 #[test]
@@ -42,15 +46,82 @@ fn inspection_tab_prev_cycles_inverse_of_next() {
     for tab in InspectionTab::all() {
         assert_eq!(tab.next().prev(), *tab, "next/prev should be inverse");
     }
-    assert_eq!(InspectionTab::Summary.prev(), InspectionTab::Dlls);
+    // 循环：Summary → Memory（最后一个）
+    assert_eq!(InspectionTab::Summary.prev(), InspectionTab::Memory);
 }
 
 #[test]
-fn inspection_tab_labels_match_adr_0004() {
+fn inspection_tab_labels_match_context_md() {
     assert_eq!(InspectionTab::Summary.label(), "概要");
     assert_eq!(InspectionTab::Env.label(), "环境");
     assert_eq!(InspectionTab::Network.label(), "网络");
     assert_eq!(InspectionTab::Dlls.label(), "DLL");
+    assert_eq!(InspectionTab::Handles.label(), "句柄");
+    assert_eq!(InspectionTab::Memory.label(), "内存");
+}
+
+// ── 阶段 1 新增：6 变体不变量加固 ─────────────────────────────────────────────
+
+#[test]
+fn inspection_tab_all_in_next_cycle_order() {
+    // all() 的顺序必须与 next 循环顺序一致 —— Tab 栏从左到右就是 Tab 键的走向。
+    let all = InspectionTab::all();
+    for i in 0..all.len() {
+        // InspectionTab: Copy —— 直接解引用拿到 owned value，避免 owned-vs-ref
+        // 类型不匹配（`assert_eq!` 不接受 `InspectionTab` 与 `&&InspectionTab`）。
+        let expected: InspectionTab = all[(i + 1) % all.len()];
+        assert_eq!(
+            all[i].next(),
+            expected,
+            "all()[{i}].next() should equal all()[(i+1) % len]"
+        );
+    }
+}
+
+#[test]
+fn inspection_tab_next_prev_are_inverse_for_all_six() {
+    // 任何 tab 的 next → prev 必须回到原 tab；反之亦然。这是 Tab/BackTab
+    // 互相抵消的契约，单测固化避免未来加变体时漏写分支。
+    for tab in InspectionTab::all() {
+        assert_eq!(tab.next().prev(), *tab, "next/prev inverse for {tab:?}");
+        assert_eq!(tab.prev().next(), *tab, "prev/next inverse for {tab:?}");
+    }
+}
+
+#[test]
+fn inspection_tab_next_six_times_returns_to_start() {
+    // 6 变体意味着 next 连按 6 次必须回到起点。
+    for start in InspectionTab::all() {
+        let mut cur = *start;
+        for _ in 0..6 {
+            cur = cur.next();
+        }
+        assert_eq!(cur, *start, "next^6 must be identity for {start:?}");
+    }
+}
+
+#[test]
+fn inspection_tab_labels_are_all_distinct() {
+    // 6 个标签必须互不相同 —— Tab 栏靠 label 区分，重名会导致用户混淆。
+    let labels: Vec<&str> = InspectionTab::all().iter().map(|t| t.label()).collect();
+    let unique_count = labels
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    assert_eq!(
+        unique_count,
+        labels.len(),
+        "labels must be distinct: {labels:?}"
+    );
+}
+
+#[test]
+fn inspection_tab_memory_tab_is_last_in_all() {
+    // 顺序契约：Memory 必须是 all() 的最后一项，prev(Summary) 才会落到 Memory。
+    // 加这条是因为阶段 4 实现 Handles/Memory 采集时容易把顺序改乱。
+    let all = InspectionTab::all();
+    assert_eq!(*all.last().unwrap(), InspectionTab::Memory);
+    assert_eq!(all[all.len() - 2], InspectionTab::Handles);
 }
 
 #[test]
@@ -101,6 +172,8 @@ fn build_self_proc_info() -> ProcessInfo {
         disk_usage: (0, 0),
         disk_read_speed: 0,
         disk_write_speed: 0,
+        net_sent_rate: 0,
+        net_recv_rate: 0,
         status: String::new(),
         exe: None,
         cmd: Vec::new(),
@@ -132,7 +205,13 @@ fn tab_key_cycles_inspector_tabs() {
     press(&mut app, KeyCode::Tab);
     assert_eq!(app.inspection_tab, InspectionTab::Dlls);
 
-    // 循环：Dlls → Summary
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.inspection_tab, InspectionTab::Handles);
+
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.inspection_tab, InspectionTab::Memory);
+
+    // 循环：Memory → Summary
     press(&mut app, KeyCode::Tab);
     assert_eq!(app.inspection_tab, InspectionTab::Summary);
 }
@@ -142,11 +221,12 @@ fn backtab_cycles_in_reverse() {
     let mut app = enter_inspector_with_self_pid();
     app.inspection_tab = InspectionTab::Summary;
 
+    // 6 变体下 BackTab 从 Summary 倒退到 Memory（最后一个）。
     app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    assert_eq!(app.inspection_tab, InspectionTab::Dlls);
+    assert_eq!(app.inspection_tab, InspectionTab::Memory);
 
     app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    assert_eq!(app.inspection_tab, InspectionTab::Network);
+    assert_eq!(app.inspection_tab, InspectionTab::Handles);
 }
 
 #[test]
@@ -355,4 +435,102 @@ fn linux_dlls_include_libc_via_proc_maps() {
         "expected libc/ld/libgcc in self maps, got: {:?}",
         dlls.iter().take(3).map(|d| &d.path).collect::<Vec<_>>()
     );
+}
+
+// ===========================================================================
+// 阶段 4：Handles/Memory Tab 接线 + A4 优先级快捷键
+// ===========================================================================
+
+#[test]
+fn app_inspector_defaults_handles_and_memory_are_none() {
+    // 阶段 1 加的占位字段；阶段 4 switch_mode(ProcessDetail) 才填。
+    // 这里验证 fresh App 上保持 None，避免误以为「详情页加载失败」。
+    let app = App::new().expect("App::new");
+    assert!(
+        app.inspection_handles_data.is_none(),
+        "fresh App should have handles_data = None"
+    );
+    assert!(
+        app.inspection_memory_data.is_none(),
+        "fresh App should have memory_data = None"
+    );
+}
+
+#[test]
+fn r_refresh_sets_inspection_handles_and_memory_data() {
+    // 模拟 switch_mode(ProcessDetail) 后的状态：detail_process + inspection_data
+    // 已加载，但 handles/memory 仍 None（helper 没填）。按 r 后应同时刷新三份数据。
+    let mut app = enter_inspector_with_self_pid();
+    app.inspection_handles_data = None;
+    app.inspection_memory_data = None;
+
+    press(&mut app, KeyCode::Char('r'));
+
+    // r 路径会调 collect_handles / collect_memory（unwrap_or_default 兜底），
+    // 成功路径下两者都变 Some。
+    assert!(
+        app.inspection_handles_data.is_some(),
+        "r 应填充 inspection_handles_data"
+    );
+    assert!(
+        app.inspection_memory_data.is_some(),
+        "r 应填充 inspection_memory_data"
+    );
+}
+
+#[test]
+fn plus_key_in_detail_writes_status_message() {
+    // A4：详情页 +/- 调整优先级 —— 成功/失败都写 status_message（不会静默吞键）。
+    let mut app = enter_inspector_with_self_pid();
+    app.status_message = None;
+    press(&mut app, KeyCode::Char('+'));
+    assert!(
+        app.status_message.is_some(),
+        "+ 应该写一条状态消息（即使权限不足）"
+    );
+}
+
+#[test]
+fn minus_key_in_detail_writes_status_message() {
+    let mut app = enter_inspector_with_self_pid();
+    app.status_message = None;
+    press(&mut app, KeyCode::Char('-'));
+    assert!(
+        app.status_message.is_some(),
+        "- 应该写一条状态消息（即使权限不足）"
+    );
+}
+
+#[test]
+fn plus_key_does_not_quit_or_change_mode() {
+    // +/- 不应误触发退出 / 切 mode（防止与 Replay 的 +/- 速度调节搞混）。
+    let mut app = enter_inspector_with_self_pid();
+    let mode_before = app.mode;
+    press(&mut app, KeyCode::Char('+'));
+    assert_eq!(app.mode, mode_before);
+    assert!(!app.should_quit, "+ 不应触发退出");
+}
+
+#[test]
+fn switching_to_handles_tab_preserves_data() {
+    // 进详情页 → 切到 Handles Tab → inspection_handles_data 不应被 Tab 切换清掉。
+    let mut app = enter_inspector_with_self_pid();
+    // 手动塞一个非空 handles_data（模拟 switch_mode 已加载）。
+    app.inspection_handles_data = Some(vec![proc::inspect::HandleInfo {
+        raw_handle: 0xDEADBEEF,
+        kind: proc::inspect::HandleKind::File,
+        name: "test.txt".to_string(),
+        granted_access: 0x12345678,
+    }]);
+    press(&mut app, KeyCode::Tab); // Summary → Env
+    press(&mut app, KeyCode::Tab); // Env → Network
+    press(&mut app, KeyCode::Tab); // Network → Dlls
+    press(&mut app, KeyCode::Tab); // Dlls → Handles
+    assert_eq!(app.inspection_tab, InspectionTab::Handles);
+    let data = app
+        .inspection_handles_data
+        .as_ref()
+        .expect("handles preserved");
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0].name, "test.txt");
 }

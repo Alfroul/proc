@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use crate::app::App;
 use crate::docker::HealthStatus;
 use crate::tui::theme;
+use crate::view_models::docker_panel::DockerViewMode;
 
 const COL_NAME: usize = 20;
 const COL_IMAGE: usize = 14;
@@ -35,11 +36,27 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     draw_title(f, chunks[0], app);
-    draw_container_list(f, chunks[1], app);
-    draw_event_log(f, chunks[2], app);
+    match app.docker_panel.view_mode {
+        DockerViewMode::Containers => {
+            draw_container_list(f, chunks[1], app);
+            draw_event_log(f, chunks[2], app);
+        }
+        DockerViewMode::Images => {
+            draw_image_list(f, chunks[1], app);
+            draw_image_hint(f, chunks[2], app);
+        }
+        DockerViewMode::Volumes => {
+            draw_volume_list(f, chunks[1], app);
+            draw_volume_hint(f, chunks[2], app);
+        }
+    }
 
     if app.docker_panel.detail.is_some() {
         draw_detail_popup(f, area, app);
+    }
+
+    if app.docker_panel.log_viewer.is_some() {
+        draw_logs_overlay(f, area, app);
     }
 }
 
@@ -50,32 +67,45 @@ fn draw_title(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(" ❌ Docker 未运行 ", theme::style_danger())
     };
 
-    let containers = &app.docker_panel.containers;
-
-    let title_line = Line::from(vec![
-        Span::styled(" Docker 容器 ", theme::style_header()),
-        conn_status,
+    let mode = app.docker_panel.view_mode;
+    let tabs_line = Line::from(vec![
+        Span::styled(" 视图: ", theme::style_muted()),
         Span::styled(
-            format!("  共 {} 个", containers.len()),
-            theme::style_muted(),
+            "[容器]",
+            if mode == DockerViewMode::Containers {
+                Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                theme::style_muted()
+            },
         ),
+        Span::raw(" "),
+        Span::styled(
+            "[镜像]",
+            if mode == DockerViewMode::Images {
+                Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                theme::style_muted()
+            },
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "[卷]",
+            if mode == DockerViewMode::Volumes {
+                Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                theme::style_muted()
+            },
+        ),
+        Span::raw("  (Tab 切换)"),
+        conn_status,
     ]);
-
-    let header_line = Line::from(vec![
-        Span::styled("   ", theme::style_muted()),
-        Span::styled(pad_display("名称", COL_NAME), theme::style_muted()),
-        Span::styled(" | ", theme::style_muted()),
-        Span::styled(pad_display("镜像", COL_IMAGE), theme::style_muted()),
-        Span::styled(" | ", theme::style_muted()),
-        Span::styled(pad_display("端口", COL_PORTS), theme::style_muted()),
-        Span::styled(" | ", theme::style_muted()),
-        Span::styled(pad_display("状态", COL_STATUS), theme::style_muted()),
-        Span::styled(" | ", theme::style_muted()),
-        Span::styled(pad_display("时长", COL_UPTIME), theme::style_muted()),
-    ]);
-
-    let para = Paragraph::new(vec![title_line, header_line]);
-    f.render_widget(para, area);
+    f.render_widget(Paragraph::new(vec![tabs_line]), area);
 }
 
 fn draw_container_list(f: &mut Frame, area: Rect, app: &App) {
@@ -203,6 +233,212 @@ fn draw_event_log(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(list, area);
 }
 
+fn draw_image_list(f: &mut Frame, area: Rect, app: &App) {
+    let images = &app.docker_panel.images;
+
+    let items: Vec<ListItem> = if images.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  暂无镜像（r 刷新）",
+            theme::style_muted(),
+        )))]
+    } else {
+        images
+            .iter()
+            .enumerate()
+            .map(|(i, img)| {
+                let selected = i == app.docker_panel.images_cursor;
+                let bg = if selected {
+                    theme::accent()
+                } else {
+                    theme::bg_primary()
+                };
+                let name = if img.repo_tags.is_empty() {
+                    format!("<none>:{}", img.short_id)
+                } else {
+                    img.repo_tags.join(", ")
+                };
+                let size = format_bytes(img.size);
+                let used_marker = if img.in_use() { "▲" } else { " " };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", used_marker), theme::style_muted()),
+                    Span::styled(pad_display(&name, 40), Style::default().bg(bg)),
+                    Span::styled(" | ", theme::style_muted()),
+                    Span::styled(pad_display(&img.short_id, 14), Style::default().bg(bg)),
+                    Span::styled(" | ", theme::style_muted()),
+                    Span::styled(pad_display(&size, 10), Style::default().bg(bg)),
+                    Span::styled(" | ", theme::style_muted()),
+                    Span::styled(format!("容器={}", img.containers), theme::style_muted()),
+                ]))
+            })
+            .collect()
+    };
+
+    let list = List::new(items).block(Block::default().borders(Borders::NONE));
+    let mut state = ListState::default();
+    if !images.is_empty() {
+        state.select(Some(app.docker_panel.images_cursor.min(images.len() - 1)));
+    }
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_image_hint(f: &mut Frame, area: Rect, app: &App) {
+    let hint = if let Some(target) = &app.docker_panel.delete_pending {
+        match target {
+            crate::view_models::docker_panel::DeleteTarget::Image { display, .. } => {
+                format!("⚠ 再按 d 删除 {} (Esc 取消)", display)
+            }
+            _ => "Esc 取消".to_string(),
+        }
+    } else {
+        " ↑↓ 选择  r 刷新  d 删除选中  Tab 切视图".to_string()
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(hint, theme::style_muted()))
+            .block(Block::default().borders(Borders::TOP)),
+        area,
+    );
+}
+
+fn draw_volume_list(f: &mut Frame, area: Rect, app: &App) {
+    let volumes = &app.docker_panel.volumes;
+
+    let items: Vec<ListItem> = if volumes.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  暂无 volume（r 刷新）",
+            theme::style_muted(),
+        )))]
+    } else {
+        volumes
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let selected = i == app.docker_panel.volumes_cursor;
+                let bg = if selected {
+                    theme::accent()
+                } else {
+                    theme::bg_primary()
+                };
+                let used_marker = if v.in_use { "▲" } else { " " };
+                let size = if v.size > 0 {
+                    format_bytes(v.size)
+                } else {
+                    "-".to_string()
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", used_marker), theme::style_muted()),
+                    Span::styled(pad_display(&v.name, 30), Style::default().bg(bg)),
+                    Span::styled(" | ", theme::style_muted()),
+                    Span::styled(pad_display(&v.driver, 10), Style::default().bg(bg)),
+                    Span::styled(" | ", theme::style_muted()),
+                    Span::styled(pad_display(&size, 10), Style::default().bg(bg)),
+                    Span::styled(" | ", theme::style_muted()),
+                    Span::styled(
+                        if v.in_use { "使用中" } else { "未使用" },
+                        if v.in_use {
+                            theme::style_success()
+                        } else {
+                            theme::style_muted()
+                        },
+                    ),
+                ]))
+            })
+            .collect()
+    };
+
+    let list = List::new(items).block(Block::default().borders(Borders::NONE));
+    let mut state = ListState::default();
+    if !volumes.is_empty() {
+        state.select(Some(app.docker_panel.volumes_cursor.min(volumes.len() - 1)));
+    }
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_volume_hint(f: &mut Frame, area: Rect, app: &App) {
+    let hint = if let Some(target) = &app.docker_panel.delete_pending {
+        match target {
+            crate::view_models::docker_panel::DeleteTarget::Volume { name } => {
+                format!("⚠ 再按 d 删除 {} (Esc 取消)", name)
+            }
+            _ => "Esc 取消".to_string(),
+        }
+    } else {
+        " ↑↓ 选择  r 刷新  d 删除选中  Tab 切视图".to_string()
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(hint, theme::style_muted()))
+            .block(Block::default().borders(Borders::TOP)),
+        area,
+    );
+}
+
+fn draw_logs_overlay(f: &mut Frame, area: Rect, app: &App) {
+    // 日志占下半屏 60%。
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+    let log_area = chunks[1];
+
+    let Some(lv) = &app.docker_panel.log_viewer else {
+        return;
+    };
+    let container = lv.container.as_deref().unwrap_or("");
+    let follow_marker = if lv.follow { " (follow)" } else { "" };
+
+    let title = Line::from(vec![
+        Span::styled(
+            format!(" 📜 日志: {}{} ", container, follow_marker),
+            theme::style_header(),
+        ),
+        Span::styled(
+            "  ↑↓ 滚动  f follow  c 清屏  Esc 退出 ",
+            theme::style_muted(),
+        ),
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(theme::style_normal());
+
+    // 显示缓冲：从底部往上数 `scroll_from_bottom` 条，按可用高度截断。
+    let total = lv.buffer.len();
+    let height = log_area.height.saturating_sub(2) as usize; // 边框占 2 行
+    let from_bottom = lv.scroll_from_bottom.unwrap_or(0);
+    let end = total.saturating_sub(from_bottom);
+    let start = end.saturating_sub(height);
+    let visible: Vec<&crate::docker::logs::LogLine> =
+        lv.buffer.iter().skip(start).take(end - start).collect();
+
+    let lines: Vec<Line> = if visible.is_empty() {
+        vec![Line::from(Span::styled(
+            "  (等待日志...)",
+            theme::style_muted(),
+        ))]
+    } else {
+        visible
+            .iter()
+            .map(|log| {
+                let style = if log.is_stderr {
+                    theme::style_danger()
+                } else {
+                    theme::style_normal()
+                };
+                Line::from(Span::styled(&log.message, style))
+            })
+            .collect()
+    };
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        log_area,
+    );
+}
+
 fn draw_detail_popup(f: &mut Frame, area: Rect, app: &App) {
     let popup_area = centered_rect(60, 18, area);
     f.render_widget(ratatui::widgets::Clear, popup_area);
@@ -267,8 +503,51 @@ fn draw_detail_popup(f: &mut Frame, area: Rect, app: &App) {
 
     let mut all_lines = content;
     all_lines.extend(stats_section);
+
+    // E4 — 容器内进程区块（按 t 展开 / 折叠）。
+    if app.docker_panel.show_top_processes {
+        all_lines.push(Line::from(""));
+        all_lines.push(Line::from(Span::styled(
+            format!(
+                " 容器内进程（{} 个，r 刷新）:",
+                app.docker_panel.top_processes.len()
+            ),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        if app.docker_panel.top_processes.is_empty() {
+            all_lines.push(Line::from(Span::styled(
+                "  （无进程或容器未运行）",
+                theme::style_muted(),
+            )));
+        } else {
+            for (i, p) in app.docker_panel.top_processes.iter().take(10).enumerate() {
+                all_lines.push(Line::from(format!(
+                    "  {:>3}. {:<10} {}",
+                    i + 1,
+                    p.pid,
+                    p.command.chars().take(80).collect::<String>()
+                )));
+            }
+            if app.docker_panel.top_processes.len() > 10 {
+                all_lines.push(Line::from(format!(
+                    "  ... +{} 个进程未显示",
+                    app.docker_panel.top_processes.len() - 10
+                )));
+            }
+        }
+    } else {
+        all_lines.push(Line::from(""));
+        all_lines.push(Line::from(Span::styled(
+            "  (按 t 查看容器内进程，按 l 查看日志)",
+            theme::style_muted(),
+        )));
+    }
+
     all_lines.push(Line::from(""));
-    all_lines.push(Line::from(Span::styled("  Esc 关闭", theme::style_muted())));
+    all_lines.push(Line::from(Span::styled(
+        "  Esc 关闭 | t 进程 | l 日志",
+        theme::style_muted(),
+    )));
 
     let paragraph = Paragraph::new(all_lines)
         .block(

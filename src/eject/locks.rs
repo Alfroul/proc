@@ -70,6 +70,8 @@ pub fn find_volume_lockers_with_processes(
             disk_usage: (0, 0),
             disk_read_speed: 0,
             disk_write_speed: 0,
+            net_sent_rate: 0,
+            net_recv_rate: 0,
             status: String::new(),
             exe: exe.clone(),
             cmd: Vec::new(),

@@ -39,7 +39,48 @@ fn draw_net_traffic_bar(f: &mut Frame, area: Rect, app: &App) {
 
     let sparkline_str = build_sparkline(&app.port_panel.connection_history);
 
-    let line = Line::from(vec![
+    // 阶段 5 D2: TCP 传输质量片段。retrans/rst 都是累计值,展示时给百分比
+    // 让数字可读。分母用 out_segs(累计输出段数);out_segs=0 时表示该平台
+    // 没拿到 SNMP 数据(非 Linux / 非 Windows),显示 "-" 而非 "0%"。
+    let tcp_stats = crate::collect::SystemSnapshot::tcp_stats();
+    let quality_spans: Vec<Span> = if tcp_stats.out_segs > 0 {
+        let retrans_rate = tcp_stats.retransmitted_segs as f64 / tcp_stats.out_segs as f64 * 100.0;
+        let rst_rate = tcp_stats.reset_segs as f64 / tcp_stats.out_segs as f64 * 100.0;
+        let retrans_style = if retrans_rate > 5.0 {
+            theme::style_danger()
+        } else if retrans_rate > 1.0 {
+            theme::style_warning()
+        } else {
+            Style::default().fg(theme::success())
+        };
+        let rst_style = if rst_rate > 2.0 {
+            theme::style_danger()
+        } else if rst_rate > 0.5 {
+            theme::style_warning()
+        } else {
+            Style::default().fg(theme::success())
+        };
+        vec![
+            Span::styled("  重传 ", theme::style_muted()),
+            Span::styled(format!("{:.1}%", retrans_rate), retrans_style),
+            Span::styled(" RST ", theme::style_muted()),
+            Span::styled(format!("{:.1}%", rst_rate), rst_style),
+            Span::styled(" 失败 ", theme::style_muted()),
+            Span::styled(
+                format!("{}", tcp_stats.failed_connections),
+                theme::style_header(),
+            ),
+        ]
+    } else {
+        vec![
+            Span::styled("  重传 ", theme::style_muted()),
+            Span::styled("-", theme::style_muted()),
+            Span::styled(" RST ", theme::style_muted()),
+            Span::styled("-", theme::style_muted()),
+        ]
+    };
+
+    let mut spans = vec![
         Span::styled(format!(" {} ", adapter_name), theme::style_header()),
         Span::styled(" ▼ ", theme::style_muted()),
         Span::styled(
@@ -66,8 +107,9 @@ fn draw_net_traffic_bar(f: &mut Frame, area: Rect, app: &App) {
             format!(" {}", app.port_panel.connection_diff.active_count),
             theme::style_header(),
         ),
-    ]);
-    let p = Paragraph::new(line);
+    ];
+    spans.extend(quality_spans);
+    let p = Paragraph::new(Line::from(spans));
     f.render_widget(p, area);
 }
 
@@ -80,6 +122,12 @@ fn split_with_traffic_bar(area: Rect) -> (Rect, Rect) {
 }
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
+    // 阶段 8 D3：DNS 子视图优先（按 D 进入，覆盖常规端口视图）。
+    if app.port_panel.dns_view_active {
+        draw_dns_view(f, area, app);
+        return;
+    }
+
     if let Some(ref detail) = app.port_panel.port_detail {
         draw_port_detail(f, area, detail);
     } else if app.port_panel.show_anomaly_detail {
@@ -108,6 +156,146 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
+}
+
+/// 阶段 8 D3 DNS 子视图：列出 `App::dns_log_recent`（最近 1000 条查询）。
+/// 列：时间 / PID / 进程名 / 类型 / 域名 / 结果。`/` 搜索过滤；`f` follow；
+/// `c` 清空；`Esc`/`D` 退出。
+fn draw_dns_view(f: &mut Frame, area: Rect, app: &App) {
+    use crate::dns_log::DnsResult;
+
+    let pp = &app.port_panel;
+    let recent = &app.dns_log_recent;
+
+    // 标题栏：显示 collector 状态 + 条数 + 操作提示
+    let header_line = if app.dns_log_worker.is_some() {
+        format!(
+            " DNS 查询日志（仅内存 · {} 条 · {}）  D/Esc 退出 · / 搜索 · f follow · c 清空",
+            recent.len(),
+            if pp.dns_follow { "跟随" } else { "暂停" }
+        )
+    } else {
+        " DNS 查询日志：此平台暂不支持（Windows 走 PowerShell Get-WinEvent，Linux/macOS 见 ADR-0006）".to_string()
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+
+    let header = Paragraph::new(header_line).style(theme::style_header());
+    f.render_widget(header, chunks[0]);
+
+    // 搜索栏（激活时显示）
+    let (table_area, search_area) = if pp.dns_search.is_active() {
+        let inner = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(chunks[1]);
+        (inner[0], Some(inner[1]))
+    } else {
+        (chunks[1], None)
+    };
+
+    // 过滤后的索引（搜索 query 命中域名 / 进程名）
+    let visible_indices = pp.dns_filtered_indices(recent);
+
+    let header_row = Row::new(vec![
+        Cell::from("时间"),
+        Cell::from("PID"),
+        Cell::from("进程名"),
+        Cell::from("类型"),
+        Cell::from("域名"),
+        Cell::from("结果"),
+    ])
+    .style(theme::style_header());
+
+    let rows_visible = table_area.height.saturating_sub(3) as usize;
+    let scroll = pp.dns_scroll;
+    let window: Vec<usize> = visible_indices
+        .iter()
+        .skip(scroll)
+        .take(rows_visible)
+        .copied()
+        .collect();
+
+    let rows: Vec<Row> = window
+        .iter()
+        .map(|&idx| {
+            let q = &recent[idx];
+            let ts = format_system_time(q.timestamp);
+            let result_str = match &q.result {
+                DnsResult::Success(ips) => {
+                    if ips.is_empty() {
+                        "OK".to_string()
+                    } else {
+                        let joined = ips
+                            .iter()
+                            .map(std::net::IpAddr::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!("OK:{joined}")
+                    }
+                }
+                DnsResult::NxDomain => "NXDOMAIN".to_string(),
+                DnsResult::Timeout => "TIMEOUT".to_string(),
+                DnsResult::Error(s) => format!("ERR:{s}"),
+            };
+            let result_style = match &q.result {
+                DnsResult::Success(_) => Style::default().fg(Color::Green),
+                DnsResult::NxDomain | DnsResult::Error(_) => Style::default().fg(Color::Yellow),
+                DnsResult::Timeout => Style::default().fg(Color::LightRed),
+            };
+            Row::new(vec![
+                Cell::from(ts),
+                Cell::from(q.pid.to_string()),
+                Cell::from(q.process_name.clone()),
+                Cell::from(q.query_type.clone()),
+                Cell::from(q.query_name.clone()),
+                Cell::from(result_str).style(result_style),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(7),
+            Constraint::Length(18),
+            Constraint::Length(6),
+            Constraint::Min(20),
+            Constraint::Length(30),
+        ],
+    )
+    .header(header_row)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("DNS 查询日志（仅内存 · 隐私不持久化）"),
+    );
+    f.render_widget(table, table_area);
+
+    if let Some(area) = search_area {
+        let s = Paragraph::new(format!(" 搜索: {}", pp.dns_search.query()))
+            .style(Style::default().fg(Color::Cyan));
+        f.render_widget(s, area);
+    }
+}
+
+/// 把 SystemTime 格式化成 `HH:MM:SS`（本地时区，复用 lib::local_offset_hours）。
+fn format_system_time(t: std::time::SystemTime) -> String {
+    let dur = match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d,
+        Err(_) => return "?".into(),
+    };
+    let secs = dur.as_secs();
+    let offset = crate::local_offset_hours() * 3600;
+    let local = (secs as i64 + offset).max(0) as u64;
+    let h = ((local % 86_400) / 3600) as u32;
+    let m = ((local % 3600) / 60) as u32;
+    let s = (local % 60) as u32;
+    format!("{h:02}:{m:02}:{s:02}")
 }
 
 fn draw_main_view(f: &mut Frame, area: Rect, app: &App) {

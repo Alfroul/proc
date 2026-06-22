@@ -21,6 +21,8 @@ fn fake_processes(n: u32) -> Vec<ProcessInfo> {
             disk_usage: (0, 0),
             disk_read_speed: 0,
             disk_write_speed: 0,
+            net_sent_rate: 0,
+            net_recv_rate: 0,
             status: String::new(),
             exe: None,
             cmd: Vec::new(),

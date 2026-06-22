@@ -259,6 +259,11 @@ pub struct PortEntry {
     pub state: Option<String>,
     pub pid: u32,
     pub process_name: String,
+    /// Per-connection round-trip time in ms. 仅在 Windows + 管理员模式 +
+    /// ESTABLISHED 连接上由 `GetPerTcpConnectionEStats` 填充,其它平台 / 非
+    /// admin 默认 `None`。UI 把 `None` 渲染为 "-",而不是 "0ms" —— 避免
+    /// 误导成"零延迟"。
+    pub rtt_ms: Option<u32>,
 }
 
 pub fn scan_ports() -> Result<Vec<PortEntry>> {
@@ -313,6 +318,7 @@ pub fn scan_ports_with_names(
                     state: Some(format!("{}", tcp.state)),
                     pid,
                     process_name,
+                    rtt_ms: None,
                 });
             }
             netstat2::ProtocolSocketInfo::Udp(udp) => {
@@ -325,6 +331,7 @@ pub fn scan_ports_with_names(
                     state: None,
                     pid,
                     process_name,
+                    rtt_ms: None,
                 });
             }
         }
@@ -906,5 +913,136 @@ pub fn diff_connections(prev: &[PortEntry], current: &[PortEntry]) -> Connection
         active_count,
         close_wait_count,
         time_wait_count,
+    }
+}
+
+/// Linux `/proc/net/snmp` 解析出来的 TCP 段计数（阶段 5 D2）。
+///
+/// `retrans_segs` / `out_rsts` / `attempt_fails` 对应 Windows
+/// `MIB_TCPSTATS2` 的 `dwRetransSegs` / `dwOutRsts` / `dwAttemptFails`，
+/// 在 [`crate::collect::query_tcp_stats`] 里两边都被映射到
+/// `TcpStats` 的同名 u64 字段。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TcpSnmpStats {
+    pub retrans_segs: u64,
+    pub out_rsts: u64,
+    pub attempt_fails: u64,
+    /// `InErrs` / `InCsumErrors` 类语义；保留为独立字段以便日后扩展。
+    pub in_errs: u64,
+    /// 累计输出段数，用于重传率 / RST 率的分母计算。
+    pub out_segs: u64,
+}
+
+/// 解析 Linux `/proc/net/snmp` 的 `Tcp:` 段。
+///
+/// 文件格式（每对两行，header + numeric）：
+/// ```text
+/// Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails
+///       EstabResets CurrEstab InSegs OutSegs RetransSegs OutRsts InCsumErrors
+/// Tcp: 1 200 120000 0 521 332 7 4 2 123456 654321 12 8 0
+/// ```
+///
+/// 列名顺序**稳定**（Linux 内核固定），但实际值可能比 header 多
+/// 几个（不同内核版本）—— 这里按列名匹配，比按位置稳。
+///
+/// 解析失败的整行返回 `TcpSnmpStats::default()`，不抛错：调用方
+/// （`query_tcp_stats`）会拿 0 填，UI 不至于空白。
+#[must_use]
+pub fn parse_proc_net_snmp_tcp(content: &str) -> TcpSnmpStats {
+    let mut header: Option<Vec<&str>> = None;
+    let mut values: Option<Vec<&str>> = None;
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        let Some(rest) = line.strip_prefix("Tcp:") else {
+            continue;
+        };
+        let parts: Vec<&str> = rest.split_ascii_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        // 第一个 token 是不是数字决定这是 header 行还是 value 行。
+        let is_numeric = parts[0].parse::<u64>().is_ok();
+        if is_numeric {
+            values = Some(parts);
+        } else {
+            header = Some(parts);
+        }
+    }
+
+    let (Some(h), Some(v)) = (header, values) else {
+        return TcpSnmpStats::default();
+    };
+    let mut out = TcpSnmpStats::default();
+    for (i, name) in h.iter().enumerate() {
+        let Some(raw) = v.get(i) else { continue };
+        let Ok(n) = raw.parse::<u64>() else {
+            continue;
+        };
+        match *name {
+            "RetransSegs" => out.retrans_segs = n,
+            "OutRsts" => out.out_rsts = n,
+            "AttemptFails" => out.attempt_fails = n,
+            "InErrs" | "InCsumErrors" => out.in_errs += n,
+            "OutSegs" => out.out_segs = n,
+            _ => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod snmp_tests {
+    use super::parse_proc_net_snmp_tcp;
+
+    #[test]
+    fn parses_typical_proc_net_snmp() {
+        let sample = "\
+Ip: Forwarding DefaultTTL InReceives InHdrErrors InAddrErrors ForwDatagrams ...
+Ip: 1 64 12345 0 0 0 ...
+Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs OutRsts InCsumErrors
+Tcp: 1 200 120000 0 521 332 7 4 2 123456 654321 12 8 0
+Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors
+Udp: 100 5 0 110 0 0
+";
+        let s = parse_proc_net_snmp_tcp(sample);
+        assert_eq!(s.retrans_segs, 12);
+        assert_eq!(s.out_rsts, 8);
+        assert_eq!(s.attempt_fails, 7);
+        assert_eq!(s.out_segs, 654321);
+        assert_eq!(s.in_errs, 0); // InCsumErrors=0
+    }
+
+    #[test]
+    fn returns_default_when_missing_tcp_section() {
+        let sample = "Udp: InDatagrams\nUdp: 100\n";
+        assert_eq!(
+            parse_proc_net_snmp_tcp(sample),
+            super::TcpSnmpStats::default()
+        );
+    }
+
+    #[test]
+    fn tolerates_extra_columns_in_values() {
+        // 新内核可能加列，header 也跟着加；只要列名匹配就能拿到正确的值。
+        let sample = "\
+Tcp: RtoAlgorithm RtoMin AttemptFails OutSegs RetransSegs OutRsts NewFutureColumn
+Tcp: 1 200 9 555 4 2 ignored_extra
+";
+        let s = parse_proc_net_snmp_tcp(sample);
+        assert_eq!(s.attempt_fails, 9);
+        assert_eq!(s.out_segs, 555);
+        assert_eq!(s.retrans_segs, 4);
+        assert_eq!(s.out_rsts, 2);
+    }
+
+    #[test]
+    fn handles_in_errs_and_in_checksum_errors_combined() {
+        let sample = "\
+Tcp: InErrs InCsumErrors
+Tcp: 3 1
+";
+        let s = parse_proc_net_snmp_tcp(sample);
+        assert_eq!(s.in_errs, 4); // 3 + 1
     }
 }

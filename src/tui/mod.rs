@@ -1,5 +1,6 @@
 pub mod alert_badge;
 pub mod app_group_view;
+pub mod container_exec_view;
 pub mod detail_view;
 pub mod docker_panel;
 pub mod help_panel;
@@ -118,6 +119,14 @@ pub fn run_app(terminal: &mut Tui, app: &mut App) -> Result<()> {
             if let Some(ref mut rec) = vt_recorder {
                 rec.try_capture(completed.buffer, completed.area);
             }
+
+            // 阶段 9 E2：ContainerExec 模式下，按 ratatui 实际渲染尺寸调整容器 PTY。
+            // resize 在 draw 之后做，确保 area 已是新尺寸。
+            if app.mode == crate::app::AppMode::ContainerExec {
+                let w = completed.area.width;
+                let h = completed.area.height;
+                app.resize_container_exec(w, h);
+            }
         }
 
         // Update recording elapsed in App for sidebar display
@@ -145,10 +154,16 @@ pub fn run_app(terminal: &mut Tui, app: &mut App) -> Result<()> {
 fn handle_events(app: &mut App) -> Result<()> {
     let mut count = 0;
     while event::poll(Duration::from_millis(0))? && count < 10 {
-        if let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            app.handle_key(key);
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                app.handle_key(key);
+            }
+            Event::Resize(_width, _height) => {
+                // 阶段 9 E2：终端 resize 时把新尺寸同步给容器 PTY。
+                // 主面板自动适配由 ratatui 自动处理；PTY 需要显式 resize + 通知容器 SIGWINCH。
+                app.notify_terminal_resized();
+            }
+            _ => {}
         }
         count += 1;
     }

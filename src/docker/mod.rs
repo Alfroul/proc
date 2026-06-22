@@ -1,7 +1,13 @@
 pub mod events;
+pub mod exec;
 pub mod health;
+pub mod images;
+pub mod logs;
+pub mod logs_worker;
 pub mod snapshot_worker;
 pub mod stats;
+pub mod top;
+pub mod volumes;
 
 use std::time::SystemTime;
 
@@ -228,6 +234,36 @@ impl DockerMonitor {
     /// 获取容器资源统计
     pub fn get_stats(&self, name: &str) -> Result<stats::ContainerStats> {
         stats::get_container_stats(&self.runtime, &self.docker, name)
+    }
+
+    /// E4 — 容器内进程列表（`docker top` 等价）。
+    pub fn container_top(&self, name: &str) -> Result<Vec<top::ContainerTopProcess>> {
+        top::get_container_top(&self.runtime, &self.docker, name)
+    }
+
+    /// E1 — 一次性拉容器日志（非流式，CLI 用）。
+    pub fn collect_logs(&self, name: &str, tail: Option<&str>) -> Result<Vec<logs::LogLine>> {
+        logs::collect_container_logs(&self.runtime, &self.docker, name, tail)
+    }
+
+    /// E3 — 列出本地所有镜像。
+    pub fn list_images(&self) -> Result<Vec<images::ImageInfo>> {
+        images::list_images(&self.runtime, &self.docker)
+    }
+
+    /// E3 — 删除镜像。
+    pub fn remove_image(&self, id: &str, force: bool) -> Result<()> {
+        images::remove_image(&self.runtime, &self.docker, id, force)
+    }
+
+    /// E3 — 列出所有 volume。
+    pub fn list_volumes(&self) -> Result<Vec<volumes::VolumeInfo>> {
+        volumes::list_volumes(&self.runtime, &self.docker)
+    }
+
+    /// E3 — 删除 volume。
+    pub fn remove_volume(&self, name: &str, force: bool) -> Result<()> {
+        volumes::remove_volume(&self.runtime, &self.docker, name, force)
     }
 }
 

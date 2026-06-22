@@ -84,10 +84,18 @@ fn test_sort_field_cycle() {
     f = f.next();
     assert_eq!(f, SortField::DiskWrite);
     f = f.next();
+    assert_eq!(f, SortField::NetSent);
+    f = f.next();
+    assert_eq!(f, SortField::NetRecv);
+    f = f.next();
     assert_eq!(f, SortField::Cpu);
 
     // prev() cycle
     let mut f = SortField::Cpu;
+    f = f.prev();
+    assert_eq!(f, SortField::NetRecv);
+    f = f.prev();
+    assert_eq!(f, SortField::NetSent);
     f = f.prev();
     assert_eq!(f, SortField::DiskWrite);
     f = f.prev();
@@ -133,6 +141,8 @@ fn test_process_info_disk_fields() {
         disk_usage: (1_000_000, 500_000),
         disk_read_speed: 500_000,
         disk_write_speed: 250_000,
+        net_sent_rate: 0,
+        net_recv_rate: 0,
         status: "Run".to_string(),
         exe: Some("C:\\test.exe".to_string()),
         cmd: vec![],

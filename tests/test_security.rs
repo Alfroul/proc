@@ -19,6 +19,8 @@ fn make_proc(
         disk_usage: (0, 0),
         disk_read_speed: 0,
         disk_write_speed: 0,
+        net_sent_rate: 0,
+        net_recv_rate: 0,
         status: "Running".to_string(),
         exe: exe.map(|s| s.to_string()),
         cmd: cmd.iter().map(|s| s.to_string()).collect(),
