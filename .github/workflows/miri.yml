@@ -4,8 +4,8 @@ name: Miri
 # 仅跑 Linux（Miri 对 Windows 支持差），覆盖 BackgroundScorer 与 SnapshotWorker
 # 两个并发单元的 5 + 4 共 9 个并发测试。Miri 不支持 --release，跑 debug 即可。
 #
-# 首次接入用 continue-on-error: true 容错；若 Miri 报 UB 则在 PR 内修复，
-# 修复稳定后再把 continue-on-error 去掉。
+# 阶段 11 P1-C2：阶段 2 接入时用 continue-on-error: true 容错，阶段 1-9 全部
+# 通过后已稳定，flag 移除 —— 后续 Miri 报 UB 将阻断 PR，符合 H4 目标。
 
 on:
   push:
@@ -33,9 +33,7 @@ jobs:
         run: cargo +nightly miri setup
 
       - name: miri test_scorer_concurrency
-        continue-on-error: true
         run: cargo +nightly miri test --tests --test test_scorer_concurrency
 
       - name: miri test_workers
-        continue-on-error: true
         run: cargo +nightly miri test --tests --test test_workers
