@@ -234,4 +234,162 @@ mod tests {
             Color::Rgb(0xFF, 0xFF, 0xFF)
         );
     }
+
+    // -------- key_event_to_pty_bytes 单测（阶段 11 P1-E1） --------
+
+    fn ev(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ev_ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn ev_alt(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn pty_enter_produces_cr() {
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Enter)),
+            Some(b"\r".to_vec())
+        );
+    }
+
+    #[test]
+    fn pty_tab_produces_tab_char() {
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Tab)),
+            Some(b"\t".to_vec())
+        );
+    }
+
+    #[test]
+    fn pty_backtab_produces_csi_z() {
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::BackTab)),
+            Some(b"\x1b[Z".to_vec())
+        );
+    }
+
+    #[test]
+    fn pty_backspace_produces_del() {
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Backspace)),
+            Some(b"\x7f".to_vec())
+        );
+    }
+
+    #[test]
+    fn pty_arrow_keys_produce_ansi_cursor_sequences() {
+        assert_eq!(key_event_to_pty_bytes(ev(KeyCode::Up)), Some(b"\x1b[A".to_vec()));
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Down)),
+            Some(b"\x1b[B".to_vec())
+        );
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Right)),
+            Some(b"\x1b[C".to_vec())
+        );
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Left)),
+            Some(b"\x1b[D".to_vec())
+        );
+    }
+
+    #[test]
+    fn pty_home_end_produce_ansi_sequences() {
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Home)),
+            Some(b"\x1b[H".to_vec())
+        );
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::End)),
+            Some(b"\x1b[F".to_vec())
+        );
+    }
+
+    #[test]
+    fn pty_del_pageup_pagedown_produce_ansi_sequences() {
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Delete)),
+            Some(b"\x1b[3~".to_vec())
+        );
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::PageUp)),
+            Some(b"\x1b[5~".to_vec())
+        );
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::PageDown)),
+            Some(b"\x1b[6~".to_vec())
+        );
+    }
+
+    #[test]
+    fn pty_ctrl_common_shortcuts_explicit_mappings() {
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('c')), Some(vec![0x03]));
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('d')), Some(vec![0x04]));
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('\\')), Some(vec![0x1c]));
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('a')), Some(vec![0x01]));
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('e')), Some(vec![0x05]));
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('k')), Some(vec![0x0b]));
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('u')), Some(vec![0x15]));
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('w')), Some(vec![0x17]));
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('l')), Some(vec![0x0c]));
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('r')), Some(vec![0x12]));
+    }
+
+    #[test]
+    fn pty_ctrl_other_letters_apply_xor_0x1f_rule() {
+        // 'x' as u8 = 0x78, & 0x1f = 0x18
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('x')), Some(vec![0x18]));
+        // 'z' as u8 = 0x7a, & 0x1f = 0x1a
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('z')), Some(vec![0x1a]));
+        // 'b' as u8 = 0x62, & 0x1f = 0x02
+        assert_eq!(key_event_to_pty_bytes(ev_ctrl('b')), Some(vec![0x02]));
+    }
+
+    #[test]
+    fn pty_alt_plus_char_produces_esc_prefix() {
+        assert_eq!(key_event_to_pty_bytes(ev_alt('x')), Some(vec![0x1b, b'x']));
+        assert_eq!(key_event_to_pty_bytes(ev_alt('A')), Some(vec![0x1b, b'A']));
+    }
+
+    #[test]
+    fn pty_plain_char_produces_utf8_bytes() {
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Char('a'))),
+            Some(b"a".to_vec())
+        );
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Char('A'))),
+            Some(b"A".to_vec())
+        );
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Char('1'))),
+            Some(b"1".to_vec())
+        );
+    }
+
+    #[test]
+    fn pty_non_ascii_char_produces_utf8() {
+        // '中' UTF-8 = E4 B8 AD
+        assert_eq!(
+            key_event_to_pty_bytes(ev(KeyCode::Char('中'))),
+            Some(vec![0xe4, 0xb8, 0xad])
+        );
+    }
+
+    #[test]
+    fn pty_function_keys_return_none() {
+        assert_eq!(key_event_to_pty_bytes(ev(KeyCode::F(1))), None);
+        assert_eq!(key_event_to_pty_bytes(ev(KeyCode::F(5))), None);
+        assert_eq!(key_event_to_pty_bytes(ev(KeyCode::F(12))), None);
+    }
+
+    #[test]
+    fn pty_null_returns_none() {
+        assert_eq!(key_event_to_pty_bytes(ev(KeyCode::Null)), None);
+    }
 }
