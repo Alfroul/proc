@@ -134,6 +134,7 @@ pub fn parse_powershell_event(line: &str) -> Option<DnsQuery> {
     Some(DnsQuery {
         timestamp: ts,
         pid: pid_u32,
+        start_time: 0, // reader 线程 lookup 时填（P1-A5）
         process_name: String::new(), // reader 线程填充
         query_name: ev.name,
         query_type: parse_query_type(&ev.qtype),
@@ -150,12 +151,16 @@ fn unix_millis_to_system_time(ms: i64) -> Option<SystemTime> {
     UNIX_EPOCH.checked_add(d)
 }
 
-/// PID → process_name 缓存。10 秒刷一次全表（refresh_processes 较重，
-/// DNS 事件高频，但 PID 名字变化不频繁）。
+/// PID → (process_name, start_time) 缓存。10 秒刷一次全表（refresh_processes
+/// 较重，DNS 事件高频，但 PID 名字变化不频繁）。
+///
+/// 阶段 11 P1-A5/D4：cache value 含 start_time。每次 lookup 先查 sysinfo 当前
+/// `Process::start_time()`，若与 cache 里的不一致 → PID 被复用 → 重查并更新
+/// cache，让 reader_loop 拿到正确的 (name, start_time) 填到 DnsQuery。
 struct PidNameLookup {
     sys: sysinfo::System,
     last_refresh: Instant,
-    cache: std::collections::HashMap<u32, String>,
+    cache: std::collections::HashMap<u32, (String, u64)>,
 }
 
 impl PidNameLookup {
@@ -173,10 +178,25 @@ impl PidNameLookup {
         }
     }
 
-    fn lookup(&mut self, pid: u32) -> String {
-        if let Some(name) = self.cache.get(&pid) {
-            return name.clone();
+    /// 返回 (process_name, start_time)。PID 不存在时返回 ("?", 0)。
+    /// cache 命中且 start_time 与 sysinfo 当前值一致 → 直接返回；
+    /// 否则重查并更新 cache。
+    fn lookup(&mut self, pid: u32) -> (String, u64) {
+        // sysinfo Process::start_time() 是 O(1) HashMap 查询（不 refresh）。
+        let current_st = self
+            .sys
+            .process(sysinfo::Pid::from_u32(pid))
+            .map(|p| p.start_time())
+            .unwrap_or(0);
+
+        // cache 命中且 start_time 一致 → 直接返回（PID 未复用）。
+        if let Some((name, st)) = self.cache.get(&pid) {
+            if *st == current_st {
+                return (name.clone(), *st);
+            }
+            // start_time 不一致 → PID 被复用 → cache 失效，落到下面的重查路径。
         }
+
         if self.last_refresh.elapsed() > Duration::from_secs(10) {
             self.sys.refresh_processes_specifics(
                 sysinfo::ProcessesToUpdate::All,
@@ -184,16 +204,15 @@ impl PidNameLookup {
                 sysinfo::ProcessRefreshKind::nothing(),
             );
             self.last_refresh = Instant::now();
-            // 清掉过时缓存（PID 复用）
-            self.cache.clear();
+            // refresh 后 sysinfo 内部表更新；current_st 用刷新后的值重算一次。
         }
-        let name = self
+        let (name, st) = self
             .sys
             .process(sysinfo::Pid::from_u32(pid))
-            .map(|p| p.name().to_string_lossy().into_owned())
-            .unwrap_or_else(|| "?".into());
-        self.cache.insert(pid, name.clone());
-        name
+            .map(|p| (p.name().to_string_lossy().into_owned(), p.start_time()))
+            .unwrap_or_else(|| ("?".into(), 0));
+        self.cache.insert(pid, (name.clone(), st));
+        (name, st)
     }
 }
 
@@ -284,7 +303,9 @@ fn reader_loop(
         let Some(mut query) = parse_powershell_event(&line) else {
             continue;
         };
-        query.process_name = lookup.lookup(query.pid);
+        let (name, start_time) = lookup.lookup(query.pid);
+        query.process_name = name;
+        query.start_time = start_time;
 
         if tx.send(query).is_err() {
             // channel 关闭 → 主线程在清理

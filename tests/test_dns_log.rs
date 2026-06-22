@@ -32,6 +32,7 @@ fn mk_query(pid: u32, name: &str) -> DnsQuery {
     DnsQuery {
         timestamp: SystemTime::UNIX_EPOCH + Duration::from_secs(pid as u64),
         pid,
+        start_time: 0,
         process_name: name.into(),
         query_name: format!("{pid}.example.com"),
         query_type: "A".into(),

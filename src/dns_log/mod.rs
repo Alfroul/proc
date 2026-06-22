@@ -26,10 +26,11 @@
 //!
 //! # PID 复用
 //!
-//! `DnsQuery.pid` 不带 `start_time`。理由：DNS 事件来自 OS 实时订阅，事件
-//! 时间戳本身就在采集当下；消费者在 UI 层用 `(pid, query_name)` 做去重 /
-//! 异常关联，PID 复用 1s 内出现的概率极低（事件 → UI 间隔 < 100ms）。
-//! 如果未来出现 PID 串数据，可加 `start_time` 字段（additive）。
+//! `DnsQuery` 含 `start_time` 字段（阶段 11 P1-A5：之前没有，PID 复用场景下
+//! UI Network Tab 会显示旧进程的 DNS 历史）。`PowershellDnsCollector::reader_loop`
+//! 从 sysinfo 查 PID 的 `start_time` 填入；UI 用 `(pid, start_time)` 元组
+//! 过滤避免误显示。`record/frame.rs` 不序列化 `DnsQuery`（ADR-0006 隐私），
+//! 新字段不影响录屏格式。
 
 pub mod unsupported;
 #[cfg(target_os = "windows")]
@@ -50,6 +51,9 @@ pub struct DnsQuery {
     pub timestamp: std::time::SystemTime,
     /// 发起查询的进程 PID（来自事件 header）。
     pub pid: u32,
+    /// 进程 start_time（阶段 11 P1-A5：从 sysinfo 查，防 PID 复用串数据）。
+    /// 0 表示 sysinfo 未刷新到（PID 已退出 / refresh 周期内未捕获）。
+    pub start_time: u64,
     /// 进程名（collector 侧用 sysinfo 查；查不到为 `"?"`）。
     pub process_name: String,
     /// 查询的域名（如 `example.com.`，含 trailing dot 是 Windows DNS-Client 原样输出）。
@@ -258,6 +262,7 @@ mod tests {
         let q = DnsQuery {
             timestamp: SystemTime::UNIX_EPOCH,
             pid: 1234,
+            start_time: 0,
             process_name: "chrome.exe".into(),
             query_name: "example.com.".into(),
             query_type: "A".into(),
@@ -275,6 +280,7 @@ mod tests {
         let q = DnsQuery {
             timestamp: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_781_308_800),
             pid: 42,
+            start_time: 0,
             process_name: "curl".into(),
             query_name: "rust-lang.org.".into(),
             query_type: "AAAA".into(),
@@ -368,6 +374,7 @@ mod tests {
         let q1 = DnsQuery {
             timestamp: SystemTime::UNIX_EPOCH,
             pid: 1,
+            start_time: 0,
             process_name: "p".into(),
             query_name: "n".into(),
             query_type: "A".into(),

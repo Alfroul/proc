@@ -560,6 +560,7 @@ mod dns_anomaly_tests {
         DnsQuery {
             timestamp: SystemTime::UNIX_EPOCH,
             pid,
+            start_time: 0,
             process_name: name.into(),
             query_name: query_name.into(),
             query_type: "A".into(),

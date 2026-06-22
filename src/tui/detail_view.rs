@@ -583,13 +583,17 @@ fn draw_env_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&InspectionDa
 fn draw_network_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&InspectionData>) {
     // 阶段 8 D3：顶部加「最近 5 条 DNS 查询」（按 PID 过滤）。
     // 没有 DNS 数据时（worker 未启动 / 此 PID 未查 DNS）省略，避免占垂直空间。
-    let pid = app.detail_process.as_ref().map(|p| p.pid);
-    let dns_recent_for_pid: Vec<&crate::dns_log::DnsQuery> = match pid {
-        Some(pid) => app
+    //
+    // 阶段 11 P1-A5：用 (pid, start_time) 元组过滤，避免 PID 复用时显示
+    // 旧进程的 DNS 历史（如 chrome 退出后 PID 被新进程复用，新进程的
+    // Network Tab 不应看到 chrome 的 DNS 查询）。
+    let pid_key = app.detail_process.as_ref().map(|p| (p.pid, p.start_time));
+    let dns_recent_for_pid: Vec<&crate::dns_log::DnsQuery> = match pid_key {
+        Some((pid, start_time)) => app
             .dns_log_recent
             .iter()
             .rev()
-            .filter(|q| q.pid == pid)
+            .filter(|q| q.pid == pid && q.start_time == start_time)
             .take(5)
             .collect(),
         None => Vec::new(),
