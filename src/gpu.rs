@@ -337,9 +337,11 @@ pub struct NvmlProvider {
     #[allow(dead_code)]
     nvml: Option<NvmlState>,
     pdh: Option<PdhState>,
-    /// PDH 是状态机（first_sample），不能在 `list_gpus(&self)` 里推进；
-    /// refresh 把单次采样结果缓存到这里，list_gpus 直接读。
-    pdh_util: Option<u32>,
+    /// refresh 把 DXGI + NVML + PDH 聚合结果缓存到这里，list_gpus 直接 clone
+    /// 不再触碰 &mut self（阶段 11 P1-B3：之前每次 list_gpus 都重做完整
+    /// DXGI 枚举 + NVML get_info，sidebar 每秒渲染一次就跑一次完整枚举，
+    /// 注释声称缓存但实际没缓存）。
+    cached: Vec<GpuInfo>,
 }
 
 #[cfg(target_os = "windows")]
@@ -356,14 +358,13 @@ impl NvmlProvider {
         Self {
             nvml: NvmlState::new(),
             pdh: PdhState::new(),
-            pdh_util: None,
+            cached: Vec::new(),
         }
     }
-}
 
-#[cfg(target_os = "windows")]
-impl GpuProvider for NvmlProvider {
-    fn list_gpus(&self) -> Vec<GpuInfo> {
+    /// 聚合 DXGI + NVML + PDH 当前快照为 `Vec<GpuInfo>`。
+    /// 由 `refresh` 调用，结果存 `self.cached`；`list_gpus` 直接 clone。
+    fn build_snapshot(&mut self) -> Vec<GpuInfo> {
         let mut dxgi_adapters = collect_dxgi_adapters();
         if dxgi_adapters.is_empty() {
             return Vec::new();
@@ -375,6 +376,10 @@ impl GpuProvider for NvmlProvider {
         // 按名称去重：DXGI 可能枚举到同一 GPU 的多个适配器实例
         let mut seen = std::collections::HashSet::new();
         dxgi_adapters.retain(|a| seen.insert(a.name.clone()));
+
+        // PDH 单步推进（first_sample 状态机要求两次 collect 之间有时间间隔）。
+        // 把结果留作本地 utilization fallback。
+        let pdh_util = self.pdh.as_mut().and_then(PdhState::collect_utilization);
 
         dxgi_adapters
             .into_iter()
@@ -404,7 +409,7 @@ impl GpuProvider for NvmlProvider {
                     None::<u64>,
                 );
 
-                let utilization_pct = nvml_util.unwrap_or(self.pdh_util.unwrap_or(0));
+                let utilization_pct = nvml_util.unwrap_or(pdh_util.unwrap_or(0));
                 // NVML VRAM 覆盖 DXGI（笔记本 Optimus 空闲时 DXGI 返回 0）
                 let vram_used = nvml_vram_used.unwrap_or(adapter.vram_used);
                 let vram_total = nvml_vram_total.unwrap_or(adapter.vram_total);
@@ -422,13 +427,18 @@ impl GpuProvider for NvmlProvider {
             })
             .collect()
     }
+}
+
+#[cfg(target_os = "windows")]
+impl GpuProvider for NvmlProvider {
+    fn list_gpus(&self) -> Vec<GpuInfo> {
+        // 读缓存（refresh 在 LightWorker 1s tick 里被调）。
+        self.cached.clone()
+    }
 
     fn refresh(&mut self) {
-        // PDH 单步推进（first_sample 状态机要求两次 collect 之间有时间间隔）。
-        // 把结果缓存到 pdh_util，list_gpus 读时不再触碰 PdhState 的 &mut self。
-        if let Some(p) = self.pdh.as_mut() {
-            self.pdh_util = p.collect_utilization();
-        }
+        // DXGI + NVML + PDH 一次聚合写进 cached，list_gpus 直接读 clone。
+        self.cached = self.build_snapshot();
     }
 
     fn provider_name(&self) -> &'static str {
