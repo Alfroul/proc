@@ -634,11 +634,20 @@ impl App {
         let Some(bytes) = crate::tui::container_exec_view::key_event_to_pty_bytes(key) else {
             return;
         };
+        // 先在 if let 内拿到错误信息（&mut ce 借用期间不能调 switch_mode），
+        // 退出 if let 块后再切 mode。switch_mode 会用「✅ 已退出容器 xxx」
+        // 覆盖 exit_msg，所以这里在 switch 之后再覆盖为带错误原因的提示
+        // —— 否则用户看不到具体写入失败原因（P1-X2）。
+        let mut switch_with_err: Option<String> = None;
         if let Some(ce) = self.container_exec.as_mut() {
             if let Err(e) = ce.write_all(&bytes) {
-                self.container_exec_exit_msg = Some(format!("❌ 写入失败: {e}"));
-                self.switch_mode(AppMode::DockerPanel);
+                switch_with_err =
+                    Some(format!("❌ 容器 {} 写入失败，已切回 Docker 面板: {e}", ce.container));
             }
+        }
+        if let Some(err_msg) = switch_with_err {
+            self.switch_mode(AppMode::DockerPanel);
+            self.container_exec_exit_msg = Some(err_msg);
         }
     }
 
