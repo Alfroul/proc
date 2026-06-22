@@ -396,15 +396,23 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
         )),
     ];
 
-    // 阶段 4 A4：Summary 显示优先级 + affinity（同步查 OpenProcess + Get*Class，
-    // 单次 < 1ms，每帧调可接受；用户切 +/- 即时反馈）。
-    let priority_label = match crate::process_control::get_priority(proc.pid) {
-        Ok(class) => class.label().to_string(),
-        Err(_) => "-".to_string(),
-    };
-    let affinity_label = match crate::process_control::get_affinity(proc.pid) {
-        Ok(mask) => format!("0x{:X} (CPU 数: {})", mask, u64::count_ones(mask)),
-        Err(_) => "-".to_string(),
+    // 阶段 11 P1-A3：从 App::detail_priority 缓存读（进入详情页 / `r` 刷新 /
+    // `+/-` 调整 / heavy tick 4 处更新），避免每帧 4 次 syscall（OpenProcess +
+    // GetPriorityClass + GetProcessAffinityMask + CloseHandle）。
+    // 缓存 miss（详情页刚打开 heavy tick 未到）时 fallback 实时查，保留正确性。
+    let (priority_label, affinity_label) = match &app.detail_priority {
+        Some(p) => (p.0.clone(), p.1.clone()),
+        None => {
+            let pl = match crate::process_control::get_priority(proc.pid) {
+                Ok(class) => class.label().to_string(),
+                Err(_) => "-".to_string(),
+            };
+            let al = match crate::process_control::get_affinity(proc.pid) {
+                Ok(mask) => format!("0x{:X} (CPU 数: {})", mask, u64::count_ones(mask)),
+                Err(_) => "-".to_string(),
+            };
+            (pl, al)
+        }
     };
     lines.push(Line::from(Span::styled(
         format!("  优先级:   {}  (+/- 调整)", priority_label),

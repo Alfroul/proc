@@ -121,6 +121,11 @@ pub struct App {
     // 阶段 1 占位字段：阶段 4 上线时填采集结果，本阶段始终 None。
     pub inspection_handles_data: Option<Vec<HandleInfo>>,
     pub inspection_memory_data: Option<Vec<MemoryRegion>>,
+    /// Summary Tab 的 (priority_label, affinity_label) 缓存（阶段 11 P1-A3）。
+    /// `detail_view::draw_summary` 每帧渲染时读这里，避免每帧 4 次 syscall
+    /// （OpenProcess + GetPriorityClass + GetProcessAffinityMask + CloseHandle）。
+    /// 进入详情页 / `r` 刷新 / `+/-` 调整 / heavy tick 4 处更新。
+    pub detail_priority: Option<(String, String)>,
 
     // History tracking
     pub proc_history: HashMap<u32, ProcHistory>,
@@ -247,6 +252,7 @@ impl App {
             inspection_scroll: 0,
             inspection_handles_data: None,
             inspection_memory_data: None,
+            detail_priority: None,
             proc_history: HashMap::new(),
             global_cpu_history: VecDeque::new(),
             global_mem_history: VecDeque::new(),
@@ -563,6 +569,8 @@ impl App {
                 self.inspection_handles_data = None;
                 self.inspection_memory_data = None;
             }
+            // 阶段 11 P1-A3：进入详情页时初始查询 priority + affinity 缓存。
+            self.refresh_detail_priority();
         }
         self.mode = mode;
         self.process_panel.search.clear();
@@ -723,6 +731,8 @@ impl App {
                         Some(crate::inspect::memory::collect_memory(proc.pid).unwrap_or_default());
                     self.inspection_scroll = 0;
                     self.status_message = Some(format!("已刷新 Inspector 数据 (PID {})", proc.pid));
+                    // 阶段 11 P1-A3：r 重新采集时也刷 priority/affinity 缓存。
+                    self.refresh_detail_priority();
                 }
             }
             // `+` / `-`：阶段 4 A4，在 Summary Tab 上调高/调低进程优先级。
@@ -1307,6 +1317,10 @@ impl App {
                         }
                     }
 
+                    // 阶段 11 P1-A3：heavy tick 周期刷新 priority/affinity 缓存
+                    // （若详情页打开），让 Summary Tab 不再每帧调 syscall。
+                    self.refresh_detail_priority();
+
                     self.data_dirty = true;
 
                     if !self.scoring_pending {
@@ -1801,6 +1815,8 @@ impl App {
                     current.label(),
                     next.label()
                 ));
+                // 阶段 11 P1-A3：调整成功后刷新缓存，让用户立即看到新值。
+                self.refresh_detail_priority();
             }
             Err(e) => {
                 self.status_message = Some(format!(
@@ -1811,6 +1827,25 @@ impl App {
                 ));
             }
         }
+    }
+
+    /// 阶段 11 P1-A3：刷新 `detail_priority` 缓存（priority label + affinity label）。
+    /// 在 4 个点调用：进入详情页 / `r` 刷新 / `+/-` 调整后 / heavy tick 周期。
+    /// 若 detail_process 为 None（详情页关闭），清空缓存避免脏数据。
+    pub fn refresh_detail_priority(&mut self) {
+        let Some(p) = self.detail_process.as_ref() else {
+            self.detail_priority = None;
+            return;
+        };
+        let priority_label = match crate::process_control::get_priority(p.pid) {
+            Ok(c) => c.label().to_string(),
+            Err(_) => "-".to_string(),
+        };
+        let affinity_label = match crate::process_control::get_affinity(p.pid) {
+            Ok(mask) => format!("0x{:X} (CPU 数: {})", mask, u64::count_ones(mask)),
+            Err(_) => "-".to_string(),
+        };
+        self.detail_priority = Some((priority_label, affinity_label));
     }
 
     /// A4：进程列表 `+`/`-` 公开入口 —— ProcessPanel 直接调，免去重复样板。
