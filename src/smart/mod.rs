@@ -148,6 +148,11 @@ pub fn parse_smartctl_json(json: &str) -> Result<SmartData> {
                 .and_then(|x| x.as_str())
                 .unwrap_or("");
             let failing = when_failed == "now";
+            // when_failed == "past" 表示该属性曾失败过但当前已 OK —— 整体 health
+            // 升级到 Warning（若当前是 Ok），让用户看到「磁盘曾失败过」的中间状态
+            // （阶段 11 P1-B1：之前 "past" 既不触发 Failing 也不触发 Warning，
+            // SmartHealth::Warning 变体永远拿不到）。
+            let was_failing = when_failed == "past";
 
             data.attributes.push(SmartAttribute {
                 id: id_u8,
@@ -158,9 +163,16 @@ pub fn parse_smartctl_json(json: &str) -> Result<SmartData> {
                 failing,
             });
 
-            // 任一属性 failing → 把整体 health 升级到 Failing(若之前是 Ok)。
-            if failing && data.health == SmartHealth::Ok {
-                data.health = SmartHealth::Failing;
+            // 任一属性当前 failing → 整体 health 升级到 Failing（若之前是 Ok 或 Warning）。
+            // 任一属性曾 failing（when_failed == "past"）→ 整体 health 升级到 Warning
+            // （若之前是 Ok）。Failing 优先于 Warning，所以即便某属性是 "past"，
+            // 后面遇到 "now" 的属性仍会继续升级到 Failing。
+            if failing {
+                if data.health == SmartHealth::Ok || data.health == SmartHealth::Warning {
+                    data.health = SmartHealth::Failing;
+                }
+            } else if was_failing && data.health == SmartHealth::Ok {
+                data.health = SmartHealth::Warning;
             }
         }
     }
@@ -392,6 +404,35 @@ mod tests {
   }
 }"#;
 
+    // when_failed == "past"：属性曾失败过但当前 OK，smart_status.passed 仍为 true。
+    // 阶段 11 P1-B1：之前这种状态被静默丢弃，SmartHealth::Warning 变体永远拿不到。
+    const SAMPLE_WARNING: &str = r#"{
+  "device": { "name": "/dev/sdc" },
+  "model_name": "Crucial MX500",
+  "serial_number": "1234567890",
+  "temperature": { "current": 42 },
+  "smart_status": { "passed": true },
+  "ata_smart_attributes": {
+    "table": [
+      { "id": 5, "name": "Reallocated_Sector_Ct", "value": 100, "thresh": 10, "raw": { "value": 0 }, "when_failed": "-" },
+      { "id": 197, "name": "Current_Pending_Sector", "value": 100, "thresh": 0, "raw": { "value": 2 }, "when_failed": "past" }
+    ]
+  }
+}"#;
+
+    // 混合 past + now：Failing 应优先于 Warning。
+    const SAMPLE_MIXED_PAST_AND_NOW: &str = r#"{
+  "device": { "name": "/dev/sdd" },
+  "model_name": "Mixed Disk",
+  "smart_status": { "passed": true },
+  "ata_smart_attributes": {
+    "table": [
+      { "id": 5, "name": "Reallocated_Sector_Ct", "value": 100, "thresh": 10, "raw": { "value": 0 }, "when_failed": "past" },
+      { "id": 197, "name": "Current_Pending_Sector", "value": 100, "thresh": 0, "raw": { "value": 16 }, "when_failed": "now" }
+    ]
+  }
+}"#;
+
     #[test]
     fn parses_ok_sample_to_ok_health() {
         let data = parse_smartctl_json(SAMPLE_OK).expect("parse");
@@ -431,6 +472,38 @@ mod tests {
             .find(|a| a.id == 197)
             .expect("attribute 197 should be present");
         assert!(pending.failing);
+    }
+
+    #[test]
+    fn parses_warning_sample_to_warning_health() {
+        // 阶段 11 P1-B1：when_failed="past" 触发 Warning（之前完全静默丢失）。
+        let data = parse_smartctl_json(SAMPLE_WARNING).expect("parse");
+        assert_eq!(
+            data.health,
+            SmartHealth::Warning,
+            "when_failed=past + smart_status.passed=true → Warning"
+        );
+        // failing 字段仍只反映 "now"，"past" 不算当前 failing。
+        let pending = data
+            .attributes
+            .iter()
+            .find(|a| a.id == 197)
+            .expect("attribute 197 should be present");
+        assert!(
+            !pending.failing,
+            "when_failed=past → attribute.failing=false"
+        );
+    }
+
+    #[test]
+    fn failing_takes_precedence_over_warning() {
+        // 阶段 11 P1-B1：混合 past + now 属性时，Failing 优先于 Warning。
+        let data = parse_smartctl_json(SAMPLE_MIXED_PAST_AND_NOW).expect("parse");
+        assert_eq!(
+            data.health,
+            SmartHealth::Failing,
+            "混合 past + now 属性时 Failing 应优先于 Warning"
+        );
     }
 
     #[test]
