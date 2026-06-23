@@ -815,9 +815,12 @@ impl Panel for ProcessPanel {
                     if self.search.handle_input(key) {
                         self.cursor_index = 0;
                         self.scroll_offset = 0;
-                        if !self.search.is_active() || self.search.query().len() <= 1 {
-                            *ctx.data_dirty = true;
-                        }
+                        // 每次按键都重建 cached_sorted，让用户立即看到过滤结果。
+                        // （之前只在 query.len() <= 1 时设 data_dirty，导致按第 2+ 字符
+                        // 时 UI 不更新，体感像「搜索响应慢」—— 要等 heavy tick ~1.5s
+                        // 才重建。rebuild_sorted_cache 本身 O(N log N)，N~数百进程
+                        // 时 < 1ms，每帧重算可接受。）
+                        *ctx.data_dirty = true;
                     }
                     return KeyResult::Consumed;
                 }
