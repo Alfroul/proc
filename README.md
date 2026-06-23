@@ -337,7 +337,7 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 - Linux：安装 `nvtop` 后自动启用 AMD / Intel / NVIDIA 全厂商监控
 - macOS：暂不支持
 
-**DNS 日志记录写到哪？** **永不持久化**。仅在内存中保留最近 1000 条，退出 proc 即丢失。这是隐私设计（详见 ADR-0006）。如需长期记录请用 Windows 事件查看器导出 `Microsoft-Windows-DNS-Client/Operational` channel。
+**DNS 日志记录写到哪？** **永不持久化**。仅在内存中保留最近 1000 条，退出 proc 即丢失。这是隐私设计。如需长期记录请用 Windows 事件查看器导出 `Microsoft-Windows-DNS-Client/Operational` channel。
 
 **容器 exec 跟直接 `docker exec` 有什么区别？** TUI 内按 `e` 进入的是嵌入式 PTY 视图（`portable-pty` + `vt100` crate），ANSI 渲染在 ratatui 内部；CLI `proc docker exec` 直接透传 stdio，等价 `docker exec -it`。两者底层都 spawn `docker exec -it <container> <shell>` 子进程，docker CLI 处理所有 daemon 通信。
 
