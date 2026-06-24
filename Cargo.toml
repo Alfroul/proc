@@ -10,6 +10,14 @@ keywords = ["tui", "process-manager", "sysinfo", "monitoring", "terminal"]
 categories = ["command-line-utilities", "os::windows-apis"]
 authors = ["Alfroul"]
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/{ version }/proc-{ target }{ archive-suffix }"
+bin-dir = "proc-{ target }/proc{ binary-ext }"
+pkg-fmt = "tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"

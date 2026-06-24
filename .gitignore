@@ -4,5 +4,6 @@ perf.log
 prec/
 CONTEXT.md
 plan.md
-docs/
+docs/handoff-*.md
+docs/internal/
 .claude/

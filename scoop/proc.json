@@ -1,0 +1,21 @@
+{
+    "version": "0.6.0",
+    "description": "交互式 TUI 系统进程管理器",
+    "homepage": "https://github.com/Alfroul/proc",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/Alfroul/proc/releases/download/v0.6.0/proc-x86_64-pc-windows-msvc.zip",
+            "hash": "REPLACE_AT_RELEASE"
+        }
+    },
+    "bin": "proc-x86_64-pc-windows-msvc/proc.exe",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/Alfroul/proc/releases/download/v$version/proc-x86_64-pc-windows-msvc.zip"
+            }
+        }
+    }
+}

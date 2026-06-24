@@ -201,13 +201,22 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 
 **首次启动**：`ui.toml` 缺失时显示一次性引导提示「按 `?` 查看快捷键」，按 `?` 后写盘 `first_run=false`，下次启动不再提示。
 
-## 快速开始
+## 安装
 
 ```bash
+# 方式 1：cargo binstall（5 秒装预编译版，推荐）
+cargo install cargo-binstall
+cargo binstall proc
+
+# 方式 2：从源码编译（5 分钟）
 git clone https://github.com/Alfroul/proc.git
 cd proc
 cargo build --release
-./target/release/proc         # 启动 TUI
+./target/release/proc
+
+# 方式 3：Windows 包管理器（v0.6.0+）
+winget install Alfroul.proc
+scoop install proc
 ```
 
 也可 `cargo install --path .` 装到 `~/.cargo/bin/`。

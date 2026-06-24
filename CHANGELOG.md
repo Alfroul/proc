@@ -5,9 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [Unreleased] — v0.6.0
 
-（0.6.0 候选见 `docs/0.6.0-roadmap.md`）
+### 阶段 1 — 文档 + 发布基础设施
+
+- Added: `docs/adr/` 入仓（0001-0007 从私有 docs 移入 + 0008-self-mitigation-policy 新增 Proposed）
+- Added: `SECURITY.md`（vulnerability reporting policy + privilege model + hardening 说明）
+- Added: `CONTRIBUTING.md`（开发流程 + 提交规范 + ADR 流程）
+- Added: `.github/workflows/release.yml`（tag 触发，cross 构建 5 个 target：win-x64 / linux-musl / linux-arm64 / macos-arm64 / macos-x86_64；附带 update-winget 自动 PR 到 microsoft/winget-pkgs）
+- Added: `Cargo.toml` `[package.metadata.binstall]`（cargo-binstall 支持；Windows 用 zip override）
+- Added: `scoop/proc.json` + `winget-pkgs-templates/Alfroul.proc.template.yaml`
+- Changed: `.gitignore` 放行 `docs/`（保留 `docs/handoff-*.md` 私有 + `CONTEXT.md` / `plan.md` 私有）
+- Changed: README.md「快速开始」段重写为「安装」段，加 binstall / winget / scoop 三种方式
 
 ## [0.5.0] - 2026-06-22
 

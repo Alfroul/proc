@@ -1,0 +1,23 @@
+# Winget Manifest Template for Alfroul.proc
+# 实际 PR 时复制本文件到 microsoft/winget-pkgs/manifests/p/proc/Alfroul/<version>/，
+# 把 VERSION / SHA256 替换为对应版本的值。
+PackageIdentifier: Alfroul.proc
+PackageName: proc
+Publisher: Alfroul
+License: MIT
+ShortDescription: 交互式 TUI 系统进程管理器
+Tags:
+  - tui
+  - process-manager
+  - sysinfo
+  - monitoring
+  - terminal
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    InstallerUrl: https://github.com/Alfroul/proc/releases/download/vVERSION/proc-x86_64-pc-windows-msvc.zip
+    InstallerSha256: REPLACE_AT_RELEASE
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: proc-x86_64-pc-windows-msvc/proc.exe
+        PortableCommandAlias: proc

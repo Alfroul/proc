@@ -1,0 +1,68 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest,    target: x86_64-pc-windows-msvc,    archive: zip,    archive_cmd: '7z a -tzip' }
+          - { os: ubuntu-latest,     target: x86_64-unknown-linux-musl, archive: tar.gz, archive_cmd: 'tar czf' }
+          - { os: ubuntu-24.04-arm,  target: aarch64-unknown-linux-gnu, archive: tar.gz, archive_cmd: 'tar czf' }
+          - { os: macos-14,          target: aarch64-apple-darwin,      archive: tar.gz, archive_cmd: 'tar czf' }
+          - { os: macos-13,          target: x86_64-apple-darwin,       archive: tar.gz, archive_cmd: 'tar czf' }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Install musl tools (linux)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p proc-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/proc* proc-${{ matrix.target }}/
+          # Windows 二进制是 proc.exe，Linux/mac 是 proc
+          # 用通配符 proc* 同时覆盖两种情况，但要清理掉非二进制（如有）
+          cp README.md LICENSE CHANGELOG.md proc-${{ matrix.target }}/
+          ${{ matrix.archive_cmd }} proc-${{ matrix.target }}.${{ matrix.archive }} proc-${{ matrix.target }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: proc-${{ matrix.target }}
+          path: proc-${{ matrix.target }}.${{ matrix.archive }}
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: proc-${{ matrix.target }}.${{ matrix.archive }}
+          generate_release_notes: true
+          draft: true   # 草稿状态，给用户审核后手动 publish
+
+  update-winget:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: russellbanks/release-automation-winget@v1
+        with:
+          identifier: Alfroul.proc
+          version: ${{ github.ref_name }}
+          installers: https://github.com/Alfroul/proc/releases/download/${{ github.ref_name }}/proc-x86_64-pc-windows-msvc.zip
+          token: ${{ secrets.WINGET_TOKEN }}
