@@ -8,8 +8,10 @@
 //! 设备锁查询(`scan_device_locks_with_processes`)仍按需同步触发 —
 //! 用户按 `r` 或 `Enter` 选中设备时才执行,可接受短暂等待。
 
+use std::sync::mpsc::Sender;
 use std::time::Duration;
 
+use crate::metrics::crash::WorkerCrash;
 use crate::worker::{SnapshotWorker, run_poll_loop};
 
 use super::RemovableDevice;
@@ -23,15 +25,19 @@ pub struct UsbSnapshot {
 pub type UsbSnapshotWorker = SnapshotWorker<UsbSnapshot>;
 
 #[must_use]
-pub fn spawn() -> UsbSnapshotWorker {
-    SnapshotWorker::spawn("usb-snapshot-worker", |snap_tx, shutdown_rx| {
-        run_poll_loop(&snap_tx, &shutdown_rx, POLL_INTERVAL, || {
-            // scan_all_devices 失败(Linux/macOS 或 Win32 异常)时返回 None,
-            // 不推送 — 主线程保留上一份 devices，与原 refresh_device_list
-            // 失败行为一致。
-            super::scan_all_devices()
-                .ok()
-                .map(|devices| UsbSnapshot { devices })
-        });
-    })
+pub fn spawn(crash_tx: Option<Sender<WorkerCrash>>) -> UsbSnapshotWorker {
+    SnapshotWorker::spawn(
+        "usb-snapshot-worker",
+        crash_tx,
+        |snap_tx, shutdown_rx, metrics| {
+            run_poll_loop(&snap_tx, &shutdown_rx, &metrics, POLL_INTERVAL, || {
+                // scan_all_devices 失败(Linux/macOS 或 Win32 异常)时返回 None,
+                // 不推送 — 主线程保留上一份 devices，与原 refresh_device_list
+                // 失败行为一致。
+                super::scan_all_devices()
+                    .ok()
+                    .map(|devices| UsbSnapshot { devices })
+            });
+        },
+    )
 }

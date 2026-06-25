@@ -41,8 +41,10 @@ const SECTIONS: &[HelpSection] = &[
             ("v", "切换视图（列表 / 树 / 应用分组）"),
             ("/", "进入搜索"),
             ("S", "直达安全分排序（可疑进程排最前）"),
-            ("c", "详情页: 复制进程信息到剪贴板"),
+            ("y", "详情页: 复制进程信息到剪贴板（vim yank）"),
+            ("F5", "详情页: 强制刷新 Inspector 数据"),
             ("w", "详情页: 把当前进程加入监控"),
+            ("v", "详情页 Env Tab: 切换 secret 脱敏（录屏中强制 mask）"),
             ("o", "树视图: 选中孤儿进程"),
             ("z", "树视图: 选中僵尸/残存进程"),
             ("f", "树视图: 进入过滤搜索"),
@@ -91,7 +93,7 @@ const SECTIONS: &[HelpSection] = &[
         title: "Docker 面板",
         rows: &[
             ("Enter", "查看容器详情"),
-            ("r", "重启容器"),
+            ("Shift+R", "重启容器 / 刷新镜像或卷列表"),
             ("s", "停止容器"),
             ("a", "开始监听事件流"),
         ],
@@ -116,7 +118,7 @@ const SECTIONS: &[HelpSection] = &[
     },
 ];
 
-pub fn draw(f: &mut Frame, area: Rect, _app: &App) {
+pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(" ? 帮助 — Esc/q 返回 ", theme::style_header()))
@@ -144,9 +146,44 @@ pub fn draw(f: &mut Frame, area: Rect, _app: &App) {
         }
     }
 
+    // v0.6.0 阶段 3：动态 Workers 区段（avg/max/polls/drops）。
+    // 帮助页是用户报 bug 时第一个看的地方，放这里最合适。
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Workers (后台 worker 状态)",
+        theme::style_selected(),
+    )));
+    lines.push(Line::from(Span::styled(
+        "   name       badge  avg     max     polls   drops",
+        theme::style_muted(),
+    )));
+    for entry in app.worker_metrics() {
+        let s = &entry.stats;
+        let badge_style = if s.health_badge() == "✓" {
+            theme::style_normal()
+        } else {
+            theme::style_danger()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("   {:<10} ", entry.name), theme::style_info()),
+            Span::styled(s.health_badge().to_string(), badge_style),
+            Span::styled(
+                format!(
+                    "  {:>5}μs {:>5}μs {:>7} {:>5}",
+                    s.avg_us, s.max_us, s.poll_count, s.channel_full,
+                ),
+                theme::style_normal(),
+            ),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        "   按 D 关闭崩溃 banner（若有）",
+        theme::style_muted(),
+    )));
+
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(inner.height as usize);
-    let scroll = (_app.help_scroll.min(max_scroll)) as u16;
+    let scroll = (app.help_scroll.min(max_scroll)) as u16;
 
     let paragraph = Paragraph::new(lines)
         .scroll((scroll, 0))

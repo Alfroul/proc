@@ -16,12 +16,14 @@ pub mod format;
 pub mod gpu;
 pub mod inspect;
 pub mod kill;
+pub mod metrics;
 pub mod monitor;
 pub mod net_flow;
 pub mod port_map;
 pub mod port_worker;
 pub mod process_control;
 pub mod record;
+pub mod replay;
 pub mod search;
 pub mod security;
 pub mod shutdown;
@@ -32,6 +34,7 @@ pub mod tui;
 pub mod ui_state;
 pub mod view_models;
 pub mod worker;
+pub mod workers;
 
 /// Returns the local timezone offset from UTC in hours (e.g. +8 for CST).
 /// Uses Win32 `GetTimeZoneInformation` to avoid chrono dependency.
@@ -91,6 +94,53 @@ pub fn dirs_config_dir() -> std::path::PathBuf {
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".to_string());
     std::path::PathBuf::from(home).join(".config").join("proc")
+}
+
+/// 删除 `dir` 下 mtime 早于 `keep_days` 天的 `proc*.log` 文件。
+///
+/// v0.6.0 阶段 3：启动时调一次，避免长期运行后日志目录无限增长。
+/// 测试通过传入临时目录 + 预置文件验证。
+pub fn cleanup_old_logs(dir: &std::path::Path, keep_days: u32) -> usize {
+    use std::time::{Duration, SystemTime};
+    let cutoff = SystemTime::now() - Duration::from_secs(u64::from(keep_days) * 86400);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // 匹配 proc.log / proc.YYYY-MM-DD.log，跳过 crashes/ 子目录里的 crash-*.txt。
+        if !name.starts_with("proc") || !name.ends_with(".log") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.modified().map(|t| t < cutoff).unwrap_or(false)
+            && std::fs::remove_file(&path).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Convert UTC epoch seconds to (year, month, day, hour, min, sec) using
+/// Howard Hinnant's civil_from_days algorithm. Takes seconds since 1970-01-01
+/// UTC and treats the input as a UTC value — callers should add
+/// `local_offset_hours() * 3600` first if they want local-calendar output.
+///
+/// v0.6.0 阶段 3：crash report 文件名 + 内容时间戳需要本地时分秒。
+#[must_use]
+pub fn epoch_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let (year, month, day) = epoch_secs_to_ymd(secs);
+    let h = ((secs / 3600) % 24) as u32;
+    let m = ((secs / 60) % 60) as u32;
+    let s = (secs % 60) as u32;
+    (year, month, day, h, m, s)
 }
 
 /// Convert UTC epoch seconds to (year, month, day) using Howard Hinnant's

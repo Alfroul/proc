@@ -3,9 +3,10 @@ use proc::collect::{ProcessInfo, SortField, SystemSnapshot};
 use proc::kill;
 
 fn make_process(pid: u32, name: &str, cpu: f32, memory: u64) -> ProcessInfo {
+    let name_arc: std::sync::Arc<str> = std::sync::Arc::from(name);
     ProcessInfo {
         pid,
-        name: name.to_string(),
+        name: std::sync::Arc::clone(&name_arc),
         cpu_usage: cpu,
         memory,
         virtual_memory: memory * 2,
@@ -14,15 +15,16 @@ fn make_process(pid: u32, name: &str, cpu: f32, memory: u64) -> ProcessInfo {
         disk_write_speed: 0,
         net_sent_rate: 0,
         net_recv_rate: 0,
-        status: "Running".to_string(),
-        exe: Some(format!("C:\\{}", name)),
-        cmd: vec![name.to_string()],
-        cwd: Some("C:\\".to_string()),
+        status: proc::collect::ProcessStatus::Run,
+        exe: Some(std::sync::Arc::from(format!("C:\\{}", name).as_str())),
+        cmd: std::sync::Arc::from(vec![name.to_string()]),
+        cwd: Some(std::sync::Arc::from("C:\\")),
         parent_pid: None,
         session_id: None,
         user_id: None,
         start_time: 0,
         run_time: 0,
+        name_lower: std::sync::Arc::from(name_arc.to_lowercase().as_str()),
     }
 }
 
@@ -263,20 +265,20 @@ fn test_sort_by_name() {
 
     processes.sort_by_key(|a| a.name.to_lowercase());
 
-    assert_eq!(processes[0].name, "alg.exe");
-    assert_eq!(processes[1].name, "chrome.exe");
-    assert_eq!(processes[2].name, "zoom.exe");
+    assert_eq!(processes[0].name.as_ref(), "alg.exe");
+    assert_eq!(processes[1].name.as_ref(), "chrome.exe");
+    assert_eq!(processes[2].name.as_ref(), "zoom.exe");
 }
 
 #[test]
 fn test_process_info_fields() {
     let info = make_process(1234, "test.exe", 12.5, 1024 * 1024);
     assert_eq!(info.pid, 1234);
-    assert_eq!(info.name, "test.exe");
+    assert_eq!(info.name.as_ref(), "test.exe");
     assert!((info.cpu_usage - 12.5).abs() < f32::EPSILON);
     assert_eq!(info.memory, 1024 * 1024);
     assert_eq!(info.virtual_memory, 2 * 1024 * 1024);
-    assert_eq!(info.exe, Some("C:\\test.exe".to_string()));
+    assert_eq!(info.exe.as_deref(), Some("C:\\test.exe"));
 }
 
 #[test]

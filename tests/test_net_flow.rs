@@ -15,9 +15,10 @@ use proc::net_flow::{ProcessNetRate, detect_collector};
 use proc::worker::{SnapshotWorker, run_poll_loop};
 
 fn make_proc(pid: u32, net_sent: u64, net_recv: u64) -> ProcessInfo {
+    let name = format!("p{pid}");
     ProcessInfo {
         pid,
-        name: format!("p{pid}"),
+        name: std::sync::Arc::from(name.as_str()),
         cpu_usage: 0.0,
         memory: 0,
         virtual_memory: 0,
@@ -26,15 +27,16 @@ fn make_proc(pid: u32, net_sent: u64, net_recv: u64) -> ProcessInfo {
         disk_write_speed: 0,
         net_sent_rate: net_sent,
         net_recv_rate: net_recv,
-        status: String::new(),
+        status: proc::collect::ProcessStatus::default(),
         exe: None,
-        cmd: Vec::new(),
+        cmd: std::sync::Arc::from(Vec::<String>::new()),
         cwd: None,
         parent_pid: None,
         session_id: None,
         user_id: None,
         start_time: 0,
         run_time: 0,
+        name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
     }
 }
 
@@ -68,8 +70,8 @@ fn snapshot_worker_spawn_and_clean_drop() {
     // NetFlowSnapshot 类型本身可见，验证 worker 模板 spawn/drop 不死锁。
     // 不测真实采集（需要管理员 / nethogs）。
     let worker: SnapshotWorker<proc::net_flow::worker::NetFlowSnapshot> =
-        SnapshotWorker::spawn("net-flow-test", |tx, rx| {
-            run_poll_loop(&tx, &rx, Duration::from_millis(10), || {
+        SnapshotWorker::spawn("net-flow-test", None, |tx, rx, metrics| {
+            run_poll_loop(&tx, &rx, &metrics, Duration::from_millis(10), || {
                 Some(proc::net_flow::worker::NetFlowSnapshot::default())
             });
         });
@@ -86,8 +88,8 @@ fn snapshot_worker_spawn_and_clean_drop() {
 fn snapshot_worker_pushes_snapshots() {
     // 1ms poll 推默认 snapshot，100ms 后 drain 必能拿到至少一份
     let worker: SnapshotWorker<proc::net_flow::worker::NetFlowSnapshot> =
-        SnapshotWorker::spawn("net-flow-test-recv", |tx, rx| {
-            run_poll_loop(&tx, &rx, Duration::from_millis(1), || {
+        SnapshotWorker::spawn("net-flow-test-recv", None, |tx, rx, metrics| {
+            run_poll_loop(&tx, &rx, &metrics, Duration::from_millis(1), || {
                 Some(proc::net_flow::worker::NetFlowSnapshot::default())
             });
         });

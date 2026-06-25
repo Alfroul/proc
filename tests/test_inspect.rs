@@ -21,7 +21,12 @@ fn self_env_has_path() {
 #[test]
 fn self_env_vars_well_formed() {
     let vars = inspect::env::collect_env(std::process::id()).expect("self env");
-    for EnvVar { key, value } in &vars {
+    for EnvVar {
+        key,
+        value,
+        is_secret: _,
+    } in &vars
+    {
         assert!(!key.is_empty(), "empty key in {:?}", vars);
         // value 允许空（如 EMPTY_VAR=），但不能含 NUL。
         assert!(!value.contains('\u{0}'), "NUL in value of {key}");

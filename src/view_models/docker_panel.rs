@@ -111,6 +111,10 @@ pub struct DockerPanel {
     pub volumes_cursor: usize,
     /// 删除确认状态：等用户再按一次 `d` 触发真删除。
     pub delete_pending: Option<DeleteTarget>,
+
+    // v0.6.0 阶段 3：worker panic 通知 channel。App::new 在创建 panel 后
+    // 把 `Some(tx)` 设进来；lazy spawn snapshot worker 时 clone 一份传入。
+    pub crash_tx: Option<std::sync::mpsc::Sender<crate::metrics::crash::WorkerCrash>>,
 }
 
 /// 删除确认的目标。第一次按 `d` 进入确认态，第二次按 `d` 真删，其它键取消。
@@ -151,11 +155,12 @@ impl DockerPanel {
             images_cursor: 0,
             volumes_cursor: 0,
             delete_pending: None,
+            crash_tx: None,
         }
     }
 
     /// 同步刷新:首次连接时初始化 `Arc<Mutex<DockerMonitor>>` 并 spawn 后台
-    /// snapshot worker;无论何时都立即同步拉一次容器列表(用户按 r 触发,
+    /// snapshot worker;无论何时都立即同步拉一次容器列表(用户按 Shift+R 触发,
     /// 期望立即响应)。后续周期性更新由 worker 异步推送,经 `poll_events`
     /// 的 `try_recv` 应用。
     pub fn refresh(&mut self) {
@@ -163,7 +168,10 @@ impl DockerPanel {
             match DockerMonitor::connect() {
                 Ok(monitor) => {
                     let monitor_arc = Arc::new(Mutex::new(monitor));
-                    let worker = crate::docker::snapshot_worker::spawn(Arc::clone(&monitor_arc));
+                    let worker = crate::docker::snapshot_worker::spawn(
+                        Arc::clone(&monitor_arc),
+                        self.crash_tx.clone(),
+                    );
                     self.monitor = Some(monitor_arc);
                     self.snapshot_worker = Some(worker);
                     self.connected = true;
@@ -696,7 +704,9 @@ impl Panel for DockerPanel {
                     self.show_detail();
                 }
             }
-            KeyCode::Char('r') => match self.view_mode {
+            // v0.6.0 阶段 6：原 `r` 迁移到 `Shift+R`，让位详情页 `F5` 刷新；
+            // 同时对齐 Mission Center / docker-compose UI「Shift+R 重启」语义。
+            KeyCode::Char('R') => match self.view_mode {
                 DockerViewMode::Containers => self.restart_selected(),
                 DockerViewMode::Images => self.refresh_images(),
                 DockerViewMode::Volumes => self.refresh_volumes(),

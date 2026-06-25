@@ -7,7 +7,7 @@ use crate::app::{App, AppMode, ReplaySpeed};
 use crate::tui::theme;
 
 pub fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
-    let (ts, player) = match (&app.timeline_state, &app.replay_player) {
+    let (ts, player) = match (&app.replay.timeline_state, &app.replay.replay_player) {
         (Some(ts), Some(player)) => (ts, player),
         _ => {
             let block = Block::default()

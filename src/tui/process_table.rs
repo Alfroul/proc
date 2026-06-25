@@ -124,10 +124,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(mem_str),
                     Cell::from(disk_r),
                     Cell::from(disk_w),
-                    Cell::from(proc.status.clone()),
+                    Cell::from(proc.status.to_string()),
                     Cell::from(class.label()).style(class_style(class)),
                     sec_cell,
-                    Cell::from(proc.name.clone()),
+                    Cell::from(proc.name.to_string()),
                 ])
                 .style(row_style)
             } else if show_net {
@@ -141,10 +141,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(mem_str),
                     Cell::from(net_up),
                     Cell::from(net_down),
-                    Cell::from(proc.status.clone()),
+                    Cell::from(proc.status.to_string()),
                     Cell::from(class.label()).style(class_style(class)),
                     sec_cell,
-                    Cell::from(proc.name.clone()),
+                    Cell::from(proc.name.to_string()),
                 ])
                 .style(row_style)
             } else {
@@ -154,10 +154,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(cpu_str),
                     Cell::from(mem_pct),
                     Cell::from(mem_str),
-                    Cell::from(proc.status.clone()),
+                    Cell::from(proc.status.to_string()),
                     Cell::from(class.label()).style(class_style(class)),
                     sec_cell,
-                    Cell::from(proc.name.clone()),
+                    Cell::from(proc.name.to_string()),
                 ])
                 .style(row_style)
             }

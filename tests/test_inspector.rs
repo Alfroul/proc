@@ -6,7 +6,7 @@
 //! 3. 跨平台：通过 `inspect::inspect(self)` 验证 DLL Tab 至少能拿到数据
 //!
 //! 注意：App::switch_mode 是私有的；这里通过设置 `app.mode = ProcessDetail` +
-//! `app.detail_process` + `app.inspection_data` 直接复现 switch_mode 完成后的
+//! `app.inspector.detail_process` + `app.inspector.inspection_data` 直接复现 switch_mode 完成后的
 //! 状态，再驱动 `handle_key` 验证 Tab / 搜索 / 刷新逻辑。
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -136,14 +136,14 @@ fn inspection_tab_default_is_summary() {
 #[test]
 fn app_inspector_defaults_are_clean() {
     let app = App::new().expect("App::new");
-    assert_eq!(app.inspection_tab, InspectionTab::Summary);
+    assert_eq!(app.inspector.inspection_tab, InspectionTab::Summary);
     assert!(
-        app.inspection_data.is_none(),
+        app.inspector.inspection_data.is_none(),
         "fresh App should have no data"
     );
-    assert_eq!(app.inspection_scroll, 0);
-    assert!(!app.inspection_search.is_active());
-    assert!(app.inspection_search.query().is_empty());
+    assert_eq!(app.inspector.inspection_scroll, 0);
+    assert!(!app.inspector.inspection_search.is_active());
+    assert!(app.inspector.inspection_search.query().is_empty());
 }
 
 // ── Setup helper：模拟 switch_mode(ProcessDetail) 完成后的状态 ────────────────
@@ -151,11 +151,11 @@ fn app_inspector_defaults_are_clean() {
 fn enter_inspector_with_self_pid() -> App {
     let mut app = App::new().expect("App::new");
     let self_proc = build_self_proc_info();
-    app.detail_process = Some(self_proc.clone());
-    app.inspection_data = Some(inspect::inspect(self_proc.pid));
-    app.inspection_tab = InspectionTab::Summary;
-    app.inspection_scroll = 0;
-    app.inspection_search.clear();
+    app.inspector.detail_process = Some(self_proc.clone());
+    app.inspector.inspection_data = Some(inspect::inspect(self_proc.pid));
+    app.inspector.inspection_tab = InspectionTab::Summary;
+    app.inspector.inspection_scroll = 0;
+    app.inspector.inspection_search.clear();
     app.mode = AppMode::ProcessDetail;
     app
 }
@@ -165,7 +165,7 @@ fn build_self_proc_info() -> ProcessInfo {
     ProcessInfo {
         pid,
         start_time: 0,
-        name: "self".to_string(),
+        name: std::sync::Arc::from("self"),
         cpu_usage: 0.0,
         memory: 0,
         virtual_memory: 0,
@@ -174,14 +174,15 @@ fn build_self_proc_info() -> ProcessInfo {
         disk_write_speed: 0,
         net_sent_rate: 0,
         net_recv_rate: 0,
-        status: String::new(),
+        status: proc::collect::ProcessStatus::default(),
         exe: None,
-        cmd: Vec::new(),
+        cmd: std::sync::Arc::from(Vec::<String>::new()),
         cwd: None,
         parent_pid: None,
         session_id: None,
         user_id: None,
         run_time: 0,
+        name_lower: std::sync::Arc::from("self"),
     }
 }
 
@@ -194,49 +195,49 @@ fn press(app: &mut App, code: KeyCode) {
 #[test]
 fn tab_key_cycles_inspector_tabs() {
     let mut app = enter_inspector_with_self_pid();
-    assert_eq!(app.inspection_tab, InspectionTab::Summary);
+    assert_eq!(app.inspector.inspection_tab, InspectionTab::Summary);
 
     press(&mut app, KeyCode::Tab);
-    assert_eq!(app.inspection_tab, InspectionTab::Env);
+    assert_eq!(app.inspector.inspection_tab, InspectionTab::Env);
 
     press(&mut app, KeyCode::Tab);
-    assert_eq!(app.inspection_tab, InspectionTab::Network);
+    assert_eq!(app.inspector.inspection_tab, InspectionTab::Network);
 
     press(&mut app, KeyCode::Tab);
-    assert_eq!(app.inspection_tab, InspectionTab::Dlls);
+    assert_eq!(app.inspector.inspection_tab, InspectionTab::Dlls);
 
     press(&mut app, KeyCode::Tab);
-    assert_eq!(app.inspection_tab, InspectionTab::Handles);
+    assert_eq!(app.inspector.inspection_tab, InspectionTab::Handles);
 
     press(&mut app, KeyCode::Tab);
-    assert_eq!(app.inspection_tab, InspectionTab::Memory);
+    assert_eq!(app.inspector.inspection_tab, InspectionTab::Memory);
 
     // 循环：Memory → Summary
     press(&mut app, KeyCode::Tab);
-    assert_eq!(app.inspection_tab, InspectionTab::Summary);
+    assert_eq!(app.inspector.inspection_tab, InspectionTab::Summary);
 }
 
 #[test]
 fn backtab_cycles_in_reverse() {
     let mut app = enter_inspector_with_self_pid();
-    app.inspection_tab = InspectionTab::Summary;
+    app.inspector.inspection_tab = InspectionTab::Summary;
 
     // 6 变体下 BackTab 从 Summary 倒退到 Memory（最后一个）。
     app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    assert_eq!(app.inspection_tab, InspectionTab::Memory);
+    assert_eq!(app.inspector.inspection_tab, InspectionTab::Memory);
 
     app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    assert_eq!(app.inspection_tab, InspectionTab::Handles);
+    assert_eq!(app.inspector.inspection_tab, InspectionTab::Handles);
 }
 
 #[test]
 fn tab_switch_resets_scroll() {
     let mut app = enter_inspector_with_self_pid();
-    app.inspection_scroll = 42;
+    app.inspector.inspection_scroll = 42;
 
     press(&mut app, KeyCode::Tab);
     assert_eq!(
-        app.inspection_scroll, 0,
+        app.inspector.inspection_scroll, 0,
         "切 Tab 时滚动位置应重置（避免落入新 Tab 的越界行）",
     );
 }
@@ -246,11 +247,11 @@ fn tab_switch_resets_scroll() {
 #[test]
 fn slash_enters_search_mode() {
     let mut app = enter_inspector_with_self_pid();
-    assert!(!app.inspection_search.is_active());
+    assert!(!app.inspector.inspection_search.is_active());
 
     press(&mut app, KeyCode::Char('/'));
-    assert!(app.inspection_search.is_active());
-    assert!(app.inspection_search.query().is_empty());
+    assert!(app.inspector.inspection_search.is_active());
+    assert!(app.inspector.inspection_search.query().is_empty());
 }
 
 #[test]
@@ -261,7 +262,7 @@ fn search_query_appends_chars() {
     press(&mut app, KeyCode::Char('A'));
     press(&mut app, KeyCode::Char('T'));
     press(&mut app, KeyCode::Char('H'));
-    assert_eq!(app.inspection_search.query(), "PATH");
+    assert_eq!(app.inspector.inspection_search.query(), "PATH");
 }
 
 #[test]
@@ -271,7 +272,7 @@ fn backspace_pops_search_query() {
     press(&mut app, KeyCode::Char('a'));
     press(&mut app, KeyCode::Char('b'));
     press(&mut app, KeyCode::Backspace);
-    assert_eq!(app.inspection_search.query(), "a");
+    assert_eq!(app.inspector.inspection_search.query(), "a");
 }
 
 #[test]
@@ -279,11 +280,11 @@ fn esc_while_searching_keeps_detail_mode() {
     let mut app = enter_inspector_with_self_pid();
     press(&mut app, KeyCode::Char('/'));
     press(&mut app, KeyCode::Char('x'));
-    assert!(app.inspection_search.is_active());
+    assert!(app.inspector.inspection_search.is_active());
 
     // 第一次 Esc 只退出搜索
     press(&mut app, KeyCode::Esc);
-    assert!(!app.inspection_search.is_active());
+    assert!(!app.inspector.inspection_search.is_active());
     assert_eq!(
         app.mode,
         AppMode::ProcessDetail,
@@ -303,36 +304,36 @@ fn tab_is_ignored_while_searching() {
 
     // 搜索中按 Tab 不应切 Tab —— 否则会丢搜索内容
     press(&mut app, KeyCode::Tab);
-    assert_eq!(app.inspection_tab, InspectionTab::Summary);
-    assert!(app.inspection_search.is_active());
+    assert_eq!(app.inspector.inspection_tab, InspectionTab::Summary);
+    assert!(app.inspector.inspection_search.is_active());
 }
 
 // ── 刷新 ──────────────────────────────────────────────────────────────────────
 
 #[test]
-fn r_key_refreshes_inspection_data() {
+fn f5_key_refreshes_inspection_data() {
     let mut app = enter_inspector_with_self_pid();
 
     // 先清空数据模拟过期
-    app.inspection_data = None;
-    press(&mut app, KeyCode::Char('r'));
+    app.inspector.inspection_data = None;
+    press(&mut app, KeyCode::F(5));
 
     assert!(
-        app.inspection_data.is_some(),
-        "r 键应重新调用 inspect() 填充 inspection_data",
+        app.inspector.inspection_data.is_some(),
+        "F5 键应重新调用 inspect() 填充 inspection_data",
     );
-    let data = app.inspection_data.as_ref().unwrap();
+    let data = app.inspector.inspection_data.as_ref().unwrap();
     // 自己进程至少应拿到环境变量 + 模块。
     assert!(!data.env.is_empty(), "self env empty after refresh");
     assert!(!data.dlls.is_empty(), "self dlls empty after refresh");
 }
 
 #[test]
-fn r_key_sets_status_message() {
+fn f5_key_sets_status_message() {
     let mut app = enter_inspector_with_self_pid();
     app.status_message = None;
-    press(&mut app, KeyCode::Char('r'));
-    assert!(app.status_message.is_some(), "r 应在 status_message 提示");
+    press(&mut app, KeyCode::F(5));
+    assert!(app.status_message.is_some(), "F5 应在 status_message 提示");
 }
 
 // ── 滚动 ──────────────────────────────────────────────────────────────────────
@@ -340,34 +341,34 @@ fn r_key_sets_status_message() {
 #[test]
 fn down_arrow_advances_scroll() {
     let mut app = enter_inspector_with_self_pid();
-    let start = app.inspection_scroll;
+    let start = app.inspector.inspection_scroll;
     press(&mut app, KeyCode::Down);
-    assert!(app.inspection_scroll > start);
+    assert!(app.inspector.inspection_scroll > start);
 }
 
 #[test]
 fn up_arrow_does_not_underflow() {
     let mut app = enter_inspector_with_self_pid();
-    app.inspection_scroll = 0;
+    app.inspector.inspection_scroll = 0;
     press(&mut app, KeyCode::Up);
-    assert_eq!(app.inspection_scroll, 0);
+    assert_eq!(app.inspector.inspection_scroll, 0);
 }
 
 #[test]
 fn pageup_pagedown_jump_by_ten() {
     let mut app = enter_inspector_with_self_pid();
     press(&mut app, KeyCode::PageDown);
-    assert_eq!(app.inspection_scroll, 10);
+    assert_eq!(app.inspector.inspection_scroll, 10);
     press(&mut app, KeyCode::PageUp);
-    assert_eq!(app.inspection_scroll, 0);
+    assert_eq!(app.inspector.inspection_scroll, 0);
 }
 
 #[test]
 fn home_resets_scroll() {
     let mut app = enter_inspector_with_self_pid();
-    app.inspection_scroll = 99;
+    app.inspector.inspection_scroll = 99;
     press(&mut app, KeyCode::Home);
-    assert_eq!(app.inspection_scroll, 0);
+    assert_eq!(app.inspector.inspection_scroll, 0);
 }
 
 // ── 数据正确加载（跨平台 smoke） ───────────────────────────────────────────────
@@ -375,7 +376,11 @@ fn home_resets_scroll() {
 #[test]
 fn inspect_self_yields_env_and_dlls() {
     let app = enter_inspector_with_self_pid();
-    let data = app.inspection_data.as_ref().expect("preload set data");
+    let data = app
+        .inspector
+        .inspection_data
+        .as_ref()
+        .expect("preload set data");
 
     // 自己进程的 env 应至少含 PATH（CI 上偶尔清空时退化为非空）
     let has_path = data.env.iter().any(|v| v.key.eq_ignore_ascii_case("PATH"));
@@ -398,14 +403,17 @@ fn env_filter_skips_non_matching_keys() {
         EnvVar {
             key: "PATH".to_string(),
             value: "/usr/bin".to_string(),
+            is_secret: false,
         },
         EnvVar {
             key: "HOME".to_string(),
             value: "/home/me".to_string(),
+            is_secret: false,
         },
         EnvVar {
             key: "EDITOR".to_string(),
             value: "vim".to_string(),
+            is_secret: false,
         },
     ];
     let q = "home";
@@ -447,34 +455,34 @@ fn app_inspector_defaults_handles_and_memory_are_none() {
     // 这里验证 fresh App 上保持 None，避免误以为「详情页加载失败」。
     let app = App::new().expect("App::new");
     assert!(
-        app.inspection_handles_data.is_none(),
+        app.inspector.inspection_handles_data.is_none(),
         "fresh App should have handles_data = None"
     );
     assert!(
-        app.inspection_memory_data.is_none(),
+        app.inspector.inspection_memory_data.is_none(),
         "fresh App should have memory_data = None"
     );
 }
 
 #[test]
-fn r_refresh_sets_inspection_handles_and_memory_data() {
+fn f5_refresh_sets_inspection_handles_and_memory_data() {
     // 模拟 switch_mode(ProcessDetail) 后的状态：detail_process + inspection_data
-    // 已加载，但 handles/memory 仍 None（helper 没填）。按 r 后应同时刷新三份数据。
+    // 已加载，但 handles/memory 仍 None（helper 没填）。按 F5 后应同时刷新三份数据。
     let mut app = enter_inspector_with_self_pid();
-    app.inspection_handles_data = None;
-    app.inspection_memory_data = None;
+    app.inspector.inspection_handles_data = None;
+    app.inspector.inspection_memory_data = None;
 
-    press(&mut app, KeyCode::Char('r'));
+    press(&mut app, KeyCode::F(5));
 
-    // r 路径会调 collect_handles / collect_memory（unwrap_or_default 兜底），
+    // F5 路径会调 collect_handles / collect_memory（unwrap_or_default 兜底），
     // 成功路径下两者都变 Some。
     assert!(
-        app.inspection_handles_data.is_some(),
-        "r 应填充 inspection_handles_data"
+        app.inspector.inspection_handles_data.is_some(),
+        "F5 应填充 inspection_handles_data"
     );
     assert!(
-        app.inspection_memory_data.is_some(),
-        "r 应填充 inspection_memory_data"
+        app.inspector.inspection_memory_data.is_some(),
+        "F5 应填充 inspection_memory_data"
     );
 }
 
@@ -516,7 +524,7 @@ fn switching_to_handles_tab_preserves_data() {
     // 进详情页 → 切到 Handles Tab → inspection_handles_data 不应被 Tab 切换清掉。
     let mut app = enter_inspector_with_self_pid();
     // 手动塞一个非空 handles_data（模拟 switch_mode 已加载）。
-    app.inspection_handles_data = Some(vec![proc::inspect::HandleInfo {
+    app.inspector.inspection_handles_data = Some(vec![proc::inspect::HandleInfo {
         raw_handle: 0xDEADBEEF,
         kind: proc::inspect::HandleKind::File,
         name: "test.txt".to_string(),
@@ -526,11 +534,93 @@ fn switching_to_handles_tab_preserves_data() {
     press(&mut app, KeyCode::Tab); // Env → Network
     press(&mut app, KeyCode::Tab); // Network → Dlls
     press(&mut app, KeyCode::Tab); // Dlls → Handles
-    assert_eq!(app.inspection_tab, InspectionTab::Handles);
+    assert_eq!(app.inspector.inspection_tab, InspectionTab::Handles);
     let data = app
+        .inspector
         .inspection_handles_data
         .as_ref()
         .expect("handles preserved");
     assert_eq!(data.len(), 1);
     assert_eq!(data[0].name, "test.txt");
+}
+
+// ── 阶段 6：键位冲突修复（r→F5 刷新 / c→y 复制 / docker r→Shift+R restart） ────
+
+#[test]
+fn y_key_in_detail_triggers_clipboard_copy() {
+    // v0.6.0 阶段 6：原详情页 'c' 复制迁移到 'y'（vim yank）。
+    let mut app = enter_inspector_with_self_pid();
+    app.status_message = None;
+    press(&mut app, KeyCode::Char('y'));
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|m| m.contains("复制")),
+        "y 应触发复制并写 status_message，实际：{:?}",
+        app.status_message
+    );
+}
+
+#[test]
+fn c_key_in_detail_toggles_sidebar_not_copy() {
+    // v0.6.0 阶段 6：详情页 'c' 不再被 InspectorController 抢键复制；
+    // 落回全局 'c' 统一为侧边栏折叠（消除双语义冲突）。
+    let mut app = enter_inspector_with_self_pid();
+    let sidebar_before = app.sidebar_expanded;
+    app.status_message = None;
+    press(&mut app, KeyCode::Char('c'));
+    assert_ne!(
+        app.sidebar_expanded, sidebar_before,
+        "详情页 'c' 应触发全局侧边栏折叠（不再被详情页抢键复制）"
+    );
+    assert!(
+        !app.status_message
+            .as_deref()
+            .is_some_and(|m| m.contains("复制")),
+        "详情页 'c' 不应再触发复制 status_message"
+    );
+}
+
+#[test]
+fn r_key_in_detail_does_not_refresh() {
+    // v0.6.0 阶段 6：详情页 'r' 已迁移到 F5，原 'r' 不再触发刷新。
+    let mut app = enter_inspector_with_self_pid();
+    app.inspector.inspection_data = None;
+    press(&mut app, KeyCode::Char('r'));
+    assert!(
+        app.inspector.inspection_data.is_none(),
+        "详情页 'r' 不应再触发刷新（已迁移到 F5）"
+    );
+}
+
+#[test]
+fn f5_key_resets_scroll_to_zero() {
+    // F5 刷新路径会把 inspection_scroll 重置为 0（数据变短后避免 scroll 越界）。
+    let mut app = enter_inspector_with_self_pid();
+    app.inspector.inspection_scroll = 42;
+    press(&mut app, KeyCode::F(5));
+    assert_eq!(
+        app.inspector.inspection_scroll, 0,
+        "F5 应把 scroll 重置为 0"
+    );
+}
+
+#[test]
+fn y_key_does_not_quit_or_change_mode() {
+    // y 不应误触发退出 / 切 mode（vim yank 风格仅触发剪贴板）。
+    let mut app = enter_inspector_with_self_pid();
+    let mode_before = app.mode;
+    press(&mut app, KeyCode::Char('y'));
+    assert_eq!(app.mode, mode_before, "y 不应切换 mode");
+    assert!(!app.should_quit, "y 不应触发退出");
+}
+
+#[test]
+fn f5_key_does_not_quit_or_change_mode() {
+    // F5 仅刷新 Inspector 数据，不应误触发退出 / 切 mode。
+    let mut app = enter_inspector_with_self_pid();
+    let mode_before = app.mode;
+    press(&mut app, KeyCode::F(5));
+    assert_eq!(app.mode, mode_before, "F5 不应切换 mode");
+    assert!(!app.should_quit, "F5 不应触发退出");
 }

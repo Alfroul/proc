@@ -20,9 +20,10 @@ fn snapshot_worker_drops_without_deadlock() {
     // worker body 每 10ms 推一个数字；Drop 必须能在 1s 内返回。
     // 没有显式 shutdown 信号时也要干净退出（drop tx 触发 recv_timeout
     // Disconnected）。
-    let worker: SnapshotWorker<u32> = SnapshotWorker::spawn("test-fast", |tx, rx| {
-        run_poll_loop(&tx, &rx, Duration::from_millis(10), || Some(1));
-    });
+    let worker: SnapshotWorker<u32> =
+        SnapshotWorker::spawn("test-fast", None, |tx, rx, metrics| {
+            run_poll_loop(&tx, &rx, &metrics, Duration::from_millis(10), || Some(1));
+        });
     let start = Instant::now();
     drop(worker);
     let elapsed = start.elapsed();
@@ -40,13 +41,14 @@ fn snapshot_worker_try_recv_latest_drains_to_newest() {
     let counter = Arc::new(Mutex::new(0u32));
     let counter_for_thread = Arc::clone(&counter);
 
-    let worker: SnapshotWorker<u32> = SnapshotWorker::spawn("test-drain", move |tx, rx| {
-        run_poll_loop(&tx, &rx, Duration::from_millis(1), move || {
-            let mut c = counter_for_thread.lock().unwrap();
-            *c += 1;
-            Some(*c)
+    let worker: SnapshotWorker<u32> =
+        SnapshotWorker::spawn("test-drain", None, move |tx, rx, metrics| {
+            run_poll_loop(&tx, &rx, &metrics, Duration::from_millis(1), move || {
+                let mut c = counter_for_thread.lock().unwrap();
+                *c += 1;
+                Some(*c)
+            });
         });
-    });
 
     std::thread::sleep(Duration::from_millis(100));
     let latest = worker.try_recv_latest();
@@ -65,10 +67,11 @@ fn snapshot_worker_try_recv_latest_drains_to_newest() {
 fn snapshot_worker_shutdown_breaks_long_running_body() {
     // poll_interval 远大于测试时长；shutdown 信号必须打断 recv_timeout，
     // 而不是等满 poll_interval。
-    let worker: SnapshotWorker<()> = SnapshotWorker::spawn("test-shutdown", |tx, rx| {
-        // poll 1 hour — 测试通过 Drop 提前打断。
-        run_poll_loop(&tx, &rx, Duration::from_secs(3600), || Some(()));
-    });
+    let worker: SnapshotWorker<()> =
+        SnapshotWorker::spawn("test-shutdown", None, |tx, rx, metrics| {
+            // poll 1 hour — 测试通过 Drop 提前打断。
+            run_poll_loop(&tx, &rx, &metrics, Duration::from_secs(3600), || Some(()));
+        });
     let start = Instant::now();
     drop(worker);
     let elapsed = start.elapsed();
@@ -82,9 +85,10 @@ fn snapshot_worker_shutdown_breaks_long_running_body() {
 #[test]
 fn snapshot_worker_handles_collect_returning_none() {
     // collect 永远返回 None → 不推送，但循环正常运转；Drop 仍能干净退出。
-    let worker: SnapshotWorker<u32> = SnapshotWorker::spawn("test-none", |tx, rx| {
-        run_poll_loop(&tx, &rx, Duration::from_millis(5), || None);
-    });
+    let worker: SnapshotWorker<u32> =
+        SnapshotWorker::spawn("test-none", None, |tx, rx, metrics| {
+            run_poll_loop(&tx, &rx, &metrics, Duration::from_millis(5), || None);
+        });
     std::thread::sleep(Duration::from_millis(50));
     // 没有数据，但 try_recv_latest 不得 panic。
     assert!(worker.try_recv_latest().is_none());

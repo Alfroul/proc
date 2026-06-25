@@ -8,8 +8,10 @@
 //! 主线程 `net_flow_worker: Option<NetFlowWorker>`，`try_recv_latest` 返回 None
 //! → `ProcessInfo.net_*_rate` 保持默认 0。
 
+use std::sync::mpsc::Sender;
 use std::time::Duration;
 
+use crate::metrics::crash::WorkerCrash;
 use crate::net_flow::{NetFlowCollector, ProcessNetRate};
 use crate::worker::{SnapshotWorker, run_poll_loop};
 
@@ -26,12 +28,21 @@ pub type NetFlowWorker = SnapshotWorker<NetFlowSnapshot>;
 
 /// 启动 net_flow worker。`collector` 由调用方通过 [`crate::net_flow::detect_collector`]
 /// 选出；None 时返回 None（worker 不启动，主线程 net 列保持 0）。
+///
+/// v0.6.0 阶段 3：`crash_tx` 用于 worker panic 时通知主线程显示 banner。
 #[must_use]
-pub fn spawn(mut collector: Box<dyn NetFlowCollector>) -> NetFlowWorker {
-    SnapshotWorker::spawn("net-flow-worker", move |snap_tx, shutdown_rx| {
-        run_poll_loop(&snap_tx, &shutdown_rx, POLL_INTERVAL, || {
-            let rates = collector.per_process_rates();
-            Some(NetFlowSnapshot { rates })
-        });
-    })
+pub fn spawn(
+    mut collector: Box<dyn NetFlowCollector>,
+    crash_tx: Option<Sender<WorkerCrash>>,
+) -> NetFlowWorker {
+    SnapshotWorker::spawn(
+        "net-flow-worker",
+        crash_tx,
+        move |snap_tx, shutdown_rx, metrics| {
+            run_poll_loop(&snap_tx, &shutdown_rx, &metrics, POLL_INTERVAL, || {
+                let rates = collector.per_process_rates();
+                Some(NetFlowSnapshot { rates })
+            });
+        },
+    )
 }

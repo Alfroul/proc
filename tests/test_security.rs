@@ -10,9 +10,10 @@ fn make_proc(
     cmd: Vec<&str>,
     parent_pid: Option<u32>,
 ) -> ProcessInfo {
+    let name_arc: std::sync::Arc<str> = std::sync::Arc::from(name);
     ProcessInfo {
         pid,
-        name: name.to_string(),
+        name: std::sync::Arc::clone(&name_arc),
         cpu_usage: 0.0,
         memory: 0,
         virtual_memory: 0,
@@ -21,15 +22,16 @@ fn make_proc(
         disk_write_speed: 0,
         net_sent_rate: 0,
         net_recv_rate: 0,
-        status: "Running".to_string(),
-        exe: exe.map(|s| s.to_string()),
-        cmd: cmd.iter().map(|s| s.to_string()).collect(),
+        status: proc::collect::ProcessStatus::Run,
+        exe: exe.map(std::sync::Arc::from),
+        cmd: std::sync::Arc::from(cmd.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
         cwd: None,
         parent_pid,
         session_id: None,
         user_id: None,
         start_time: 0,
         run_time: 0,
+        name_lower: std::sync::Arc::from(name_arc.to_lowercase().as_str()),
     }
 }
 

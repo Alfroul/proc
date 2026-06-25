@@ -116,7 +116,7 @@ fn build_node(
             .parent_pid
             .is_some_and(|ppid| ppid > 0 && ppid != 4 && !proc_map.contains_key(&ppid));
 
-    let is_zombie = proc.status == "Zombie";
+    let is_zombie = proc.status == crate::collect::ProcessStatus::Zombie;
 
     let is_stale =
         !is_zombie && is_user && proc.memory == 0 && proc.cpu_usage == 0.0 && proc.run_time > 3600;
@@ -156,11 +156,11 @@ fn build_node(
 
     Some(TreeNode {
         pid: proc.pid,
-        name: proc.name.clone(),
+        name: (*proc.name).to_string(),
         cpu: proc.cpu_usage,
         memory: proc.memory,
         mem_pct,
-        status: proc.status.clone(),
+        status: proc.status.to_string(),
         disk_read_speed: proc.disk_read_speed,
         disk_write_speed: proc.disk_write_speed,
         depth,

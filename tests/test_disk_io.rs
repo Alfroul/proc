@@ -134,7 +134,7 @@ fn test_format_bytes() {
 fn test_process_info_disk_fields() {
     let proc = ProcessInfo {
         pid: 1234,
-        name: "test.exe".to_string(),
+        name: std::sync::Arc::from("test.exe"),
         cpu_usage: 5.0,
         memory: 1024 * 1024 * 100,
         virtual_memory: 1024 * 1024 * 200,
@@ -143,15 +143,16 @@ fn test_process_info_disk_fields() {
         disk_write_speed: 250_000,
         net_sent_rate: 0,
         net_recv_rate: 0,
-        status: "Run".to_string(),
-        exe: Some("C:\\test.exe".to_string()),
-        cmd: vec![],
+        status: proc::collect::ProcessStatus::Run,
+        exe: Some(std::sync::Arc::from("C:\\test.exe")),
+        cmd: std::sync::Arc::from(Vec::<String>::new()),
         cwd: None,
         parent_pid: None,
         session_id: None,
         user_id: None,
         start_time: 0,
         run_time: 0,
+        name_lower: std::sync::Arc::from("test.exe"),
     };
     assert_eq!(proc.disk_usage.0, 1_000_000);
     assert_eq!(proc.disk_usage.1, 500_000);

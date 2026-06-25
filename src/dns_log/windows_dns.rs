@@ -43,7 +43,7 @@
 //! 详见 `docs/adr/0006-dns-subprocess-not-etw-dbus.md`。
 
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -54,6 +54,7 @@ use serde::Deserialize;
 
 use crate::dns_log::{DnsLogCollector, DnsQuery, DnsResult, parse_query_type};
 use crate::error::{ProcError, Result};
+use crate::security::restricted_spawn::{RestrictedChild, spawn_with_reduced_privileges};
 
 /// reader → drain 之间的有界缓冲（FIFO，cap=1000）。
 /// 主线程慢消费时，reader 线程 send 会阻塞（轻量背压）；1000 条 DNS 事件
@@ -222,7 +223,11 @@ pub struct PowershellDnsCollector {
     rx: Option<Mutex<Receiver<DnsQuery>>>,
     /// Child 共享给 reader 线程持有 + Drop 时主动 kill。reader 线程不直接操作，
     /// 只确保 Child 不被 drop。Drop 时 collector 锁住 mutex、take 出 child、kill。
-    child: Arc<Mutex<Option<Child>>>,
+    ///
+    /// v0.6.0 阶段 2：类型从 `Child` 改为 `RestrictedChild` — spawn 走
+    /// [`spawn_with_reduced_privileges`] 剥离继承的 SeDebugPrivilege，防止 elevated
+    /// proc spawn 出的 PowerShell 子进程变成 credential theft 跳板（ADR-0008）。
+    child: Arc<Mutex<Option<RestrictedChild>>>,
     reader_thread: Option<JoinHandle<()>>,
 }
 
@@ -242,50 +247,62 @@ impl PowershellDnsCollector {
             ));
         }
 
-        let mut child = Command::new("powershell.exe")
-            .args([
+        // v0.6.0 阶段 2：spawn 走 restricted token（DISABLE_MAX_PRIVILEGE），
+        // 剥离 SeDebugPrivilege 等继承权限。spawn_with_reduced_privileges 内部
+        // 在非 elevated 环境自动降级到普通 Command 并 tracing 一次 warn。
+        let mut child = spawn_with_reduced_privileges(
+            "powershell.exe",
+            &[
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
                 POWERSHELL_SCRIPT,
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .stdin(Stdio::null())
-            .spawn()
-            .map_err(|e| ProcError::monitor(format!("spawn powershell.exe 失败: {e}")))?;
+            ],
+        )
+        .map_err(|e| ProcError::monitor(format!("spawn powershell.exe 失败: {e}")))?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
+        let stdout = child.stdout().ok_or_else(|| {
             ProcError::monitor("powershell.exe 未返回 stdout 管道，DNS 日志采集不可用")
         })?;
-
-        let (tx, rx) = mpsc::sync_channel::<DnsQuery>(CHANNEL_CAPACITY);
-
-        // Child 由 collector + reader 共享。reader 线程只持有 Arc clone
-        // 作为「保活」句柄（不直接操作 Child），实际 kill 由 collector Drop 触发。
-        let child_shared: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
-        let child_for_reader = Arc::clone(&child_shared);
-
-        let handle = thread::Builder::new()
-            .name("dns-log-reader".into())
-            .spawn(move || reader_loop(child_for_reader, stdout, tx))
-            .map_err(|e| ProcError::monitor(format!("spawn dns-log-reader 失败: {e}")))?;
-
-        Ok(Self {
-            rx: Some(Mutex::new(rx)),
-            child: child_shared,
-            reader_thread: Some(handle),
-        })
+        finish_init_restricted(child, stdout)
     }
+}
+
+/// 把已 spawn 好的 child + stdout pipe 组装成完整 PowershellDnsCollector。
+fn finish_init_restricted(
+    child: RestrictedChild,
+    stdout: std::fs::File,
+) -> Result<PowershellDnsCollector> {
+    let (tx, rx) = mpsc::sync_channel::<DnsQuery>(CHANNEL_CAPACITY);
+
+    // Child 由 collector + reader 共享。reader 线程只持有 Arc clone
+    // 作为「保活」句柄（不直接操作 Child），实际 kill 由 collector Drop 触发。
+    let child_shared: Arc<Mutex<Option<RestrictedChild>>> = Arc::new(Mutex::new(Some(child)));
+    let child_for_reader = Arc::clone(&child_shared);
+
+    let handle = thread::Builder::new()
+        .name("dns-log-reader".into())
+        .spawn(move || reader_loop(child_for_reader, stdout, tx))
+        .map_err(|e| ProcError::monitor(format!("spawn dns-log-reader 失败: {e}")))?;
+
+    Ok(PowershellDnsCollector {
+        rx: Some(Mutex::new(rx)),
+        child: child_shared,
+        reader_thread: Some(handle),
+    })
 }
 
 /// reader 线程主体：阻塞读 stdout → 解析 → 查 PID 名 → 发到 channel。
 ///
 /// Child 共享句柄保活，但 kill 由 collector Drop 触发（`reader_loop` 不操作）。
 /// collector Drop kill 子进程 → stdout 管道关闭 → read_line 返回 0（EOF）→ 循环退出。
+///
+/// v0.6.0 阶段 2：stdout 类型从 `std::process::ChildStdout` 改为 `std::fs::File` —
+/// `BufReader::new(stdout)` 两者都接受（都 impl Read）。类型变化对 reader_loop
+/// 实现透明，仅签名调整。
 fn reader_loop(
-    _child_keepalive: Arc<Mutex<Option<Child>>>,
-    stdout: std::process::ChildStdout,
+    _child_keepalive: Arc<Mutex<Option<RestrictedChild>>>,
+    stdout: std::fs::File,
     tx: SyncSender<DnsQuery>,
 ) {
     let mut reader = BufReader::new(stdout);

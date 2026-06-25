@@ -736,8 +736,10 @@ impl ProcessPanel {
         self.app_groups = app_group::compute_groups(processes, &mut self.version_info_cache);
         // Evict stale cache entries
         if self.version_info_cache.len() > 200 {
-            let active_exes: HashSet<String> =
-                processes.iter().filter_map(|p| p.exe.clone()).collect();
+            let active_exes: HashSet<String> = processes
+                .iter()
+                .filter_map(|p| p.exe.as_ref().map(|e| (*e).to_string()))
+                .collect();
             self.version_info_cache
                 .retain(|k, _| active_exes.contains(k));
         }

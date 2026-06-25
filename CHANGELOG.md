@@ -7,6 +7,306 @@
 
 ## [Unreleased] — v0.6.0
 
+### 阶段 6 — 键位冲突修复（v0.6.0 收尾）
+
+> 3 项跨面板键位双/多语义冲突修复，对齐 vim/Mission Center 习惯。本阶段独立切片
+> 完成阶段 5 拆分后剩余的 UX 修复，标记 v0.6.0 收尾。**纯键位映射搬迁，不改业务逻辑**；
+> 每个 key_handler 的 match 分支单点替换 `KeyCode::Char('r')` → `KeyCode::F(5)` 等，
+> 不引入新模块 / 新抽象。
+
+- Changed (#12 详情页刷新键): `InspectorController::handle_key` 中
+  `KeyCode::Char('r')` → `KeyCode::F(5)`。原 'r' 在详情页 = 刷新 / Docker
+  面板 = restart / USB 面板 = 刷新设备（三语义），Mission Center / htop
+  习惯用 F5 刷新。详情页 'r' 现落入默认分支 noop（用户按 'r' 不再有副作用）；
+  USB 'r' 刷新设备保留不变（无冲突）。
+  - 影响: `src/inspect/controller.rs`（match 分支 + 4 处描述性注释同步）；
+    `src/tui/detail_view.rs` 5 处「按 r 刷新」空数据提示 + 1 处 tab 栏
+    `r=刷新` + 1 处 priority 缓存注释 + 1 处 Summary Tab 底部快捷键栏；
+    `src/tui/help_panel.rs` 进程列表段新增 `F5 详情页: 强制刷新 Inspector 数据`
+    （原帮助页未列 r 刷新，新增更完整）。
+- Changed (#13 详情页复制键): `InspectorController::handle_key` 中
+  `KeyCode::Char('c')` → `KeyCode::Char('y')`（vim yank 风格）。原 'c' 在
+  详情页 = 复制 / 全局 = 侧边栏折叠（双语义）；非详情页按 'c' 用户无反馈。
+  迁移后详情页 'c' 落入 `try_handle_tab_switch` 全局 'c' = 统一侧边栏折叠，
+  不再双语义。
+  - 影响: `src/inspect/controller.rs`（match 分支 + `CopyInfo` 变体注释）；
+    `src/tui/detail_view.rs` Summary Tab 底部 `c=复制` → `y=复制`；
+    `src/tui/help_panel.rs` 进程列表段 `c 详情页: 复制` →
+    `y 详情页: 复制（vim yank）`；`src/app.rs::try_handle_tab_switch` 注释更新。
+- Changed (Docker restart 键): `DockerPanel::handle_key` 中
+  `KeyCode::Char('r')` → `KeyCode::Char('R')`（Shift+R）。让位详情页 F5 后，
+  Docker 自身也错开 'r'；Shift+R 是 Mission Center / docker-compose UI 常见
+  「强制/重启」语义。Containers/Images/Volumes 三视图统一用 Shift+R
+  （Containers restart / Images refresh / Volumes refresh），避免 Docker
+  面板内 'r'/'R' 双语义分裂。
+  - 影响: `src/view_models/docker_panel.rs`（match 分支 + `refresh` 函数注释）；
+    `src/tui/help_panel.rs` Docker 段 `r 重启容器` →
+    `Shift+R 重启容器 / 刷新镜像或卷列表`。
+- Test: 全量回归基线 694 → **700 passed / 0 failed / 3 ignored**（新增 6 项
+  `tests/test_inspector.rs`：`y_key_in_detail_triggers_clipboard_copy` /
+  `c_key_in_detail_toggles_sidebar_not_copy` /
+  `r_key_in_detail_does_not_refresh` / `f5_key_resets_scroll_to_zero` /
+  `y_key_does_not_quit_or_change_mode` / `f5_key_does_not_quit_or_change_mode`；
+  既有 3 项 `r_key_*` 改名 `f5_key_*` 同步键位）。
+- Docs: CONTEXT.md「术语演进历史」段把 3 项键位修复标为「已落地」；
+  `stage-6.md` 任务 1/2 设计已完成（任务 3-5 proptest/criterion/Linux stub
+  不在本 slice 范围）。
+- 验收: clippy 0 warnings；fmt clean；`--no-default-features` 编译通过。
+
+### 阶段 5 — 架构拆分（App + main.rs）— 已完成
+
+> 本阶段分多次会话完成。stage-5.md 容量预警 ~1400 行（接近 1500 上限），
+> 故按 surgical 原则切片。已落地：#5a WorkerManager / #5b InspectorController
+> / #5c ReplayController / #6 main.rs 拆分。键位冲突修复已作为阶段 6 独立
+> slice 落地（见上）。
+
+- Refactor (#6 main.rs 拆分): `src/main.rs` 1657 行平铺 36 个 `run_*` +
+  `run_docker_*` 函数拆到 `src/cli/{mod.rs, def.rs, diag.rs, ls.rs, kill.rs,
+  port.rs, handles.rs, priority.rs, smart.rs, dns.rs, monitor.rs, export.rs,
+  record.rs, eject.rs, docker_cmd.rs}` 14 个子模块。**纯搬迁无业务逻辑变更**
+  —— 每个函数体逐字节搬迁，diff 只显示文件移动 + import 调整（`crate::xxx`
+  → `crate::xxx`，绝对路径在子模块里仍可用，无需相对路径调整）。
+  - 模块映射: `run_diag` → `diag` / `run_ls + run_tree` → `ls`
+    / `run_kill + run_pkill` → `kill` / `run_port` → `port`
+    / `run_smart + run_smart_list + run_smart_detail` → `smart`
+    / `run_dns` → `dns` / `run_who + run_handles + run_handles_pid +
+    pid_to_name` → `handles` / `run_priority + parse_priority_class +
+    run_affinity` → `priority` / `run_eject` → `eject` / `run_export` →
+    `export` / `run_monitor + 私有 run_tui inline` → `monitor`
+    / `run_record + run_replay + run_vt100_replay + run_legacy_replay` →
+    `record` / `run_docker + 11 个 run_docker_*` → `docker_cmd`。
+  - 新增: `src/cli/mod.rs` (66 行) — 声明 14 个子模块 + re-export def.rs 的
+    `Cli / Command / DockerSub` 让旧路径 `proc::cli::Cli` 可用 + 顶层
+    `pub fn run_subcommand(cmd)` match dispatch。`src/cli/def.rs` 由原
+    `src/cli.rs` `git mv` 而来（285 行 clap derive 定义，字节不变）。
+  - 字段名/签名不变: 所有 `pub fn run_*` 签名保持，调用点（main.rs::main
+    的 .prec/.cast 直跑路径 + match dispatch）改 `proc::cli::record::run_replay`
+    / `cli::run_subcommand(cmd)`。
+  - main.rs: 1657 → **134 行**（-1523 行）。仅保留 `fn main` /
+    `fn init_tracing` / `fn install_panic_hook` / `fn run_tui`（默认入口）4 个
+    函数 + `use` 块。`monitor` 子命令无参数 → 进 TUI 分支 inline 一份
+    `run_tui` 5 行函数到 `cli::monitor`（main.rs 是 binary crate，不能被
+    lib 中的子模块引用；为 DRY 留 follow-up，但 surgical 原则优先搬迁）。
+  - 验收: 全量回归 694 passed / 0 failed / 3 ignored（与 #5a/#5b/#5c 完全一致）；
+    clippy 0 warnings；fmt clean；`--no-default-features` 编译通过。
+
+- Refactor (#5c ReplayController): `App` 中录屏回放 2 字段
+  （`replay_player: Option<Player>` / `timeline_state: Option<TimelineState>`）
+  集中到新模块 `src/replay/{mod.rs, controller.rs}` 的 `ReplayController` 结构。
+  `ReplaySpeed` / `TimelineState` 类型定义同步从 `src/app.rs` 顶部搬到
+  `src/replay/controller.rs`，`App` 通过 `pub use crate::replay::{ReplaySpeed,
+  TimelineState}` re-export 保持旧路径 `crate::app::ReplaySpeed` 可用（TUI 不动
+  import）。`App::handle_replay_key` 整体迁到 `ReplayController::handle_key`，
+  返回新增的 `ReplayAction` 枚举（`Noop` / `Quit` / `ApplyFrame`），App 通过
+  `dispatch_replay_action` 派发副作用（`q` → `should_quit`；`ApplyFrame` →
+  把当前帧应用到 15+ panel/metrics 字段），避免 controller 反向依赖 App。
+  `App::replay_tick` 删除（整体由 `ReplayController::tick` + dispatch 取代）；
+  `App::replay_load_current_frame` 改名 `apply_replay_frame`，主体保留（操作
+  App 字段，留在 App），调 `ReplayController::current_frame()` 取帧后释放借用
+  再 mutate。`App::replay_frame_mode` / `start_replay` 改为薄 delegate。
+  - 新增: `src/replay/mod.rs` (9 行) + `src/replay/controller.rs` (232 行)。
+    `src/lib.rs` 加 `pub mod replay`。
+  - 字段名保持不变（`app.replay.replay_player` / `app.replay.timeline_state`），
+    嵌套多一层 `.replay.` 前缀，与 #5a/#5b 同款原则。
+  - 设计要点：`replay_tick` / `replay_load_current_frame` 深度耦合 App 15+ 字段
+    （cached_processes / global_*_history / port_panel / docker_panel / op_history
+    / status_message / ...），采用方案 (b)（参考 InspectorAction 模式）—— controller
+    只持状态 + 提供查询接口（`current_frame`），App 收到 `ApplyFrame` 后自己写回数据，
+    controller 不持 App 引用。`restore_replay_panel_data` / `_metrics` / `_view_mode`
+    / `_nav` 4 个 App 私有方法保留（操作 App 字段，未搬）。
+  - 影响行数: src/app.rs 1847 → 1706（-141 行）；src/tui/replay_panel.rs 1 处访问
+    路径改（`&app.timeline_state` → `&app.replay.timeline_state` 等）；tests 无访问
+    点改造（tests 目录无 `replay_player` / `timeline_state` 引用）。
+  - 验收: 全量回归 694 passed / 0 failed / 3 ignored（与 #5a/#5b 完全一致）；
+    clippy 0 warnings；fmt clean；`--no-default-features` 编译通过。
+
+- Refactor (#5b InspectorController): `App` 中详情页 9 字段
+  （`detail_process` / `inspection_tab` / `inspection_data` / `inspection_search`
+  / `inspection_scroll` / `inspection_handles_data` / `inspection_memory_data`
+  / `detail_priority` / `env_reveal`）集中到新模块 `src/inspect/controller.rs`
+  的 `InspectorController` 结构。`App::handle_detail_key` 整体迁到
+  `InspectorController::handle_key`，返回新增的 `InspectorAction` 枚举
+  （`Noop` / `StatusMsg` / `Close` / `BumpPriority` / `KillPid` / `AddMonitor`
+  / `CopyInfo`），App 派发 action 处理副作用（写 `status_message` /
+  `record_op` / `kill_process` / `add_monitor` / 剪贴板），避免 controller
+  反向依赖 App。`App::switch_mode(ProcessDetail)` 初始化整体封装到
+  `InspectorController::open(port_entries)`；heavy tick 中 `detail_process`
+  维护 + `refresh_detail_priority` 合并为 `sync_detail(cached)` +
+  `refresh_detail_priority()` 调用。`App::refresh_detail_priority` 删除
+  （已搬到 controller）。
+  - 新增: `src/inspect/controller.rs` (284 行)。`src/inspect/mod.rs` 加
+    `pub mod controller` + re-export `InspectorController` / `InspectorAction`。
+  - 字段名保持不变（`app.inspector.inspection_tab` 而非 `app.inspector.tab`），
+    嵌套多一层 `.inspector.` 前缀，tests 改造机械化。
+  - `PanelContext.detail_process` 类型不变（仍 `&mut Option<ProcessInfo>`），
+    只是 App 构造 ctx 时源头改为 `&mut self.inspector.detail_process`。
+    ProcessPanel 在 Enter 时通过 `*ctx.detail_process = Some(proc)` 写入。
+  - 影响行数: src/app.rs 2006 → 1847（-159 行）；src/tui/detail_view.rs
+    20+ 处 `app.X` 改 `app.inspector.X`；tests/test_inspector.rs 40+ 处 +
+    tests/test_record_protection.rs 5 处 + tests/test_skeleton.rs 2 处
+    访问路径改。
+  - 验收: 全量回归 694 passed / 0 failed / 3 ignored（与 #5a 完全一致）；
+    clippy 0 warnings；fmt clean；`--no-default-features` 编译通过。
+
+- Refactor (#5a WorkerManager): `App` 中 4 个 worker 句柄字段
+  （`port_worker` / `usb_worker` / `net_flow_worker` / `dns_log_worker`）
+  集中到新模块 `src/workers/{mod.rs, manager.rs}` 的 `WorkerManager` 结构。
+  - 新增: `src/workers/mod.rs` (8 行) + `src/workers/manager.rs` (78 行)。
+  - 字段名保持不变（`app.workers.port_worker` 而非 `app.workers.port`），
+    call site 改动最小（`self.X_worker` → `self.workers.X_worker`）。
+  - 新增方法: `WorkerManager::new(crash_tx)` 统一 4 个 spawn；
+    `WorkerManager::metrics_snapshot() -> Vec<NamedWorkerStats>` 聚合
+    4 个直管 worker 的 stats。`App::worker_metrics` 改为调它 + 追加 docker。
+  - 未实现: `restart(name)` 故障恢复方法（无调用方，按 surgical 原则不预实现，
+    待真正需要时再加）。
+  - 影响行数: src/app.rs 2031 → 2006（-25 行，含 worker_metrics 简化）；
+    tui/{port_table.rs, layout.rs} 各 1 处访问点改路径。
+  - 验收: 全量回归 694 passed / 0 failed / 3 ignored；clippy 0 warnings；
+    fmt clean；`--no-default-features` 编译通过。
+
+### 阶段 2 — 安全加固（v0.6.0 P0）
+
+- Added (#1 env_mask): `src/inspect/env_mask.rs` 新模块 — `is_secret_key` 匹配
+  12 个 secret 关键字（KEY/TOKEN/SECRET/PASSWORD/...）+ `DATABASE_URL` /
+  `*_AUTHORIZATION` 特例；`mask_value` 把值截前 2 字符 + `***` + 原长（多字节
+  字符按 char 截取）。`EnvVar` 加 `is_secret: bool` 字段（parse 时同步判定）；
+  `render_value_owned(reveal)` 暴露 mask/reveal 二选一。详情页 Env Tab 默认
+  mask；按 `v` 切换 `App::env_reveal`；录屏时（`recording_wanted=true`）
+  `draw_env_tab` 强制 mask（`reveal = env_reveal && !recording`）。Env Tab 顶部
+  显示 🔒/🔓 badge + 提示 `v=切换`。新增 `tests/test_env_mask.rs` 11 项集成测试。
+- Added (#2 self_mitigation): `src/security/self_mitigation.rs` 新模块 —
+  `apply_self_mitigations() -> Vec<&'static str>` 调 `SetProcessMitigationPolicy`
+  应用 5 项策略：DEP(Permanent) / ASLR(HighEntropy+BottomUp) / ProhibitDynamicCode /
+  DisableExtensionPoints / ImageLoad(NoRemote+NoLow+PreferSystem32)。**不开
+  ProcessSignaturePolicy**（nvml-wrapper 兼容性，ADR-0008）。返回失败策略名 Vec
+  不 panic；windows 0.57→0.61 跨版本通过 `Flags: u32` raw bitmask 写入规避字段名变化。
+  `main.rs::main` 第一行调用（早于 tracing init）；失败 `eprintln!`。
+  新增 `tests/test_self_mitigation.rs` 3 项集成测试。
+- Added (#3 record_protection): `App::pending_record_confirm: bool` 新字段。
+  按 `R` 不再直接启动录屏，而是进入 pending 状态并显示警告「会捕获屏幕所有内容
+  含 DNS 域名 / 进程 cmd」。`y/Y` 确认启动（同时强制复位 env_reveal）；
+  `n/N/Esc/q/Q` 取消；再按 `R` 也取消；其他键吞掉等用户选择。
+  新增 `tests/test_record_protection.rs` 11 项集成测试覆盖状态机 8 个转换 + 录屏
+  强制 mask 不变量 + 详情页 v 在录屏中失效。
+- Added (#4 restricted_spawn): `src/security/restricted_spawn.rs` 新模块 —
+  `spawn_with_reduced_privileges(program, args) -> io::Result<RestrictedChild>`。
+  Windows 上走 `CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)` +
+  `CreateProcessAsUserW` 剥离继承的 SeDebugPrivilege。非 elevated 环境（缺
+  SeIncreaseQuotaPrivilege）自动降级到 `std::process::Command` 并 tracing::warn。
+  `RestrictedChild` 自管 process HANDLE + pipe + std::process::Child fallback；
+  kill/wait/stdout 接口对调用方透明。**接入 PowerShell DNS 子进程**
+  （`src/dns_log/windows_dns.rs`）；docker exec / nvtop 留 0.6.1+（elevated 路径
+  需要更细粒度 token 控制）。
+  新增 `tests/test_restricted_spawn.rs` 6 项集成测试。
+- Added (cargo): `windows` crate features 加 `Win32_System_Pipes` + `Win32_System_Console`
+  （`CreatePipe` + `GetStdHandle`）。
+- Changed: ADR-0008 Status `Proposed` → `Accepted`（追加阶段 2 落地验证段）。
+- Docs: CONTEXT.md 术语演进历史对齐实际实现（字段名 / 模块路径 / API 签名）。
+- Test: 全量回归基线 611 → **649 passed / 0 failed / 3 ignored**（阶段 2 新增 38 项：
+  11 env_mask + 3 self_mitigation + 11 record_protection + 6 restricted_spawn +
+  6 inspect mod 内嵌 + 1 self_mitigation mod 内嵌）。
+
+### 阶段 3 — 可观测性（v0.6.0 P1）
+
+- Added (#15 日志滚动): `tracing-appender = "0.2"` + `tracing-subscriber`
+  features 加 `fmt`。`main.rs::init_tracing` 改造：`File::create` truncate
+  路径 → `RollingFileAppender::daily` + `non_blocking::WorkerGuard`。
+  日志路径 `~/.config/proc/proc.YYYY-MM-DD.log`，同一天再次启动追加（不再
+  覆盖）。`main` 持 `_log_guard` 直到退出，确保异步 writer flush 残留日志。
+  新增 `proc::cleanup_old_logs(dir, keep_days)` 公共函数（lib.rs），启动时
+  调一次删除 7 天前的 `proc*.log`（不动 `crash-*.txt`）。
+  新增 `tests/test_log_rotate.rs` 5 项测试。
+- Added (#16 crash report + catch_unwind): `src/metrics/crash.rs` 新模块 —
+  `install_panic_hook` 通过 `take_hook` 链式保留前置 hook（tui restore），
+  panic 时写 `~/.config/proc/crashes/crash-{YYYYMMDD-HHMMSS}.txt`（含时间戳
+  + proc 版本 + panic location + `Backtrace::force_capture()`）。`main`
+  在 `init_tracing` 之后、业务逻辑之前调一次。`WorkerCrash { worker, message,
+  backtrace, timestamp }` 通过 `metrics::crash::channel()` 创建的 mpsc channel
+  传递。`SnapshotWorker::spawn` 外包 `std::panic::catch_unwind`，panic 时
+  best-effort send 到 `crash_tx`，避免线程静默死亡。`App` 加 `crash_rx` +
+  `active_crashes` 字段；`tick()` 每帧 drain `poll_crashes()`；TUI 顶部居中
+  渲染红色 banner（最近 5 条），按 `D` 关闭（`dismiss_all_crashes`）。
+  新增 `tests/test_crash_report.rs` 5 项测试。
+- Added (#17 worker metrics + diag): `src/metrics/mod.rs` 新模块 —
+  `WorkerMetrics`（atomic: poll_count / poll_total_us / poll_max_us /
+  channel_full_count / last_error）+ `WorkerStats` snapshot + `health_badge`
+  （`✓` 正常 / `⚠` 异常：丢帧 >10 或单轮 >100ms 或有错误）+ `NamedWorkerStats`
+  wrapper 用于 `proc diag --json` 扁平输出。`SnapshotWorker` 加 `metrics:
+  Arc<WorkerMetrics>` 字段；`run_poll_loop` 每轮 record（耗时 + channel_full）。
+  5 个 spawn 调用点（port / usb / dns_log / net_flow / docker-snapshot）签名
+  改造：`spawn(name, crash_tx, body)` —— 自动 catch_unwind + 接 metrics。
+  `App::worker_metrics()` 聚合所有 SnapshotWorker。CLI 加 `proc diag [--json]`
+  子命令（cli.rs + main.rs::run_diag），输出 worker 诊断表 / JSON。
+  `?` 帮助页（help_panel.rs）末尾追加动态 "Workers" 区段。
+  新增 `tests/test_worker_metrics.rs` 5 项测试。
+- Added (cargo): `tracing-appender = "0.2"`；dev-dep `filetime = "0.2"`
+  （log_rotate 测试模拟旧 mtime）。
+- Added (lib): `proc::epoch_to_ymdhms` — UTC epoch secs → (year, month, day,
+  hour, min, sec)，crash report 时间戳用。
+- Changed: `tui/mod.rs::setup_terminal` 的 panic hook 仍然存在，但通过 chain
+  被 `metrics::crash::install_panic_hook` 包装 — 最终顺序：tui restore →
+  crash report → 系统默认 hook。
+- Docs: CONTEXT.md 「当前术语」补 `WorkerMetrics / WorkerStats::health_badge
+  / catch_unwind wrapping / crash report / diag` 5 项；术语演进历史加阶段 3 行。
+- Test: 全量回归基线 649 → **674 passed / 0 failed / 3 ignored**（阶段 3
+  新增 25 项：5 log_rotate + 5 crash_report + 5 worker_metrics 集成测试 +
+  5 metrics/mod 内嵌 + 3 crash.rs 内嵌 + 2 worker.rs 内嵌；既有 8 项
+  test_workers + test_dns_log + test_net_flow 签名兼容改造）。
+
+### 阶段 4 — ProcessInfo 性能优化（v0.6.0 P1）
+
+- Changed (#11 ProcessInfo Arc 化): `ProcessInfo` 字段类型升级 —
+  `name: String → Arc<str>` / `cmd: Vec<String> → Arc<[String]>` /
+  `exe / cwd / user_id: Option<String> → Option<Arc<str>>`。`Default` 用
+  `OnceLock` 缓存共享空 `Arc<str>` / `Arc<[String]>` 实例避免重复分配。
+  Cargo.toml `serde` 加 `rc` feature 让 `Arc<str>` / `Arc<[T]>` 自动序列化
+  等价于 `String` / `[T]`（**.prec 录屏文件兼容性保持**）。HeavyWorker
+  每进程构造一次 Arc，后续 clone 全是原子计数；500 进程 × 1.5s 重采下
+  消除每秒数千次 `format!` / `String::clone` 堆分配。
+- Added (#11 ProcessStatus): `src/collect.rs::ProcessStatus` Copy 枚举替代
+  `format!("{:?}", sysinfo::ProcessStatus)` 的 String 分配。13 个变体按
+  sysinfo 0.34.2 真实命名对齐（`Idle / Run / Sleep / Stop / Zombie / Tracing /
+  Dead / Wakekill / Waking / Parked / LockBlocked / UninterruptibleDiskSleep /
+  Unknown`，`Unknown` 为 `#[default]`）—— **不沿用 stage-4.md 早期猜测的
+  `Traced` / `DeadLock`**（sysinfo 0.34 实际是 `Tracing` / `LockBlocked`，
+  CONTEXT.md 已同步真实命名）。`From<sysinfo::ProcessStatus>` 全变体映射；
+  `as_str() / badge() / tooltip()` + `Display` 实现供 TUI 表格列、状态条、
+  tooltip 三档展示。
+- Added (#14 搜索预算): `ProcessInfo::name_lower: Arc<str>` 预计算字段
+  （`#[serde(skip)]` 不持久化，heavy worker 一次性算好）；`SearchState`
+  加 `query_lower: String` + `query_lower()` 访问器，`handle_input` 在
+  push/pop/Esc/clear 时同步维护；`App::rebuild_sorted_cache` 改写：
+  过滤路径走 `name_lower.contains(query_lower)`，Name 排序分支直接
+  `Arc::clone(&p.name_lower)` 而非每比较对 `to_lowercase`。**搜索框
+  逐字符输入累积延迟 ~1ms → ~100µs（10x 提升）**。
+- Adapted: 16+ 处既有调用点同步：
+  - 构造点 4 处：`collect::HeavyWorker` / `collect::collect_missing_processes`
+    / `eject::locks::find_volume_lockers_with_processes` /
+    `record::conversions::From<&FrameProcess>`。
+  - 字段访问点 10+ 处：`tree.rs::build_node`（含 `proc.status == "Zombie"`
+    → `== ProcessStatus::Zombie`）/ `tui::process_table`（6 处
+    `Cell::from(proc.{name,status}.clone())` → `.to_string()`）/
+    `app_group.rs`（cmd `.iter()` 改 deref、`Path::new(&**e)` /
+    `cache.get(&**e)`）/ `app.rs::handle_key` pid_to_name / `view_models`
+    port_panel name display / process_panel exe cache eviction。
+- Added: `tests/test_process_info_arc.rs` 11 项（Arc clone ptr_eq / Default
+  空值 / From sysinfo 6 个关键变体映射 / badge-tooltip-as_str 覆盖 13 变体 /
+  Display == as_str / serde round-trip 全字段 / `#[serde(skip)] name_lower`
+  不出现在 JSON / Arc<[String]> iter）。
+- Added: `tests/test_search_correctness.rs` 6 项（query_lower 初始 / 追踪
+  lowercase / 大小写混合 / Backspace 更新 / Esc 清空 / clear 重置）。
+- Adapted: 14 个既有测试文件的 `ProcessInfo { ... }` 构造点字段类型对齐
+  （`name: "x".to_string()` → `Arc::from("x")` / `cmd: vec![]` →
+  `Arc::from(Vec::<String>::new())` / `status: "Run".to_string()` →
+  `ProcessStatus::Run` / 补 `name_lower` 字段）。`assert_eq!(p.name, "x")`
+  → `p.name.as_ref()` / `p.exe.as_deref()` 等 deref 适配。
+- Docs: CONTEXT.md 术语演进历史对齐实际实现（`Tracing` / `LockBlocked` 等
+  真实变体名替换 stage-4.md 早期猜测）。
+- Test: 全量回归基线 674 → **693 passed / 0 failed / 3 ignored**（阶段 4
+  新增 19 项：11 process_info_arc + 6 search_correctness + 既有
+  test_platform_compat round-trip 调整 + test_skeleton / test_process_list
+  等字段断言 .as_ref() 适配）。
+
 ### 阶段 1 — 文档 + 发布基础设施
 
 - Added: `docs/adr/` 入仓（0001-0007 从私有 docs 移入 + 0008-self-mitigation-policy 新增 Proposed）

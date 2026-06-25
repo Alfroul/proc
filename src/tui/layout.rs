@@ -60,6 +60,60 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.alert_popup_open {
         crate::tui::alert_badge::draw_alert_popup(f, app);
     }
+
+    // v0.6.0 阶段 3：worker 崩溃 banner（顶部居中）。最近一条时间 + panic msg。
+    if !app.active_crashes.is_empty() {
+        draw_crash_banner(f, app);
+    }
+}
+
+/// 渲染 worker crash banner。每条 `WorkerCrash` 一行 + 底部一行「按 D 关闭」。
+fn draw_crash_banner(f: &mut Frame, app: &App) {
+    use ratatui::text::Span;
+    use ratatui::widgets::{Block, Borders, Paragraph};
+
+    let crashes = &app.active_crashes;
+    let height = (crashes.len() as u16) + 3; // 标题(border) + 每条 1 行 + 提示 1 行 + 边框
+    let area = crate::tui::centered_rect(80, height, f.area());
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            format!(" ⚠ Worker 崩溃 ({}) ", crashes.len()),
+            theme::style_danger(),
+        ))
+        .style(theme::style_danger());
+
+    let mut lines: Vec<ratatui::text::Line> = Vec::new();
+    for crash in crashes.iter().rev().take(5) {
+        // rev + take 5：显示最近 5 条（active_crashes 已限 10 条上限）。
+        let elapsed = crash.timestamp.elapsed().unwrap_or_default();
+        let mins = elapsed.as_secs() / 60;
+        let secs = elapsed.as_secs() % 60;
+        let time_str = if mins > 0 {
+            format!("{mins}m{secs}s ago")
+        } else {
+            format!("{secs}s ago")
+        };
+        // panic message 可能很长，截到 60 字符。
+        let msg = if crash.message.len() > 60 {
+            format!("{}…", &crash.message[..60])
+        } else {
+            crash.message.clone()
+        };
+        lines.push(ratatui::text::Line::from(vec![
+            Span::styled(format!(" {} ", crash.worker), theme::style_warning()),
+            Span::styled(format!("({time_str}) "), theme::style_muted()),
+            Span::styled(msg, theme::style_normal()),
+        ]));
+    }
+    lines.push(ratatui::text::Line::from(""));
+    lines.push(ratatui::text::Line::from(Span::styled(
+        " 按 D 关闭提示",
+        theme::style_muted(),
+    )));
+
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_toolbar(f: &mut Frame, app: &App, area: Rect) {
@@ -236,7 +290,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         ""
     };
     // 阶段 8 D3：DNS worker 活动时，状态栏左侧显示「仅内存」指示（隐私）。
-    let dns_indicator = if app.dns_log_worker.is_some() {
+    let dns_indicator = if app.workers.dns_log_worker.is_some() {
         " 📡DNS(仅内存) "
     } else {
         ""

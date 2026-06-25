@@ -1,6 +1,6 @@
 # ADR-0008: 进程自我加固策略（DEP+ASLR+DynamicCode+ExtPoint，不开 Signature）
 
-- **Status**: Proposed（待阶段 2 落地后改 Accepted）
+- **Status**: Accepted（阶段 2 已落地）
 - **Date**: 2026-06-24
 - **Phase**: v0.6.0 阶段 2
 
@@ -73,7 +73,38 @@ pub fn apply_self_mitigations() {
 ## 验证
 
 - 阶段 2 验收：管理员启动 proc → `Process Explorer / System Informer` 查看 proc.exe 的 Mitigation 标志位应亮 DEP/ASLR/ProhibitDynamicCode/DisableExtensionPoints
-- 阶段 2 集成测试：`apply_self_mitigations()` 在 Windows 上不 panic；Linux 上 cfg-gate 返回 Ok
+- 阶段 2 集成测试：`apply_self_mitigations()` 在 Windows 上不 panic；Linux 上 cfg-gate 返回空 Vec
+
+## 阶段 2 落地（2026-06-24）
+
+**Status: Proposed → Accepted**。代码入仓：
+
+- `src/security/self_mitigation.rs`（新模块）：`apply_self_mitigations() -> Vec<&'static str>`
+  通过 `SetProcessMitigationPolicy` 应用 5 项策略（DEP/ASLR/DynamicCode/ExtPoint/ImageLoad）。
+  失败策略名进返回的 Vec，**不 panic**。
+- `src/main.rs::main`：第一行调用，失败时 `eprintln!` 提示（tracing 此时未 init）。
+- `tests/test_self_mitigation.rs`（新）：3 项集成测试覆盖
+  「不 panic + 幂等 + 非 Windows 空 Vec」。
+- 跨版本稳定性：windows 0.57→0.61 的 bitfield 字段名变化通过 `Flags: u32` raw
+  bitmask 写入规避（不依赖具体具名字段）。
+
+**实测观察**（dev 机 Windows 11 24H2）：
+
+- DEP Permanent 在 release 二进制上**预期失败**：`/NXCOMPAT` 链接器标志已默认开启
+  且 Windows 标记为 Permanent，运行时 `SetProcessMitigationPolicy(ProcessDEPPolicy)`
+  返回错误。函数把 `"DEP"` 加进 failed Vec 并继续，符合「不 panic」契约。
+- 其余 4 项（ASLR/DynamicCode/ExtPoint/ImageLoad）在 dev 机上均成功应用。
+- Process Explorer 手动验证：ASLR / ProhibitDynamicCode / DisableExtensionPoints
+  标志位亮起（需要 elevated 启动 proc 才能看到完整效果）。
+
+**配套 v0.6.0 阶段 2 工作**（同 ADR 范围）：
+
+- `src/security/restricted_spawn.rs`：spawn PowerShell DNS 子进程时调
+  `CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)` + `CreateProcessAsUserW`，剥离
+  继承的 SeDebugPrivilege。非 elevated 环境 fallback 到普通 Command。
+- `src/inspect/env_mask.rs` + `EnvVar.is_secret` 字段 + `App::env_reveal`：详情页
+  Env Tab 默认 mask，按 `v` 切换；录屏时强制 mask。
+- `App::pending_record_confirm`：录屏启动前弹 `y/n` 确认。
 
 ## 参考
 

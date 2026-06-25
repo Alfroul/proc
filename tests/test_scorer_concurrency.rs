@@ -60,7 +60,7 @@ fn test_scorer_round_trip() {
     let scorer = BackgroundScorer::new();
     let procs = Arc::new(vec![ProcessInfo {
         pid: 1234,
-        name: "test.exe".to_string(),
+        name: std::sync::Arc::from("test.exe"),
         cpu_usage: 1.0,
         memory: 1024,
         virtual_memory: 0,
@@ -69,15 +69,16 @@ fn test_scorer_round_trip() {
         disk_write_speed: 0,
         net_sent_rate: 0,
         net_recv_rate: 0,
-        status: "Running".to_string(),
+        status: proc::collect::ProcessStatus::Run,
         exe: None,
-        cmd: Vec::new(),
+        cmd: std::sync::Arc::from(Vec::<String>::new()),
         cwd: None,
         parent_pid: None,
         session_id: None,
         user_id: None,
         start_time: 0,
         run_time: 0,
+        name_lower: std::sync::Arc::from("test.exe"),
     }]);
     let ports = Arc::new(Vec::<PortEntry>::new());
 
@@ -150,26 +151,32 @@ fn test_scorer_shutdown() {
 // second request to be dropped in `test_scorer_request_drops_when_busy`.
 fn big_request() -> (Arc<Vec<ProcessInfo>>, Arc<Vec<PortEntry>>) {
     let procs: Vec<ProcessInfo> = (0..200)
-        .map(|i| ProcessInfo {
-            pid: i,
-            name: format!("proc_{i}.exe"),
-            cpu_usage: 0.0,
-            memory: 0,
-            virtual_memory: 0,
-            disk_usage: (0, 0),
-            disk_read_speed: 0,
-            disk_write_speed: 0,
-            net_sent_rate: 0,
-            net_recv_rate: 0,
-            status: "Running".to_string(),
-            exe: Some(format!("C:\\fake\\proc_{i}.exe")),
-            cmd: Vec::new(),
-            cwd: None,
-            parent_pid: None,
-            session_id: None,
-            user_id: None,
-            start_time: 0,
-            run_time: 0,
+        .map(|i| {
+            let name = format!("proc_{i}.exe");
+            ProcessInfo {
+                pid: i,
+                name: std::sync::Arc::from(name.as_str()),
+                cpu_usage: 0.0,
+                memory: 0,
+                virtual_memory: 0,
+                disk_usage: (0, 0),
+                disk_read_speed: 0,
+                disk_write_speed: 0,
+                net_sent_rate: 0,
+                net_recv_rate: 0,
+                status: proc::collect::ProcessStatus::Run,
+                exe: Some(std::sync::Arc::from(
+                    format!("C:\\fake\\proc_{i}.exe").as_str(),
+                )),
+                cmd: std::sync::Arc::from(Vec::<String>::new()),
+                cwd: None,
+                parent_pid: None,
+                session_id: None,
+                user_id: None,
+                start_time: 0,
+                run_time: 0,
+                name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
+            }
         })
         .collect();
     (Arc::new(procs), Arc::new(Vec::new()))

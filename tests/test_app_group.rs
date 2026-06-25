@@ -4,9 +4,10 @@ use proc::app_group::{self, AppGroup, AppGroupItem, VersionInfo, build_visual_it
 use proc::collect::{ProcessInfo, ProcessViewMode};
 
 fn make_proc(pid: u32, name: &str, exe: &str, cpu: f32, mem: u64) -> ProcessInfo {
+    let name_arc: std::sync::Arc<str> = std::sync::Arc::from(name);
     ProcessInfo {
         pid,
-        name: name.to_string(),
+        name: std::sync::Arc::clone(&name_arc),
         cpu_usage: cpu,
         memory: mem,
         virtual_memory: mem,
@@ -15,15 +16,16 @@ fn make_proc(pid: u32, name: &str, exe: &str, cpu: f32, mem: u64) -> ProcessInfo
         disk_write_speed: 0,
         net_sent_rate: 0,
         net_recv_rate: 0,
-        status: "Running".to_string(),
-        exe: Some(exe.to_string()),
-        cmd: vec![name.to_string()],
+        status: proc::collect::ProcessStatus::Run,
+        exe: Some(std::sync::Arc::from(exe)),
+        cmd: std::sync::Arc::from(vec![name.to_string()]),
         cwd: None,
         parent_pid: None,
         session_id: None,
         user_id: None,
         start_time: 0,
         run_time: 0,
+        name_lower: std::sync::Arc::from(name_arc.to_lowercase().as_str()),
     }
 }
 
@@ -49,9 +51,10 @@ fn make_proc_with_cmd(
     mem: u64,
     cmd: Vec<&str>,
 ) -> ProcessInfo {
+    let name_arc: std::sync::Arc<str> = std::sync::Arc::from(name);
     ProcessInfo {
         pid,
-        name: name.to_string(),
+        name: std::sync::Arc::clone(&name_arc),
         cpu_usage: cpu,
         memory: mem,
         virtual_memory: mem,
@@ -60,15 +63,16 @@ fn make_proc_with_cmd(
         disk_write_speed: 0,
         net_sent_rate: 0,
         net_recv_rate: 0,
-        status: "Running".to_string(),
-        exe: Some(exe.to_string()),
-        cmd: cmd.iter().map(|s| s.to_string()).collect(),
+        status: proc::collect::ProcessStatus::Run,
+        exe: Some(std::sync::Arc::from(exe)),
+        cmd: std::sync::Arc::from(cmd.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
         cwd: None,
         parent_pid: None,
         session_id: None,
         user_id: None,
         start_time: 0,
         run_time: 0,
+        name_lower: std::sync::Arc::from(name_arc.to_lowercase().as_str()),
     }
 }
 

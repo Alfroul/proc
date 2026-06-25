@@ -8,9 +8,11 @@
 //! 返回 None，worker 不 spawn；主线程 `dns_log_worker: Option<DnsLogWorker>`，
 //! `try_recv_latest` 返回 None → VecDeque 保持空。
 
+use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use crate::dns_log::{DnsLogCollector, DnsQuery};
+use crate::metrics::crash::WorkerCrash;
 use crate::worker::{SnapshotWorker, run_poll_loop};
 
 /// 500ms poll：DNS 查询高频，比阶段 7 NetFlow 的 1s 更短。再短会让 PowerShell
@@ -26,16 +28,25 @@ pub type DnsLogWorker = SnapshotWorker<DnsLogSnapshot>;
 
 /// 启动 DNS 日志 worker。`collector` 由调用方通过
 /// [`crate::dns_log::detect_collector`] 选出。
+///
+/// v0.6.0 阶段 3：`crash_tx` 用于 worker panic 时通知主线程显示 banner。
 #[must_use]
-pub fn spawn(mut collector: Box<dyn DnsLogCollector>) -> DnsLogWorker {
-    SnapshotWorker::spawn("dns-log-worker", move |snap_tx, shutdown_rx| {
-        run_poll_loop(&snap_tx, &shutdown_rx, POLL_INTERVAL, || {
-            let queries = collector.drain();
-            if queries.is_empty() {
-                None
-            } else {
-                Some(DnsLogSnapshot { queries })
-            }
-        });
-    })
+pub fn spawn(
+    mut collector: Box<dyn DnsLogCollector>,
+    crash_tx: Option<Sender<WorkerCrash>>,
+) -> DnsLogWorker {
+    SnapshotWorker::spawn(
+        "dns-log-worker",
+        crash_tx,
+        move |snap_tx, shutdown_rx, metrics| {
+            run_poll_loop(&snap_tx, &shutdown_rx, &metrics, POLL_INTERVAL, || {
+                let queries = collector.drain();
+                if queries.is_empty() {
+                    None
+                } else {
+                    Some(DnsLogSnapshot { queries })
+                }
+            });
+        },
+    )
 }

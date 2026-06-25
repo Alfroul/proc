@@ -168,7 +168,7 @@ fn draw_dns_view(f: &mut Frame, area: Rect, app: &App) {
     let recent = &app.dns_log_recent;
 
     // 标题栏：显示 collector 状态 + 条数 + 操作提示
-    let header_line = if app.dns_log_worker.is_some() {
+    let header_line = if app.workers.dns_log_worker.is_some() {
         format!(
             " DNS 查询日志（仅内存 · {} 条 · {}）  D/Esc 退出 · / 搜索 · f follow · c 清空",
             recent.len(),

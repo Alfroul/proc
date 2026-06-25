@@ -12,26 +12,30 @@ use proc::collect::ProcessInfo;
 
 fn fake_processes(n: u32) -> Vec<ProcessInfo> {
     (0..n)
-        .map(|i| ProcessInfo {
-            pid: i,
-            name: format!("proc_{i}"),
-            cpu_usage: (i as f32) * 0.1,
-            memory: (i as u64) * 1024,
-            virtual_memory: 0,
-            disk_usage: (0, 0),
-            disk_read_speed: 0,
-            disk_write_speed: 0,
-            net_sent_rate: 0,
-            net_recv_rate: 0,
-            status: String::new(),
-            exe: None,
-            cmd: Vec::new(),
-            cwd: None,
-            parent_pid: None,
-            session_id: None,
-            user_id: None,
-            start_time: 0,
-            run_time: 0,
+        .map(|i| {
+            let name = format!("proc_{i}");
+            ProcessInfo {
+                pid: i,
+                name: std::sync::Arc::from(name.as_str()),
+                cpu_usage: (i as f32) * 0.1,
+                memory: (i as u64) * 1024,
+                virtual_memory: 0,
+                disk_usage: (0, 0),
+                disk_read_speed: 0,
+                disk_write_speed: 0,
+                net_sent_rate: 0,
+                net_recv_rate: 0,
+                status: proc::collect::ProcessStatus::default(),
+                exe: None,
+                cmd: std::sync::Arc::from(Vec::<String>::new()),
+                cwd: None,
+                parent_pid: None,
+                session_id: None,
+                user_id: None,
+                start_time: 0,
+                run_time: 0,
+                name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
+            }
         })
         .collect()
 }

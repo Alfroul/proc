@@ -226,7 +226,7 @@ fn collect_missing_processes(
 
                 result.push(ProcessInfo {
                     pid,
-                    name,
+                    name: std::sync::Arc::from(name.as_str()),
                     cpu_usage: 0.0,
                     memory,
                     virtual_memory: 0,
@@ -235,15 +235,16 @@ fn collect_missing_processes(
                     disk_write_speed: 0,
                     net_sent_rate: 0,
                     net_recv_rate: 0,
-                    status: "Run".to_string(),
-                    exe,
-                    cmd: Vec::new(),
+                    status: ProcessStatus::Run,
+                    exe: exe.map(|s| std::sync::Arc::from(s.as_str())),
+                    cmd: std::sync::Arc::from(Vec::<String>::new()),
                     cwd: None,
                     parent_pid,
                     session_id: None,
                     user_id: None,
                     start_time,
                     run_time,
+                    name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
                 });
             }
         }
@@ -482,11 +483,131 @@ fn query_tcp_stats() -> TcpStats {
     stats
 }
 
+/// 进程状态枚举（v0.6.0 阶段 4）。
+///
+/// 用 `Copy` 枚举替代 `format!("{:?}", sysinfo::ProcessStatus)` 的 String 分配，
+/// 让 `ProcessInfo::status` 字段无堆开销。变体名按 sysinfo 0.34.2 真实命名对齐
+/// （`Tracing` / `LockBlocked` / `UninterruptibleDiskSleep`），不沿用 stage-4.md
+/// 早期猜测的 `Traced` / `DeadLock`。
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "PascalCase")]
+pub enum ProcessStatus {
+    Idle,
+    Run,
+    Sleep,
+    Stop,
+    Zombie,
+    Tracing,
+    Dead,
+    Wakekill,
+    Waking,
+    Parked,
+    LockBlocked,
+    UninterruptibleDiskSleep,
+    #[default]
+    Unknown,
+}
+
+impl From<sysinfo::ProcessStatus> for ProcessStatus {
+    fn from(s: sysinfo::ProcessStatus) -> Self {
+        match s {
+            sysinfo::ProcessStatus::Idle => Self::Idle,
+            sysinfo::ProcessStatus::Run => Self::Run,
+            sysinfo::ProcessStatus::Sleep => Self::Sleep,
+            sysinfo::ProcessStatus::Stop => Self::Stop,
+            sysinfo::ProcessStatus::Zombie => Self::Zombie,
+            sysinfo::ProcessStatus::Tracing => Self::Tracing,
+            sysinfo::ProcessStatus::Dead => Self::Dead,
+            sysinfo::ProcessStatus::Wakekill => Self::Wakekill,
+            sysinfo::ProcessStatus::Waking => Self::Waking,
+            sysinfo::ProcessStatus::Parked => Self::Parked,
+            sysinfo::ProcessStatus::LockBlocked => Self::LockBlocked,
+            sysinfo::ProcessStatus::UninterruptibleDiskSleep => Self::UninterruptibleDiskSleep,
+            sysinfo::ProcessStatus::Unknown(_) => Self::Unknown,
+        }
+    }
+}
+
+impl ProcessStatus {
+    /// 短代号（TUI 表格列宽紧凑时可用）。
+    #[must_use]
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::Idle => "I",
+            Self::Run => "R",
+            Self::Sleep => "S",
+            Self::Stop => "T",
+            Self::Zombie => "Z",
+            Self::Tracing => "Tr",
+            Self::Dead => "D",
+            Self::Wakekill => "Wk",
+            Self::Waking => "Wg",
+            Self::Parked => "P",
+            Self::LockBlocked => "Lk",
+            Self::UninterruptibleDiskSleep => "Ds",
+            Self::Unknown => "?",
+        }
+    }
+
+    /// 完整英文名（鼠标悬停 / detail view）。
+    #[must_use]
+    pub fn tooltip(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Run => "Running",
+            Self::Sleep => "Sleeping",
+            Self::Stop => "Stopped",
+            Self::Zombie => "Zombie",
+            Self::Tracing => "Tracing",
+            Self::Dead => "Dead",
+            Self::Wakekill => "Wakekill",
+            Self::Waking => "Waking",
+            Self::Parked => "Parked",
+            Self::LockBlocked => "LockBlocked",
+            Self::UninterruptibleDiskSleep => "UninterruptibleDiskSleep",
+            Self::Unknown => "Unknown",
+        }
+    }
+
+    /// 序列化 / 表格显示用的稳定字符串（与原 `format!("{:?}")` 等价）。
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Run => "Run",
+            Self::Sleep => "Sleep",
+            Self::Stop => "Stop",
+            Self::Zombie => "Zombie",
+            Self::Tracing => "Tracing",
+            Self::Dead => "Dead",
+            Self::Wakekill => "Wakekill",
+            Self::Waking => "Waking",
+            Self::Parked => "Parked",
+            Self::LockBlocked => "LockBlocked",
+            Self::UninterruptibleDiskSleep => "UninterruptibleDiskSleep",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for ProcessStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// 进程信息
+///
+/// v0.6.0 阶段 4：`name / cmd / exe / cwd / user_id` 全部 Arc 化，
+/// HeavyWorker 每次构造一次，后续读取 / clone 都是原子计数；
+/// `status` 改 `ProcessStatus` Copy 枚举；
+/// 新增 `name_lower` 预计算字段（serde skip，不影响 .prec 录屏文件）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessInfo {
     pub pid: u32,
-    pub name: String,
+    pub name: std::sync::Arc<str>,
     pub cpu_usage: f32,
     pub memory: u64,
     pub virtual_memory: u64,
@@ -500,15 +621,52 @@ pub struct ProcessInfo {
     pub net_sent_rate: u64,
     /// 下行字节速率 bytes/sec（阶段 7 D1，net_flow worker 推送；worker 不可用时保持 0）
     pub net_recv_rate: u64,
-    pub status: String,
-    pub exe: Option<String>,
-    pub cmd: Vec<String>,
-    pub cwd: Option<String>,
+    pub status: ProcessStatus,
+    pub exe: Option<std::sync::Arc<str>>,
+    pub cmd: std::sync::Arc<[String]>,
+    pub cwd: Option<std::sync::Arc<str>>,
     pub parent_pid: Option<u32>,
     pub session_id: Option<u32>,
-    pub user_id: Option<String>,
+    pub user_id: Option<std::sync::Arc<str>>,
     pub start_time: u64,
     pub run_time: u64,
+    /// v0.6.0 阶段 4：预计算的 lowercase name，搜索匹配用。
+    /// heavy worker 一次性算好，避免每按键 `to_lowercase` 重建 Vec。
+    /// `#[serde(skip)]`：录屏文件不持久化，重算成本低且能减小 .prec 体积。
+    #[serde(skip)]
+    pub name_lower: std::sync::Arc<str>,
+}
+
+impl Default for ProcessInfo {
+    fn default() -> Self {
+        static EMPTY_STR: std::sync::OnceLock<std::sync::Arc<str>> = std::sync::OnceLock::new();
+        static EMPTY_CMD: std::sync::OnceLock<std::sync::Arc<[String]>> =
+            std::sync::OnceLock::new();
+        let empty_str = EMPTY_STR.get_or_init(|| std::sync::Arc::from(""));
+        let empty_cmd = EMPTY_CMD.get_or_init(|| std::sync::Arc::from(Vec::<String>::new()));
+        Self {
+            pid: 0,
+            name: std::sync::Arc::clone(empty_str),
+            cpu_usage: 0.0,
+            memory: 0,
+            virtual_memory: 0,
+            disk_usage: (0, 0),
+            disk_read_speed: 0,
+            disk_write_speed: 0,
+            net_sent_rate: 0,
+            net_recv_rate: 0,
+            status: ProcessStatus::default(),
+            exe: None,
+            cmd: std::sync::Arc::clone(empty_cmd),
+            cwd: None,
+            parent_pid: None,
+            session_id: None,
+            user_id: None,
+            start_time: 0,
+            run_time: 0,
+            name_lower: std::sync::Arc::clone(empty_str),
+        }
+    }
 }
 
 /// 进程视图模式
@@ -761,11 +919,23 @@ impl HeavyWorker {
                             ws.max(winapi.unwrap_or(0)).max(vm)
                         };
                         let disk = proc.disk_usage();
+                        // v0.6.0 阶段 4：String → Arc<str>，构造一次后续 clone 全是
+                        // 原子计数；name_lower 一次性算好，搜索路径不再每按键 to_lowercase。
+                        let name_lossy = proc.name().to_string_lossy();
+                        let name: std::sync::Arc<str> = std::sync::Arc::from(name_lossy.as_ref());
+                        let name_lower: std::sync::Arc<str> =
+                            std::sync::Arc::from(name_lossy.to_lowercase().as_str());
+                        let cmd: std::sync::Arc<[String]> = std::sync::Arc::from(
+                            proc.cmd()
+                                .iter()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .collect::<Vec<_>>(),
+                        );
                         processes.insert(
                             pid_u32,
                             ProcessInfo {
                                 pid: pid_u32,
-                                name: proc.name().to_string_lossy().to_string(),
+                                name: std::sync::Arc::clone(&name),
                                 cpu_usage: normalized, // raw; smoothing applied on main thread
                                 memory,
                                 virtual_memory: proc.virtual_memory(),
@@ -774,17 +944,19 @@ impl HeavyWorker {
                                 disk_write_speed: 0,
                                 net_sent_rate: 0,
                                 net_recv_rate: 0,
-                                status: format!("{:?}", proc.status()),
-                                exe: proc.exe().map(|p| p.to_string_lossy().to_string()),
-                                cmd: proc
-                                    .cmd()
-                                    .iter()
-                                    .map(|s| s.to_string_lossy().to_string())
-                                    .collect(),
-                                cwd: proc.cwd().map(|p| p.to_string_lossy().to_string()),
+                                status: proc.status().into(),
+                                exe: proc
+                                    .exe()
+                                    .map(|p| std::sync::Arc::from(p.to_string_lossy().as_ref())),
+                                cmd,
+                                cwd: proc
+                                    .cwd()
+                                    .map(|p| std::sync::Arc::from(p.to_string_lossy().as_ref())),
                                 parent_pid: proc.parent().map(|p| p.as_u32()),
                                 session_id: None,
-                                user_id: proc.user_id().map(|uid| uid.to_string()),
+                                user_id: proc
+                                    .user_id()
+                                    .map(|uid| std::sync::Arc::from(uid.to_string().as_str())),
                                 start_time: proc.start_time(),
                                 run_time: {
                                     let now = std::time::SystemTime::now()
@@ -793,6 +965,7 @@ impl HeavyWorker {
                                         .as_secs();
                                     now.saturating_sub(proc.start_time())
                                 },
+                                name_lower,
                             },
                         );
                     }

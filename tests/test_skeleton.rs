@@ -229,7 +229,7 @@ fn test_proc_error_source_chain() {
 fn test_process_info_construction() {
     let info = ProcessInfo {
         pid: 1234,
-        name: "test.exe".to_string(),
+        name: std::sync::Arc::from("test.exe"),
         cpu_usage: 12.5,
         memory: 1024 * 1024,
         virtual_memory: 10 * 1024 * 1024,
@@ -238,22 +238,23 @@ fn test_process_info_construction() {
         disk_write_speed: 0,
         net_sent_rate: 0,
         net_recv_rate: 0,
-        status: "Running".to_string(),
-        exe: Some("C:\\test.exe".to_string()),
-        cmd: vec!["test.exe".to_string(), "--flag".to_string()],
-        cwd: Some("C:\\".to_string()),
+        status: proc::collect::ProcessStatus::Run,
+        exe: Some(std::sync::Arc::from("C:\\test.exe")),
+        cmd: std::sync::Arc::from(vec!["test.exe".to_string(), "--flag".to_string()]),
+        cwd: Some(std::sync::Arc::from("C:\\")),
         parent_pid: Some(1),
         session_id: Some(1),
-        user_id: Some("admin".to_string()),
+        user_id: Some(std::sync::Arc::from("admin")),
         start_time: 1000,
         run_time: 500,
+        name_lower: std::sync::Arc::from("test.exe"),
     };
     assert_eq!(info.pid, 1234);
-    assert_eq!(info.name, "test.exe");
+    assert_eq!(info.name.as_ref(), "test.exe");
     assert!((info.cpu_usage - 12.5).abs() < f32::EPSILON);
     assert_eq!(info.memory, 1024 * 1024);
     assert_eq!(info.disk_usage, (100, 50));
-    assert_eq!(info.exe, Some("C:\\test.exe".to_string()));
+    assert_eq!(info.exe.as_deref(), Some("C:\\test.exe"));
     assert_eq!(info.cmd.len(), 2);
 }
 
@@ -459,11 +460,11 @@ fn test_app_inspection_handles_and_memory_default_none() {
     // 阶段 4 上线采集后，这里仍应保持 None（采集后由 switch_mode / r 键填入 Some）。
     let app = App::new().expect("App::new() should not panic");
     assert!(
-        app.inspection_handles_data.is_none(),
+        app.inspector.inspection_handles_data.is_none(),
         "fresh App should not preload handles data"
     );
     assert!(
-        app.inspection_memory_data.is_none(),
+        app.inspector.inspection_memory_data.is_none(),
         "fresh App should not preload memory data"
     );
 }
@@ -473,7 +474,7 @@ fn test_security_scorer_returns_100() {
     let mut scorer = SecurityScorer::new();
     let proc = ProcessInfo {
         pid: 1234,
-        name: "test.exe".to_string(),
+        name: std::sync::Arc::from("test.exe"),
         cpu_usage: 0.0,
         memory: 0,
         virtual_memory: 0,
@@ -482,15 +483,16 @@ fn test_security_scorer_returns_100() {
         disk_write_speed: 0,
         net_sent_rate: 0,
         net_recv_rate: 0,
-        status: "Running".to_string(),
-        exe: Some("C:\\Windows\\System32\\test.exe".to_string()),
-        cmd: vec![],
+        status: proc::collect::ProcessStatus::Run,
+        exe: Some(std::sync::Arc::from("C:\\Windows\\System32\\test.exe")),
+        cmd: std::sync::Arc::from(Vec::<String>::new()),
         cwd: None,
         parent_pid: None,
         session_id: None,
         user_id: None,
         start_time: 0,
         run_time: 0,
+        name_lower: std::sync::Arc::from("test.exe"),
     };
     let all_procs = vec![proc.clone()];
     let score = scorer.score(&proc, &all_procs, &[]);

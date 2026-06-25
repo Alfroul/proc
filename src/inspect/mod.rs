@@ -7,17 +7,38 @@
 //!
 //! 顶层 [`inspect`] 聚合三份数据，TUI 层（阶段 13）按 Tab 分发渲染。
 
+pub mod controller;
 pub mod dlls;
 pub mod env;
+pub mod env_mask;
 pub mod handles;
 pub mod memory;
 pub mod net;
+
+pub use controller::{InspectorAction, InspectorController};
 
 /// 单条环境变量。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvVar {
     pub key: String,
     pub value: String,
+    /// v0.6.0 阶段 2：是否被 [`env_mask::is_secret_key`] 判定为 secret。
+    /// UI 渲染时配合 `App::env_reveal` 决定走 [`env_mask::mask_value`] 还是原值。
+    pub is_secret: bool,
+}
+
+impl EnvVar {
+    /// 计算脱敏后的展示值。`reveal=true` 时 secret 也按原值返回。
+    ///
+    /// 返回 `String` 而非 `&str` —— mask 路径需要新生成字符串。
+    #[must_use]
+    pub fn render_value_owned(&self, reveal: bool) -> String {
+        if self.is_secret && !reveal {
+            env_mask::mask_value(&self.value)
+        } else {
+            self.value.clone()
+        }
+    }
 }
 
 /// 单个已加载模块（Windows DLL / Linux .so）。

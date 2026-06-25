@@ -471,7 +471,7 @@ impl PortPanel {
                 let name = cached_processes
                     .iter()
                     .find(|p| p.pid == pid)
-                    .map(|p| p.name.clone())
+                    .map(|p| (*p.name).to_string())
                     .unwrap_or_else(|| "?".to_string());
                 Some(format!("{} (PID {}) 已终止", name, pid))
             }

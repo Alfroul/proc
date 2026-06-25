@@ -26,7 +26,7 @@ fn test_lib_functions_compile_non_windows() {
     // 构造一个最小可用的 ProcessInfo，确保结构体在所有平台都能落地。
     let info = sample_process();
     assert_eq!(info.pid, 4242);
-    assert_eq!(info.name, "compat_probe");
+    assert_eq!(info.name.as_ref(), "compat_probe");
 }
 
 #[test]
@@ -34,14 +34,22 @@ fn test_process_info_construction_cross_platform() {
     let info = sample_process();
     let json = serde_json::to_string(&info).expect("serialize ProcessInfo");
     let back: ProcessInfo = serde_json::from_str(&json).expect("deserialize ProcessInfo");
-    assert_eq!(info, back);
-    assert_eq!(back.cmd, vec!["--demo".to_string(), "value".to_string()]);
+    // name_lower 是 #[serde(skip)]，反序列化后默认空字符串，不参与 round-trip。
+    // 这里把原对象的 name_lower 也清零，让等价比较聚焦于持久化字段。
+    let mut info_no_lower = info.clone();
+    info_no_lower.name_lower = std::sync::Arc::from("");
+    assert_eq!(info_no_lower, back);
+    assert_eq!(
+        back.cmd.as_ref(),
+        &["--demo".to_string(), "value".to_string()][..]
+    );
 }
 
 fn sample_process() -> ProcessInfo {
+    let name: std::sync::Arc<str> = std::sync::Arc::from("compat_probe");
     ProcessInfo {
         pid: 4242,
-        name: "compat_probe".to_string(),
+        name: std::sync::Arc::clone(&name),
         cpu_usage: 12.5,
         memory: 64 * 1024 * 1024,
         virtual_memory: 256 * 1024 * 1024,
@@ -50,15 +58,16 @@ fn sample_process() -> ProcessInfo {
         disk_write_speed: 200,
         net_sent_rate: 0,
         net_recv_rate: 0,
-        status: "Run".to_string(),
-        exe: Some("/usr/bin/compat_probe".to_string()),
-        cmd: vec!["--demo".to_string(), "value".to_string()],
-        cwd: Some("/tmp".to_string()),
+        status: proc::collect::ProcessStatus::Run,
+        exe: Some(std::sync::Arc::from("/usr/bin/compat_probe")),
+        cmd: std::sync::Arc::from(vec!["--demo".to_string(), "value".to_string()]),
+        cwd: Some(std::sync::Arc::from("/tmp")),
         parent_pid: Some(1),
         session_id: Some(0),
-        user_id: Some("0".to_string()),
+        user_id: Some(std::sync::Arc::from("0")),
         start_time: 1_700_000_000,
         run_time: 3600,
+        name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
     }
 }
 
@@ -76,7 +85,7 @@ mod non_windows_stubs {
     fn fake_proc(pid: u32, exe: Option<&str>) -> ProcessInfo {
         ProcessInfo {
             pid,
-            name: "stub".into(),
+            name: std::sync::Arc::from("stub"),
             cpu_usage: 0.0,
             memory: 0,
             virtual_memory: 0,
@@ -85,15 +94,16 @@ mod non_windows_stubs {
             disk_write_speed: 0,
             net_sent_rate: 0,
             net_recv_rate: 0,
-            status: String::new(),
-            exe: exe.map(str::to_string),
-            cmd: Vec::new(),
+            status: proc::collect::ProcessStatus::default(),
+            exe: exe.map(std::sync::Arc::from),
+            cmd: std::sync::Arc::from(Vec::<String>::new()),
             cwd: None,
             parent_pid: None,
             session_id: None,
             user_id: None,
             start_time: 0,
             run_time: 0,
+            name_lower: std::sync::Arc::from("stub"),
         }
     }
 

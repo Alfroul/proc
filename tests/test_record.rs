@@ -174,7 +174,7 @@ fn test_frame_process_conversion() {
 
     let pi = frame_process_to_process_info(&fp);
     assert_eq!(pi.pid, 42);
-    assert_eq!(pi.name, "test.exe");
+    assert_eq!(pi.name.as_ref(), "test.exe");
     assert!((pi.cpu_usage - 15.5).abs() < 0.01);
     assert_eq!(pi.memory, 4 * 1024 * 1024);
     assert_eq!(pi.disk_usage, (1024, 2048));

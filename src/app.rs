@@ -12,9 +12,10 @@ const MAX_OP_HISTORY: usize = 100;
 const DNS_LOG_BUFFER_CAP: usize = 1000;
 
 // Re-export types that moved to app_panel
-pub use crate::app_panel::{
-    AppGroupSortField, AppMode, InspectionTab, KillRequest, MonitorAddSubmenu, OpRecord,
-};
+pub use crate::app_panel::{AppGroupSortField, AppMode, KillRequest, MonitorAddSubmenu, OpRecord};
+// v0.6.0 阶段 5：ReplaySpeed / TimelineState 搬到 `crate::replay`，
+// 这里 re-export 让 `crate::app::ReplaySpeed` 等旧路径继续可用（TUI 不动 import）。
+pub use crate::replay::{ReplaySpeed, TimelineState};
 
 use crate::alert::AlertManager;
 use crate::app_panel::{KeyResult, Panel, PanelContext};
@@ -28,10 +29,10 @@ use crate::docker::exec::ContainerExec;
 use crate::eject::classify::HandleRisk;
 use crate::eject::{HandleLock, RemovableDevice};
 use crate::error::Result;
-use crate::inspect::{HandleInfo, InspectionData, MemoryRegion};
+use crate::inspect::{InspectorAction, InspectorController};
 use crate::port_map::{self, NetworkViewMode, PortEntry};
 use crate::record::Player;
-use crate::search::SearchState;
+use crate::replay::{ReplayAction, ReplayController};
 use crate::security::{BackgroundScorer, SecurityScore};
 use crate::tree::TreeNode;
 use crate::view_models::DockerPanel;
@@ -39,35 +40,6 @@ use crate::view_models::MonitorPanel;
 use crate::view_models::PortPanel;
 use crate::view_models::ProcessPanel;
 use crate::view_models::UsbPanel;
-
-#[derive(Debug, Clone, Copy)]
-pub enum ReplaySpeed {
-    Half,
-    Normal,
-    Double,
-    Quad,
-}
-
-impl ReplaySpeed {
-    #[must_use]
-    pub fn as_f32(&self) -> f32 {
-        match self {
-            Self::Half => 0.5,
-            Self::Normal => 1.0,
-            Self::Double => 2.0,
-            Self::Quad => 4.0,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TimelineState {
-    pub current_frame: usize,
-    pub total_frames: usize,
-    pub speed: ReplaySpeed,
-    pub playing: bool,
-    pub half_tick: u32,
-}
 
 pub struct App {
     pub mode: AppMode,
@@ -85,16 +57,13 @@ pub struct App {
     pub monitor_panel: MonitorPanel,
     pub docker_panel: DockerPanel,
 
-    // 后台采集 worker(netstat2、USB、Docker 等挪出主线程)
-    pub port_worker: crate::port_worker::PortSnapshotWorker,
-    pub usb_worker: crate::eject::snapshot_worker::UsbSnapshotWorker,
-    // 阶段 7 D1：per-process 网络流量 worker（Windows IP Helper / Linux nethogs）
-    // 平台不支持时为 None，net_sent_rate / net_recv_rate 保持 0
-    pub net_flow_worker: Option<crate::net_flow::worker::NetFlowWorker>,
-    // 阶段 8 D3：DNS 查询日志 worker（Windows PowerShell / Linux/macOS 不支持时为 None）。
-    // 主线程 tick 时 try_recv_latest drain，追加到 `dns_log_recent`（cap=1000 FIFO）。
-    // 仅内存缓冲；录屏（record/）路径不序列化任何 DNS 数据（隐私）。
-    pub dns_log_worker: Option<crate::dns_log::worker::DnsLogWorker>,
+    // v0.6.0 阶段 5：后台采集 worker（port / usb / net_flow / dns_log）统一由
+    // `WorkerManager` 持有，详见 `src/workers/manager.rs`。Docker logs worker
+    // 仍由 `DockerPanel` 自管（生命周期与 panel 绑定）。
+    pub workers: crate::workers::WorkerManager,
+    // 阶段 8 D3：DNS 查询日志（worker drain 出来的最新 N 条）。worker 句柄在
+    // `self.workers.dns_log_worker`；这里只存数据。cap=1000 FIFO；仅内存缓冲，
+    // 录屏（record/）路径不序列化任何 DNS 数据（隐私）。
     pub dns_log_recent: VecDeque<crate::dns_log::DnsQuery>,
 
     // 阶段 9 E2：容器 exec 嵌入式 PTY。
@@ -108,24 +77,12 @@ pub struct App {
     pub container_exec_exit_msg: Option<String>,
 
     // Global state
-    pub detail_process: Option<ProcessInfo>,
     pub status_message: Option<String>,
     pub kill_confirm: bool,
     pub pending_kill: Option<KillRequest>,
 
-    // Inspector (阶段 13，ADR-0004)：详情页顶部 Tab 栏 + 采集快照
-    pub inspection_tab: InspectionTab,
-    pub inspection_data: Option<InspectionData>,
-    pub inspection_search: SearchState,
-    pub inspection_scroll: usize,
-    // 阶段 1 占位字段：阶段 4 上线时填采集结果，本阶段始终 None。
-    pub inspection_handles_data: Option<Vec<HandleInfo>>,
-    pub inspection_memory_data: Option<Vec<MemoryRegion>>,
-    /// Summary Tab 的 (priority_label, affinity_label) 缓存（阶段 11 P1-A3）。
-    /// `detail_view::draw_summary` 每帧渲染时读这里，避免每帧 4 次 syscall
-    /// （OpenProcess + GetPriorityClass + GetProcessAffinityMask + CloseHandle）。
-    /// 进入详情页 / `r` 刷新 / `+/-` 调整 / heavy tick 4 处更新。
-    pub detail_priority: Option<(String, String)>,
+    // Inspector (v0.6.0 阶段 5：从 App 上帝对象拆出，集中持详情页状态)。
+    pub inspector: InspectorController,
 
     // History tracking
     pub proc_history: HashMap<u32, ProcHistory>,
@@ -150,13 +107,15 @@ pub struct App {
     // Help page
     pub help_scroll: usize,
 
-    // Replay state
-    pub replay_player: Option<Player>,
-    pub timeline_state: Option<TimelineState>,
+    // Replay state (v0.6.0 阶段 5：从 App 上帝对象拆出，集中在 ReplayController)。
+    // 字段名保持 `replay_player` / `timeline_state`，嵌套多一层 `.replay.` 前缀。
+    pub replay: ReplayController,
 
     // Recording
     recording_wanted: bool,
     recording_elapsed_secs: u64,
+    /// v0.6.0 阶段 2：用户按 `R` 启动录屏时进入「待确认」状态，等 `y/n` 决定。
+    pub pending_record_confirm: bool,
 
     // Throttle
     pub throttle_info: Option<crate::throttle::ThrottleInfo>,
@@ -176,6 +135,15 @@ pub struct App {
     // Sidebar 折叠/展开状态：阶段 2 B2，按 `c` 切换；持久化到 ui.toml。
     // 折叠 = 现有 sidebar 视觉；展开 = per-core CPU 频率/温度表格。
     pub sidebar_expanded: bool,
+
+    // v0.6.0 阶段 3：worker 可观测性 + crash 报告。
+    // crash_rx 接收所有 SnapshotWorker（port/usb/net_flow/dns_log/docker）
+    // 在 catch_unwind 后 best-effort 发送的 WorkerCrash。CLI 模式（如 `proc
+    // diag`）不消费 → 字段为 None，避免无人 recv 堆积。
+    pub crash_rx: Option<std::sync::mpsc::Receiver<crate::metrics::crash::WorkerCrash>>,
+    /// worker 崩溃后保留的最近 N 条 crash，TUI 在顶部渲染 banner。
+    /// `tick()` 时 drain `crash_rx` 追加；用户按 `D` 在 `handle_key` 里清空。
+    pub active_crashes: Vec<crate::metrics::crash::WorkerCrash>,
 }
 
 pub struct ProcHistory {
@@ -219,6 +187,13 @@ impl App {
             )
         };
 
+        // v0.6.0 阶段 3：crash channel —— 给所有 SnapshotWorker 共享。
+        // v0.6.0 阶段 5：4 个直管 worker 的 spawn 统一进 WorkerManager。
+        let (crash_tx, crash_rx) = crate::metrics::crash::channel();
+        let workers = crate::workers::WorkerManager::new(Some(&crash_tx));
+        let mut docker_panel = DockerPanel::new();
+        docker_panel.crash_tx = Some(crash_tx);
+
         Ok(Self {
             mode: AppMode::ProcessList,
             snapshot,
@@ -231,28 +206,17 @@ impl App {
             port_panel,
             usb_panel: UsbPanel::new(),
             monitor_panel: MonitorPanel::new(),
-            docker_panel: DockerPanel::new(),
-            port_worker: crate::port_worker::spawn(),
-            usb_worker: crate::eject::snapshot_worker::spawn(),
-            net_flow_worker: crate::net_flow::detect_collector()
-                .map(crate::net_flow::worker::spawn),
-            dns_log_worker: crate::dns_log::detect_collector().map(crate::dns_log::worker::spawn),
+            docker_panel,
+            workers,
             dns_log_recent: VecDeque::new(),
             container_exec: None,
             container_exec_vt: None,
             pending_container_exec_target: None,
             container_exec_exit_msg: None,
-            detail_process: None,
             status_message,
             kill_confirm: false,
             pending_kill: None,
-            inspection_tab: InspectionTab::Summary,
-            inspection_data: None,
-            inspection_search: SearchState::new(),
-            inspection_scroll: 0,
-            inspection_handles_data: None,
-            inspection_memory_data: None,
-            detail_priority: None,
+            inspector: InspectorController::new(),
             proc_history: HashMap::new(),
             global_cpu_history: VecDeque::new(),
             global_mem_history: VecDeque::new(),
@@ -269,10 +233,10 @@ impl App {
             alert_popup_open: false,
             alert_scroll: 0,
             help_scroll: 0,
-            replay_player: None,
-            timeline_state: None,
+            replay: ReplayController::new(),
             recording_wanted: false,
             recording_elapsed_secs: 0,
+            pending_record_confirm: false,
             throttle_info: None,
             throttle_reason: crate::throttle::ThrottleReason::None,
             prev_process_disk: HashMap::new(),
@@ -280,6 +244,8 @@ impl App {
             self_proc: None,
             is_windows,
             sidebar_expanded: crate::ui_state::load_sidebar_expanded(),
+            crash_rx: Some(crash_rx),
+            active_crashes: Vec::new(),
         })
     }
 
@@ -305,43 +271,106 @@ impl App {
         self.recording_elapsed_secs
     }
 
+    // --- v0.6.0 阶段 3：worker 可观测性 ---
+
+    /// 聚合所有 SnapshotWorker 的 metrics 快照。`proc diag` + `?` 帮助页消费。
+    ///
+    /// Light/Heavy/Smart worker 由 `SystemSnapshot` 内部持有（非 SnapshotWorker
+    /// 模板），阶段 5 WorkerManager 重构时统一接入；当前阶段不暴露。
+    #[must_use]
+    pub fn worker_metrics(&self) -> Vec<crate::metrics::NamedWorkerStats> {
+        // v0.6.0 阶段 5：4 个直管 worker 的 metrics 走 WorkerManager 聚合。
+        let mut out = self.workers.metrics_snapshot();
+        if let Some(w) = self.docker_panel.snapshot_worker.as_ref() {
+            out.push(crate::metrics::NamedWorkerStats {
+                name: "docker",
+                stats: w.metrics.snapshot(),
+            });
+        }
+        out
+    }
+
+    /// 主循环 tick 调一次：drain `crash_rx`，新到的 `WorkerCrash` 追加到
+    /// `active_crashes`，触发 TUI 顶部 banner 渲染。
+    pub fn poll_crashes(&mut self) {
+        let Some(rx) = &self.crash_rx else {
+            return;
+        };
+        while let Ok(crash) = rx.try_recv() {
+            tracing::error!(
+                worker = crash.worker,
+                panic = %crash.message,
+                "worker crashed (banner shown)"
+            );
+            self.active_crashes.push(crash);
+            // 上限 10 条防止失忆式增长 —— 用户按 D 清空。
+            if self.active_crashes.len() > 10 {
+                self.active_crashes.drain(0..1);
+            }
+            self.pending_redraw = true;
+        }
+    }
+
+    /// 清空所有 banner（用户按 D 触发）。
+    pub fn dismiss_all_crashes(&mut self) {
+        if !self.active_crashes.is_empty() {
+            self.active_crashes.clear();
+            self.pending_redraw = true;
+        }
+    }
+
     fn toggle_recording(&mut self) {
-        self.recording_wanted = !self.recording_wanted;
+        if self.recording_wanted {
+            // 录屏中再按 R → 直接停止（原行为）。
+            self.recording_wanted = false;
+            self.pending_record_confirm = false;
+            self.status_message = Some("录屏已停止".to_string());
+            return;
+        }
+        // 启动前弹确认 — 录屏会捕获屏幕所有内容（DNS 域名 / 进程 cmd / env 真值
+        // 切换虽会强制复位但仍可能漏一帧），需要用户显式同意。
+        self.pending_record_confirm = true;
+        self.status_message =
+            Some("⚠ 录屏会捕获屏幕所有内容（含 DNS 域名 / 进程 cmd）。y 确认 / n 取消".to_string());
+    }
+
+    /// v0.6.0 阶段 2：处理 `pending_record_confirm` 状态下的按键。
+    /// 返回 `true` 表示已消费（调用方应 short-circuit）。
+    fn handle_record_confirm(&mut self, key: KeyEvent) -> bool {
+        if !self.pending_record_confirm {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.pending_record_confirm = false;
+                self.recording_wanted = true;
+                // 录屏启动同时强制复位 env_reveal，防录到切换前残留的 reveal 帧。
+                self.inspector.env_reveal = false;
+                self.status_message = Some("录屏中… (R 停止)".to_string());
+            }
+            KeyCode::Char('n')
+            | KeyCode::Char('N')
+            | KeyCode::Esc
+            | KeyCode::Char('q')
+            | KeyCode::Char('Q') => {
+                self.pending_record_confirm = false;
+                self.status_message = Some("录屏已取消".to_string());
+            }
+            _ => {
+                // 其他键吞掉，等用户选 y/n；不传递给下层 panel 防误触。
+            }
+        }
+        true
     }
 
     pub fn replay_frame_mode(&self) -> AppMode {
-        let frame_index = self
-            .timeline_state
-            .as_ref()
-            .map(|ts| ts.current_frame)
-            .unwrap_or(0);
-        if let Some(ref player) = self.replay_player
-            && let Some(frame) = player.frame_at(frame_index)
-        {
-            return match frame.mode.as_str() {
-                "ProcessTree" | "ProcessList" => AppMode::ProcessList,
-                "PortMap" => AppMode::PortMap,
-                "UsbAssistant" => AppMode::UsbAssistant,
-                "MonitorPanel" => AppMode::MonitorPanel,
-                "DockerPanel" => AppMode::DockerPanel,
-                _ => AppMode::ProcessList,
-            };
-        }
-        AppMode::ProcessList
+        self.replay.frame_mode()
     }
 
     pub fn start_replay(&mut self, player: Player) {
-        let total = player.total_frames();
-        self.replay_player = Some(player);
-        self.timeline_state = Some(TimelineState {
-            current_frame: 0,
-            total_frames: total,
-            speed: ReplaySpeed::Normal,
-            playing: false,
-            half_tick: 0,
-        });
+        self.replay.start(player);
         self.mode = AppMode::Replay;
-        self.replay_load_current_frame();
+        self.apply_replay_frame();
     }
 
     // --- Key dispatch ---
@@ -383,8 +412,9 @@ impl App {
                 true
             }
             KeyCode::Char('c') => {
-                // Sidebar 折叠/展开：阶段 2 B2。详情页的 'c'（复制进程信息）在
-                // `handle_detail_key` 里走 ProcessDetail 分支，不会被这里抢键。
+                // Sidebar 折叠/展开：阶段 2 B2。v0.6.0 阶段 6 起，详情页复制
+                // 迁移到 `y`（vim yank），`c` 在所有模式下统一为侧边栏折叠，
+                // 不再有「详情页 vs 全局」双语义冲突。
                 self.sidebar_expanded = !self.sidebar_expanded;
                 crate::ui_state::save_sidebar_expanded(self.sidebar_expanded);
                 self.status_message = Some(if self.sidebar_expanded {
@@ -419,6 +449,24 @@ impl App {
             return;
         }
 
+        // v0.6.0 阶段 3：worker 崩溃 banner — 按 D 清空，优先级高于其他绑定。
+        if key.code == KeyCode::Char('D') && !self.active_crashes.is_empty() {
+            self.dismiss_all_crashes();
+            return;
+        }
+
+        // v0.6.0 阶段 2：录屏待确认状态 — 拦截所有按键，等 y/n
+        if self.pending_record_confirm {
+            // 唯一例外：再按 R 视为取消（用户改主意）
+            if key.code == KeyCode::Char('R') {
+                self.pending_record_confirm = false;
+                self.status_message = Some("录屏已取消".to_string());
+                return;
+            }
+            self.handle_record_confirm(key);
+            return;
+        }
+
         // Global recording toggle
         if key.code == KeyCode::Char('R') {
             self.toggle_recording();
@@ -430,7 +478,7 @@ impl App {
             || self.process_panel.tree_search.is_active()
             || self.process_panel.app_group_search.is_active()
             || self.port_panel.port_search.is_active()
-            || self.inspection_search.is_active();
+            || self.inspector.inspection_search.is_active();
         if !any_search
             && !self.kill_confirm
             && self.monitor_panel.add_submenu.is_none()
@@ -470,7 +518,7 @@ impl App {
                 cached_sorted: &self.cached_sorted,
                 security_scores: &self.security_scores,
                 status_message: &mut self.status_message,
-                detail_process: &mut self.detail_process,
+                detail_process: &mut self.inspector.detail_process,
                 pending_kill: &mut self.pending_kill,
                 data_dirty: &mut self.data_dirty,
                 pending_redraw: &mut self.pending_redraw,
@@ -550,27 +598,10 @@ impl App {
         // 避免再调一次 scan_ports 的几百毫秒 syscall 卡帧。
         // 失败的子项会退化为空 Vec，TUI 层在 Tab 内显示「无数据」。
         if mode == AppMode::ProcessDetail {
-            self.inspection_tab = InspectionTab::Summary;
-            self.inspection_scroll = 0;
-            self.inspection_search.clear();
             let ports_snapshot: Vec<crate::port_map::PortEntry> =
                 self.port_panel.port_entries.clone();
-            if let Some(p) = self.detail_process.as_ref() {
-                self.inspection_data =
-                    Some(crate::inspect::inspect_with_ports(p.pid, &ports_snapshot));
-                // 阶段 4 A1/A3：句柄 + 内存映射。失败的子模块退化为 None，
-                // Tab 渲染时显示「采集失败 / 权限不足」。
-                self.inspection_handles_data =
-                    Some(crate::inspect::handles::collect_handles(p.pid).unwrap_or_default());
-                self.inspection_memory_data =
-                    Some(crate::inspect::memory::collect_memory(p.pid).unwrap_or_default());
-            } else {
-                self.inspection_data = None;
-                self.inspection_handles_data = None;
-                self.inspection_memory_data = None;
-            }
-            // 阶段 11 P1-A3：进入详情页时初始查询 priority + affinity 缓存。
-            self.refresh_detail_priority();
+            // v0.6.0 阶段 5：详情页初始化整体封装到 InspectorController::open。
+            self.inspector.open(&ports_snapshot);
         }
         self.mode = mode;
         self.process_panel.search.clear();
@@ -689,244 +720,113 @@ impl App {
     }
 
     fn handle_detail_key(&mut self, key: KeyEvent) {
-        // Search active → 优先吃输入；只有 Esc/Enter 走 SearchState 自带的退出。
-        if self.inspection_search.is_active() {
-            // SearchState 用 Esc 退出搜索并清空 query；这里我们让 Esc 只退出
-            // 搜索（保留 detail 视图），用户再按一次 Esc 才回 ProcessList。
-            let consumed = self.inspection_search.handle_input(key);
-            if consumed {
-                self.inspection_scroll = 0;
-                return;
+        // v0.6.0 阶段 5：键盘路由整体封装到 InspectorController::handle_key；
+        // 副作用（status_message / kill / record_op / clipboard / monitor）通过
+        // InspectorAction 派发回 App 处理。
+        let ports_snapshot: Vec<crate::port_map::PortEntry> = self.port_panel.port_entries.clone();
+        let action = self
+            .inspector
+            .handle_key(key, &ports_snapshot, self.recording_wanted);
+        match action {
+            InspectorAction::Noop => {}
+            InspectorAction::StatusMsg(msg) => {
+                self.status_message = Some(msg);
             }
-            // 搜索时 Tab/BackTab 切 Tab 无意义 → 吞掉，避免误触丢搜索内容。
-            if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
-                return;
-            }
-            // 其它键（Up/Down/PageUp/...）继续走常规分支，方便在过滤结果里滚动。
-        }
-
-        match key.code {
-            // Tab / Shift+Tab 切换 Inspector 内部 Tab（避开 1-6 主面板切换）。
-            // crossterm 把 Shift+Tab 编码成 KeyCode::BackTab。
-            KeyCode::Tab => {
-                self.inspection_tab = self.inspection_tab.next();
-                self.inspection_scroll = 0;
-            }
-            KeyCode::BackTab => {
-                self.inspection_tab = self.inspection_tab.prev();
-                self.inspection_scroll = 0;
-            }
-            // `r` 强制重新采集（用户怀疑数据过期 / 权限变化时）。
-            KeyCode::Char('r') => {
-                if let Some(proc) = &self.detail_process {
-                    let ports_snapshot: Vec<crate::port_map::PortEntry> =
-                        self.port_panel.port_entries.clone();
-                    self.inspection_data = Some(crate::inspect::inspect_with_ports(
-                        proc.pid,
-                        &ports_snapshot,
-                    ));
-                    // 阶段 4：handles/memory 也要刷一次（r 不应只刷新 env/dlls/net）。
-                    self.inspection_handles_data = Some(
-                        crate::inspect::handles::collect_handles(proc.pid).unwrap_or_default(),
-                    );
-                    self.inspection_memory_data =
-                        Some(crate::inspect::memory::collect_memory(proc.pid).unwrap_or_default());
-                    self.inspection_scroll = 0;
-                    self.status_message = Some(format!("已刷新 Inspector 数据 (PID {})", proc.pid));
-                    // 阶段 11 P1-A3：r 重新采集时也刷 priority/affinity 缓存。
-                    self.refresh_detail_priority();
-                }
-            }
-            // `+` / `-`：阶段 4 A4，在 Summary Tab 上调高/调低进程优先级。
-            // 仅详情页生效（避免与 Replay 速度调节冲突 —— replay 在另一个分支）。
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                if let Some(proc) = &self.detail_process {
-                    self.bump_priority(proc.pid, true);
-                }
-            }
-            KeyCode::Char('-') => {
-                if let Some(proc) = &self.detail_process {
-                    self.bump_priority(proc.pid, false);
-                }
-            }
-            // `/` 进入搜索（Env/Dlls 数据量大时必须）。
-            KeyCode::Char('/') => {
-                self.inspection_search.active = true;
-                self.inspection_scroll = 0;
-            }
-            // 上下滚动：Summary 走整页滚动；Env/Dlls/Network 在 Tab 内部滚动。
-            KeyCode::Up => {
-                self.inspection_scroll = self.inspection_scroll.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                self.inspection_scroll = self.inspection_scroll.saturating_add(1);
-            }
-            KeyCode::PageUp => {
-                self.inspection_scroll = self.inspection_scroll.saturating_sub(10);
-            }
-            KeyCode::PageDown => {
-                self.inspection_scroll = self.inspection_scroll.saturating_add(10);
-            }
-            KeyCode::Home => {
-                self.inspection_scroll = 0;
-            }
-            KeyCode::End => {
-                self.inspection_scroll = usize::MAX / 2;
-            }
-            KeyCode::Enter | KeyCode::Esc => {
+            InspectorAction::Close => {
                 self.process_panel.process_view_mode = ProcessViewMode::List;
                 self.mode = AppMode::ProcessList;
-                self.inspection_search.clear();
             }
-            KeyCode::Char('k') => {
-                if let Some(ref proc) = self.detail_process {
-                    let result = crate::kill::kill_process(proc.pid, false);
-                    match result {
-                        Ok(crate::kill::KillResult::Killed) => {
-                            let msg = format!("终止 {} (PID {})", proc.name, proc.pid);
-                            self.status_message = Some(format!("{} 已终止", msg));
-                            self.record_op(msg);
-                            self.mode = AppMode::ProcessList;
-                        }
-                        Ok(crate::kill::KillResult::AlreadyGone) => {
-                            self.status_message = Some("进程已不存在".to_string());
-                            self.mode = AppMode::ProcessList;
-                        }
-                        Ok(crate::kill::KillResult::AccessDenied) => {
-                            self.status_message = Some(
-                                "权限不足，无法终止进程 — 请以管理员身份重启 proc".to_string(),
-                            );
-                        }
-                        Ok(crate::kill::KillResult::Failed(e)) => {
-                            self.status_message = Some(format!("终止失败: {}", e));
-                        }
-                        Err(e) => {
-                            self.status_message = Some(format!("终止失败: {}", e));
-                        }
+            InspectorAction::BumpPriority { pid, up } => {
+                self.bump_priority(pid, up);
+            }
+            InspectorAction::KillPid(pid) => {
+                let proc_name = self
+                    .inspector
+                    .detail_process
+                    .as_ref()
+                    .map(|p| p.name.to_string())
+                    .unwrap_or_default();
+                let result = crate::kill::kill_process(pid, false);
+                match result {
+                    Ok(crate::kill::KillResult::Killed) => {
+                        let msg = format!("终止 {} (PID {})", proc_name, pid);
+                        self.status_message = Some(format!("{} 已终止", msg));
+                        self.record_op(msg);
+                        self.mode = AppMode::ProcessList;
+                    }
+                    Ok(crate::kill::KillResult::AlreadyGone) => {
+                        self.status_message = Some("进程已不存在".to_string());
+                        self.mode = AppMode::ProcessList;
+                    }
+                    Ok(crate::kill::KillResult::AccessDenied) => {
+                        self.status_message =
+                            Some("权限不足，无法终止进程 — 请以管理员身份重启 proc".to_string());
+                    }
+                    Ok(crate::kill::KillResult::Failed(e)) => {
+                        self.status_message = Some(format!("终止失败: {}", e));
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("终止失败: {}", e));
                     }
                 }
             }
-            KeyCode::Char('w') => {
-                if let Some(ref proc) = self.detail_process {
-                    let pid = proc.pid;
-                    match self.monitor_panel.manager.add_monitor(
-                        crate::monitor::MonitorTarget::ByPid { pid },
-                        crate::monitor::RestartPolicy::NotifyOnly,
-                    ) {
-                        Ok(monitor_id) => {
-                            self.monitor_panel.manager.add_notification(format!(
-                                "已添加 PID {} 监控 (ID: {})",
-                                pid, monitor_id
-                            ));
-                            self.status_message =
-                                Some(format!("已添加 PID {} 监控 (ID: {})", pid, monitor_id));
-                        }
-                        Err(e) => {
-                            tracing::warn!("添加监控失败: {}", e);
-                            self.status_message = Some(format!("添加监控失败: {}", e));
-                        }
+            InspectorAction::AddMonitor(pid) => {
+                match self.monitor_panel.manager.add_monitor(
+                    crate::monitor::MonitorTarget::ByPid { pid },
+                    crate::monitor::RestartPolicy::NotifyOnly,
+                ) {
+                    Ok(monitor_id) => {
+                        self.monitor_panel.manager.add_notification(format!(
+                            "已添加 PID {} 监控 (ID: {})",
+                            pid, monitor_id
+                        ));
+                        self.status_message =
+                            Some(format!("已添加 PID {} 监控 (ID: {})", pid, monitor_id));
+                    }
+                    Err(e) => {
+                        tracing::warn!("添加监控失败: {}", e);
+                        self.status_message = Some(format!("添加监控失败: {}", e));
                     }
                 }
             }
-            KeyCode::Char('c') => {
-                if let Some(ref proc) = self.detail_process {
-                    let info = crate::tree::format_process_info(proc);
-                    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&info)) {
-                        Ok(()) => {
-                            self.status_message =
-                                Some(format!("已复制进程信息到剪贴板 ({} bytes)", info.len()));
-                        }
-                        Err(e) => {
-                            tracing::warn!("剪贴板复制失败: {}", e);
-                            self.status_message = Some(format!("复制失败: {}", e));
-                        }
+            InspectorAction::CopyInfo(info) => {
+                match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&info)) {
+                    Ok(()) => {
+                        self.status_message =
+                            Some(format!("已复制进程信息到剪贴板 ({} bytes)", info.len()));
+                    }
+                    Err(e) => {
+                        tracing::warn!("剪贴板复制失败: {}", e);
+                        self.status_message = Some(format!("复制失败: {}", e));
                     }
                 }
             }
-            _ => {}
         }
     }
 
     fn handle_replay_key(&mut self, key: KeyEvent) {
-        let Some(ref mut ts) = self.timeline_state else {
-            return;
-        };
-        match key.code {
-            KeyCode::Char('q') => {
-                self.should_quit = true;
-            }
-            KeyCode::Char(' ') => {
-                ts.playing = !ts.playing;
-            }
-            KeyCode::Left => {
-                if key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::SHIFT)
-                {
-                    ts.current_frame = ts.current_frame.saturating_sub(10);
-                } else {
-                    ts.current_frame = ts.current_frame.saturating_sub(1);
-                }
-                ts.playing = false;
-                self.replay_load_current_frame();
-            }
-            KeyCode::Right => {
-                if key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::SHIFT)
-                {
-                    ts.current_frame =
-                        (ts.current_frame + 10).min(ts.total_frames.saturating_sub(1));
-                } else {
-                    ts.current_frame =
-                        (ts.current_frame + 1).min(ts.total_frames.saturating_sub(1));
-                }
-                ts.playing = false;
-                self.replay_load_current_frame();
-            }
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                ts.speed = match ts.speed {
-                    ReplaySpeed::Half => ReplaySpeed::Normal,
-                    ReplaySpeed::Normal => ReplaySpeed::Double,
-                    ReplaySpeed::Double => ReplaySpeed::Quad,
-                    ReplaySpeed::Quad => ReplaySpeed::Quad,
-                };
-            }
-            KeyCode::Char('-') => {
-                ts.speed = match ts.speed {
-                    ReplaySpeed::Half => ReplaySpeed::Half,
-                    ReplaySpeed::Normal => ReplaySpeed::Half,
-                    ReplaySpeed::Double => ReplaySpeed::Normal,
-                    ReplaySpeed::Quad => ReplaySpeed::Double,
-                };
-            }
-            KeyCode::Home => {
-                ts.current_frame = 0;
-                ts.playing = false;
-                self.replay_load_current_frame();
-            }
-            KeyCode::End => {
-                ts.current_frame = ts.total_frames.saturating_sub(1);
-                ts.playing = false;
-                self.replay_load_current_frame();
-            }
-            _ => {}
+        let action = self.replay.handle_key(key);
+        self.dispatch_replay_action(action);
+    }
+
+    /// `ReplayController::handle_key` / `tick` 返回 [`ReplayAction`] 后，
+    /// App 在此派发副作用：`Quit` → `should_quit`；`ApplyFrame` → 把当前帧
+    /// 应用到 15+ panel / metrics 字段；`Noop` 不动。
+    fn dispatch_replay_action(&mut self, action: ReplayAction) {
+        match action {
+            ReplayAction::Noop => {}
+            ReplayAction::Quit => self.should_quit = true,
+            ReplayAction::ApplyFrame => self.apply_replay_frame(),
         }
     }
 
-    fn replay_load_current_frame(&mut self) {
-        let frame_index = self
-            .timeline_state
-            .as_ref()
-            .map(|ts| ts.current_frame)
-            .unwrap_or(0);
-        // Clone the frame so we release the immutable borrow on `self.replay_player`
+    /// 把 controller 当前帧应用到 panels / metrics / histories / 导航状态。
+    /// 触发点：`start_replay`（首帧）/ `dispatch_replay_action(ApplyFrame)`
+    /// （Left/Right/Home/End / tick 自动步进）。原 `replay_load_current_frame`。
+    fn apply_replay_frame(&mut self) {
+        // Clone the frame so we release the immutable borrow on `self.replay`
         // before we start mutating panel state below.
-        let Some(frame) = self
-            .replay_player
-            .as_ref()
-            .and_then(|p| p.frame_at(frame_index).cloned())
-        else {
+        let Some(frame) = self.replay.current_frame() else {
             return;
         };
 
@@ -1012,40 +912,6 @@ impl App {
         self.docker_panel.scroll = nav.docker_scroll;
     }
 
-    fn replay_tick(&mut self) {
-        let at_end = {
-            let Some(ts) = self.timeline_state.as_mut() else {
-                return;
-            };
-            if !ts.playing || ts.total_frames == 0 {
-                return;
-            }
-            // Compute frame step for this tick based on playback speed.
-            // Half speed steps every other tick; the rest advance by N frames per tick.
-            let step = match ts.speed {
-                ReplaySpeed::Half => {
-                    ts.half_tick = (ts.half_tick + 1) % 2;
-                    usize::from(ts.half_tick == 0)
-                }
-                ReplaySpeed::Normal => 1,
-                ReplaySpeed::Double => 2,
-                ReplaySpeed::Quad => 4,
-            };
-            if step == 0 {
-                return;
-            }
-            let last = ts.total_frames.saturating_sub(1);
-            ts.current_frame = (ts.current_frame + step).min(last);
-            ts.current_frame >= last
-        };
-
-        self.replay_load_current_frame();
-
-        if at_end && let Some(ts) = self.timeline_state.as_mut() {
-            ts.playing = false;
-        }
-    }
-
     fn handle_kill_confirm(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -1053,7 +919,7 @@ impl App {
                     let pid_to_name: HashMap<u32, String> = self
                         .cached_processes
                         .iter()
-                        .map(|p| (p.pid, p.name.clone()))
+                        .map(|p| (p.pid, (*p.name).to_string()))
                         .collect();
                     let mut results = Vec::new();
                     for pid in req.pids {
@@ -1241,6 +1107,9 @@ impl App {
     pub fn tick(&mut self) -> bool {
         let mut needs_draw = self.data_dirty;
 
+        // v0.6.0 阶段 3：drain worker crash → banner。每帧都跑，第一时间反馈。
+        self.poll_crashes();
+
         // Replay mode
         if self.mode == AppMode::Replay {
             return self.tick_replay();
@@ -1283,7 +1152,8 @@ impl App {
     fn tick_replay(&mut self) -> bool {
         if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
             self.last_refresh = Instant::now();
-            self.replay_tick();
+            let action = self.replay.tick();
+            self.dispatch_replay_action(action);
         }
         if self.data_dirty {
             self.rebuild_sorted_cache();
@@ -1310,18 +1180,10 @@ impl App {
                     self.security_scores
                         .retain(|pid, _| alive_pids.contains(pid));
 
-                    if let Some(ref mut detail) = self.detail_process {
-                        let pid = detail.pid;
-                        if let Some(latest) = self.cached_processes.iter().find(|p| p.pid == pid) {
-                            *detail = latest.clone();
-                        } else {
-                            self.detail_process = None;
-                        }
-                    }
-
-                    // 阶段 11 P1-A3：heavy tick 周期刷新 priority/affinity 缓存
-                    // （若详情页打开），让 Summary Tab 不再每帧调 syscall。
-                    self.refresh_detail_priority();
+                    // v0.6.0 阶段 5：detail_process 维护 + priority/affinity 缓存
+                    // 刷新封装到 InspectorController。
+                    self.inspector.sync_detail(&self.cached_processes);
+                    self.inspector.refresh_detail_priority();
 
                     self.data_dirty = true;
 
@@ -1381,7 +1243,7 @@ impl App {
     /// - 按 PID 匹配 cached_processes。PID 复用风险：worker 端 collector 已做
     ///   「累计回退」检测；这里只贴当前 PID 即可
     fn update_net_rates(&mut self) {
-        let snapshot = if let Some(worker) = &self.net_flow_worker {
+        let snapshot = if let Some(worker) = &self.workers.net_flow_worker {
             worker.try_recv_latest()
         } else {
             None
@@ -1418,7 +1280,7 @@ impl App {
     ///
     /// 隐私：DNS 查询不持久化；本方法只动内存 VecDeque，无 IO。
     fn tick_dns_log(&mut self) {
-        let Some(worker) = &self.dns_log_worker else {
+        let Some(worker) = &self.workers.dns_log_worker else {
             return;
         };
         let Some(snap) = worker.try_recv_latest() else {
@@ -1575,8 +1437,12 @@ impl App {
 
     fn tick_panels(&mut self) {
         // 先从后台 worker 取最新 sockets(若有),注入 PortPanel 待处理队列。
-        // 把这步放在 ctx 构造之前,避免在 ctx 借用 self 期间再借 self.port_worker。
-        let new_sockets = self.port_worker.try_recv_latest().map(|s| s.sockets);
+        // 把这步放在 ctx 构造之前,避免在 ctx 借用 self 期间再借 self.workers.port_worker。
+        let new_sockets = self
+            .workers
+            .port_worker
+            .try_recv_latest()
+            .map(|s| s.sockets);
 
         let mut ctx = PanelContext {
             snapshot: &self.snapshot,
@@ -1584,7 +1450,7 @@ impl App {
             cached_sorted: &self.cached_sorted,
             security_scores: &self.security_scores,
             status_message: &mut self.status_message,
-            detail_process: &mut self.detail_process,
+            detail_process: &mut self.inspector.detail_process,
             pending_kill: &mut self.pending_kill,
             data_dirty: &mut self.data_dirty,
             pending_redraw: &mut self.pending_redraw,
@@ -1608,7 +1474,7 @@ impl App {
         // + 合并 is_occupied 状态。设备锁查询(scan_device_locks_with_processes)
         // 仍按需在 UsbPanel 内同步触发(用户按 r / Enter)。
         if self.mode == AppMode::UsbAssistant
-            && let Some(snap) = self.usb_worker.try_recv_latest()
+            && let Some(snap) = self.workers.usb_worker.try_recv_latest()
         {
             self.usb_panel.merge_devices(snap.devices);
         }
@@ -1627,14 +1493,18 @@ impl App {
 
     fn rebuild_sorted_cache(&mut self) {
         let processes: &[ProcessInfo] = &self.cached_processes[..];
-        let query = self.process_panel.search.query();
+        let search = &self.process_panel.search;
+        let query = search.query();
         let filtered: Vec<&ProcessInfo> = if query.is_empty() {
             processes.iter().collect()
         } else {
-            let q = query.to_lowercase();
+            // v0.6.0 阶段 4：搜索 query 一次性 lowercase（O(query.len())），
+            // 进程名匹配走 `ProcessInfo::name_lower` 预算字段，避免每进程每按键
+            // `to_lowercase` 分配。
+            let q_lower = search.query_lower();
             processes
                 .iter()
-                .filter(|p| p.name.to_lowercase().contains(&q) || p.pid.to_string().contains(query))
+                .filter(|p| p.name_lower.contains(q_lower) || p.pid.to_string().contains(query))
                 .collect()
         };
 
@@ -1653,14 +1523,13 @@ impl App {
 
         let sort_field = self.process_panel.sort_field;
         // P1.1/P1.2: tie-breaker 加 pid 防止同分进程顺序抖动；
-        // Name 路径单独预建 lower-case Vec 后 sort_by_key（见下方），
-        // 所以这里只覆盖非 Name 分支。
+        // Name 路径直接复用预计算的 name_lower，省掉 N 次 to_lowercase。
         if sort_field == SortField::Name {
-            // P1.2: 预建 lower-case Vec，避免每个比较对调用一次 to_lowercase（N log N → N）
-            let mut keyed: Vec<(String, classify::ProcessClass, &ProcessInfo)> = result
-                .into_iter()
-                .map(|(class, p)| (p.name.to_lowercase(), class, p))
-                .collect();
+            let mut keyed: Vec<(std::sync::Arc<str>, classify::ProcessClass, &ProcessInfo)> =
+                result
+                    .into_iter()
+                    .map(|(class, p)| (std::sync::Arc::clone(&p.name_lower), class, p))
+                    .collect();
             keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.pid.cmp(&b.2.pid)));
             self.cached_sorted = keyed
                 .iter()
@@ -1818,7 +1687,7 @@ impl App {
                     next.label()
                 ));
                 // 阶段 11 P1-A3：调整成功后刷新缓存，让用户立即看到新值。
-                self.refresh_detail_priority();
+                self.inspector.refresh_detail_priority();
             }
             Err(e) => {
                 self.status_message = Some(format!(
@@ -1829,25 +1698,6 @@ impl App {
                 ));
             }
         }
-    }
-
-    /// 阶段 11 P1-A3：刷新 `detail_priority` 缓存（priority label + affinity label）。
-    /// 在 4 个点调用：进入详情页 / `r` 刷新 / `+/-` 调整后 / heavy tick 周期。
-    /// 若 detail_process 为 None（详情页关闭），清空缓存避免脏数据。
-    pub fn refresh_detail_priority(&mut self) {
-        let Some(p) = self.detail_process.as_ref() else {
-            self.detail_priority = None;
-            return;
-        };
-        let priority_label = match crate::process_control::get_priority(p.pid) {
-            Ok(c) => c.label().to_string(),
-            Err(_) => "-".to_string(),
-        };
-        let affinity_label = match crate::process_control::get_affinity(p.pid) {
-            Ok(mask) => format!("0x{:X} (CPU 数: {})", mask, u64::count_ones(mask)),
-            Err(_) => "-".to_string(),
-        };
-        self.detail_priority = Some((priority_label, affinity_label));
     }
 
     /// A4：进程列表 `+`/`-` 公开入口 —— ProcessPanel 直接调，免去重复样板。

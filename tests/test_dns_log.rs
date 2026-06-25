@@ -101,7 +101,7 @@ fn dns_worker_round_trip_through_snapshot_channel() {
     let collector: Box<dyn DnsLogCollector> = Box::new(MockCollector {
         pending: std::sync::Mutex::new(queries.clone()),
     });
-    let worker = spawn_dns_worker(collector);
+    let worker = spawn_dns_worker(collector, None);
 
     // worker 内部 500ms poll；给 1.5s 充分时间 drain 一份 snapshot。
     let mut got: Vec<DnsQuery> = Vec::new();
@@ -134,7 +134,7 @@ fn dns_worker_dropped_cleanly_when_no_data() {
     let collector: Box<dyn DnsLogCollector> = Box::new(MockCollector {
         pending: std::sync::Mutex::new(Vec::new()),
     });
-    let worker = spawn_dns_worker(collector);
+    let worker = spawn_dns_worker(collector, None);
     let _ = worker.try_recv_latest();
     drop(worker);
     // 抵达此行 = worker 干净退出

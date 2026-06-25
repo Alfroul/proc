@@ -20,7 +20,7 @@ use crate::tui::security_badge;
 use crate::tui::theme;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
-    let Some(proc) = app.detail_process.as_ref() else {
+    let Some(proc) = app.inspector.detail_process.as_ref() else {
         return;
     };
 
@@ -31,18 +31,18 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
     draw_tab_bar(f, tab_area, app);
 
-    match app.inspection_tab {
+    match app.inspector.inspection_tab {
         InspectionTab::Summary => draw_summary(f, body_area, app, proc),
         InspectionTab::Env => {
-            let data = app.inspection_data.as_ref();
+            let data = app.inspector.inspection_data.as_ref();
             draw_env_tab(f, body_area, app, data)
         }
         InspectionTab::Network => {
-            let data = app.inspection_data.as_ref();
+            let data = app.inspector.inspection_data.as_ref();
             draw_network_tab(f, body_area, app, data)
         }
         InspectionTab::Dlls => {
-            let data = app.inspection_data.as_ref();
+            let data = app.inspector.inspection_data.as_ref();
             draw_dlls_tab(f, body_area, app, data)
         }
         InspectionTab::Handles => draw_handles_tab(f, body_area, app),
@@ -56,8 +56,8 @@ fn draw_handles_tab(f: &mut Frame, area: Rect, app: &App) {
     use crate::inspect::HandleInfo;
     use crate::inspect::HandleKind;
 
-    let query = app.inspection_search.query();
-    let mut handles: Vec<&HandleInfo> = match app.inspection_handles_data {
+    let query = app.inspector.inspection_search.query();
+    let mut handles: Vec<&HandleInfo> = match app.inspector.inspection_handles_data {
         None => Vec::new(),
         Some(ref v) => v
             .iter()
@@ -82,7 +82,10 @@ fn draw_handles_tab(f: &mut Frame, area: Rect, app: &App) {
     });
 
     let rows_visible = area.height.saturating_sub(4) as usize;
-    let scroll = app.inspection_scroll.min(handles.len().saturating_sub(1));
+    let scroll = app
+        .inspector
+        .inspection_scroll
+        .min(handles.len().saturating_sub(1));
 
     let title = format!(" 句柄列表 ({} 项) | /=搜索 ↑↓=滚动 ", handles.len());
     let block = Block::default()
@@ -91,12 +94,12 @@ fn draw_handles_tab(f: &mut Frame, area: Rect, app: &App) {
         .style(theme::style_normal());
 
     if handles.is_empty() {
-        let msg = if app.inspection_handles_data.is_none() {
-            "数据采集中… 按 r 刷新"
+        let msg = if app.inspector.inspection_handles_data.is_none() {
+            "数据采集中… 按 F5 刷新"
         } else if !query.is_empty() {
             "无匹配句柄 — 修改搜索或按 Esc 清空"
         } else {
-            "⚠ 此进程当前无可见句柄 — 可能权限不足或进程已退出（按 r 刷新）"
+            "⚠ 此进程当前无可见句柄 — 可能权限不足或进程已退出（按 F5 刷新）"
         };
         let p = Paragraph::new(Span::styled(msg, theme::style_warning())).block(block);
         f.render_widget(p, area);
@@ -165,8 +168,8 @@ fn draw_handles_tab(f: &mut Frame, area: Rect, app: &App) {
 fn draw_memory_tab(f: &mut Frame, area: Rect, app: &App) {
     use crate::inspect::MemoryRegion;
 
-    let query = app.inspection_search.query();
-    let mut regions: Vec<&MemoryRegion> = match app.inspection_memory_data {
+    let query = app.inspector.inspection_search.query();
+    let mut regions: Vec<&MemoryRegion> = match app.inspector.inspection_memory_data {
         None => Vec::new(),
         Some(ref v) => v
             .iter()
@@ -184,7 +187,10 @@ fn draw_memory_tab(f: &mut Frame, area: Rect, app: &App) {
     regions.sort_by_key(|r| r.base_addr);
 
     let rows_visible = area.height.saturating_sub(4) as usize;
-    let scroll = app.inspection_scroll.min(regions.len().saturating_sub(1));
+    let scroll = app
+        .inspector
+        .inspection_scroll
+        .min(regions.len().saturating_sub(1));
 
     let total_size: u64 = regions.iter().map(|r| r.size).sum();
     let title = format!(
@@ -198,12 +204,12 @@ fn draw_memory_tab(f: &mut Frame, area: Rect, app: &App) {
         .style(theme::style_normal());
 
     if regions.is_empty() {
-        let msg = if app.inspection_memory_data.is_none() {
-            "数据采集中… 按 r 刷新"
+        let msg = if app.inspector.inspection_memory_data.is_none() {
+            "数据采集中… 按 F5 刷新"
         } else if !query.is_empty() {
             "无匹配区域 — 修改搜索或按 Esc 清空"
         } else {
-            "⚠ 此进程当前无可见内存区域 — 可能权限不足或进程已退出（按 r 刷新）"
+            "⚠ 此进程当前无可见内存区域 — 可能权限不足或进程已退出（按 F5 刷新）"
         };
         let p = Paragraph::new(Span::styled(msg, theme::style_warning())).block(block);
         f.render_widget(p, area);
@@ -282,7 +288,7 @@ fn draw_tab_bar(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .flat_map(|tab| {
             let label = tab.label();
-            let style = if *tab == app.inspection_tab {
+            let style = if *tab == app.inspector.inspection_tab {
                 Style::default()
                     .fg(theme::accent())
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
@@ -296,10 +302,13 @@ fn draw_tab_bar(f: &mut Frame, area: Rect, app: &App) {
         .chain(std::iter::once(Span::styled(" │", theme::style_muted())))
         .collect();
 
-    let search_hint = if app.inspection_search.is_active() {
-        format!(" 搜索: {} | ESC=取消", app.inspection_search.query())
-    } else if !app.inspection_search.query().is_empty() {
-        format!(" 过滤: {}", app.inspection_search.query())
+    let search_hint = if app.inspector.inspection_search.is_active() {
+        format!(
+            " 搜索: {} | ESC=取消",
+            app.inspector.inspection_search.query()
+        )
+    } else if !app.inspector.inspection_search.query().is_empty() {
+        format!(" 过滤: {}", app.inspector.inspection_search.query())
     } else {
         String::new()
     };
@@ -312,7 +321,7 @@ fn draw_tab_bar(f: &mut Frame, area: Rect, app: &App) {
         Line::from(all)
     };
 
-    let title = " 进程详情 — Tab/Shift+Tab 切换  r=刷新  /=搜索 ".to_string();
+    let title = " 进程详情 — Tab/Shift+Tab 切换  F5=刷新  /=搜索 ".to_string();
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -396,11 +405,11 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
         )),
     ];
 
-    // 阶段 11 P1-A3：从 App::detail_priority 缓存读（进入详情页 / `r` 刷新 /
+    // 阶段 11 P1-A3：从 App::detail_priority 缓存读（进入详情页 / `F5` 刷新 /
     // `+/-` 调整 / heavy tick 4 处更新），避免每帧 4 次 syscall（OpenProcess +
     // GetPriorityClass + GetProcessAffinityMask + CloseHandle）。
     // 缓存 miss（详情页刚打开 heavy tick 未到）时 fallback 实时查，保留正确性。
-    let (priority_label, affinity_label) = match &app.detail_priority {
+    let (priority_label, affinity_label) = match &app.inspector.detail_priority {
         Some(p) => (p.0.clone(), p.1.clone()),
         None => {
             let pl = match crate::process_control::get_priority(proc.pid) {
@@ -503,7 +512,7 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
         theme::style_normal(),
     )));
     lines.push(Line::from(Span::styled(
-        "  Tab=切Tab  /=搜索  r=刷新  k=终止  w=监控  c=复制  +/-=优先级  Esc=返回".to_string(),
+        "  Tab=切Tab  /=搜索  F5=刷新  k=终止  w=监控  y=复制  +/-=优先级  Esc=返回".to_string(),
         theme::style_normal(),
     )));
 
@@ -515,7 +524,7 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
     let paragraph = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false })
-        .scroll((app.inspection_scroll as u16, 0));
+        .scroll((app.inspector.inspection_scroll as u16, 0));
 
     f.render_widget(paragraph, area);
 }
@@ -523,7 +532,7 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
 // ── Env Tab ──────────────────────────────────────────────────────────────────
 
 fn draw_env_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&InspectionData>) {
-    let query = app.inspection_search.query();
+    let query = app.inspector.inspection_search.query();
     let env: Vec<&EnvVar> = match data {
         None => Vec::new(),
         Some(d) => d
@@ -536,9 +545,22 @@ fn draw_env_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&InspectionDa
     };
 
     let rows_visible = area.height.saturating_sub(4) as usize;
-    let scroll = app.inspection_scroll.min(env.len().saturating_sub(1));
+    let scroll = app
+        .inspector
+        .inspection_scroll
+        .min(env.len().saturating_sub(1));
 
-    let title = format!(" 环境变量 ({} 项) | /=搜索 ↑↓=滚动 ", env.len());
+    // v0.6.0 阶段 2：录屏中即便 env_reveal=true 也强制 mask（防录到真值）。
+    let reveal = app.inspector.env_reveal && !app.is_recording();
+    let badge = if reveal {
+        "🔓env-reveal"
+    } else {
+        "🔒env-masked"
+    };
+    let title = format!(
+        " 环境变量 ({} 项) | {badge} | /=搜索 ↑↓=滚动 v=切换 ",
+        env.len(),
+    );
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -546,11 +568,11 @@ fn draw_env_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&InspectionDa
 
     if env.is_empty() {
         let msg = if data.is_none() {
-            "数据采集中… 按 r 刷新"
+            "数据采集中… 按 F5 刷新"
         } else if !query.is_empty() {
             "无匹配项 — 修改搜索或按 Esc 清空"
         } else {
-            "⚠ 无环境变量 — 此进程可能已退出或权限不足（按 r 刷新）"
+            "⚠ 无环境变量 — 此进程可能已退出或权限不足（按 F5 刷新）"
         };
         let p = Paragraph::new(Span::styled(msg, theme::style_warning())).block(block);
         f.render_widget(p, area);
@@ -564,9 +586,10 @@ fn draw_env_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&InspectionDa
         .skip(scroll)
         .take(rows_visible)
         .map(|v| {
+            let value = v.render_value_owned(reveal);
             Row::new(vec![
                 Cell::from(v.key.clone()).style(Style::default().fg(theme::accent())),
-                Cell::from(v.value.clone()).style(theme::style_normal()),
+                Cell::from(value).style(theme::style_normal()),
             ])
         })
         .collect();
@@ -587,7 +610,11 @@ fn draw_network_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&Inspecti
     // 阶段 11 P1-A5：用 (pid, start_time) 元组过滤，避免 PID 复用时显示
     // 旧进程的 DNS 历史（如 chrome 退出后 PID 被新进程复用，新进程的
     // Network Tab 不应看到 chrome 的 DNS 查询）。
-    let pid_key = app.detail_process.as_ref().map(|p| (p.pid, p.start_time));
+    let pid_key = app
+        .inspector
+        .detail_process
+        .as_ref()
+        .map(|p| (p.pid, p.start_time));
     let dns_recent_for_pid: Vec<&crate::dns_log::DnsQuery> = match pid_key {
         Some((pid, start_time)) => app
             .dns_log_recent
@@ -696,7 +723,10 @@ fn draw_network_connections(f: &mut Frame, area: Rect, app: &App, data: Option<&
     };
 
     let rows_visible = area.height.saturating_sub(4) as usize;
-    let scroll = app.inspection_scroll.min(entries.len().saturating_sub(1));
+    let scroll = app
+        .inspector
+        .inspection_scroll
+        .min(entries.len().saturating_sub(1));
 
     let title = format!(" 网络连接 ({} 项) | ↑↓=滚动 ", entries.len());
     let block = Block::default()
@@ -706,9 +736,9 @@ fn draw_network_connections(f: &mut Frame, area: Rect, app: &App, data: Option<&
 
     if entries.is_empty() {
         let msg = if data.is_none() {
-            "数据采集中… 按 r 刷新"
+            "数据采集中… 按 F5 刷新"
         } else {
-            "⚠ 此进程当前无监听 / 连接（或权限不足）— 按 r 刷新"
+            "⚠ 此进程当前无监听 / 连接（或权限不足）— 按 F5 刷新"
         };
         let p = Paragraph::new(Span::styled(msg, theme::style_warning())).block(block);
         f.render_widget(p, area);
@@ -781,7 +811,7 @@ fn draw_network_connections(f: &mut Frame, area: Rect, app: &App, data: Option<&
 // ── Dlls Tab ─────────────────────────────────────────────────────────────────
 
 fn draw_dlls_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&InspectionData>) {
-    let query = app.inspection_search.query();
+    let query = app.inspector.inspection_search.query();
     // 阶段 13 任务：按 path 字母排序。inspect() 返回的 Vec 顺序不保证；
     // 这里再排一次，保证 UI 稳定。
     let mut dlls: Vec<&DllInfo> = match data {
@@ -795,7 +825,10 @@ fn draw_dlls_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&InspectionD
     dlls.sort_by(|a, b| a.path.cmp(&b.path));
 
     let rows_visible = area.height.saturating_sub(4) as usize;
-    let scroll = app.inspection_scroll.min(dlls.len().saturating_sub(1));
+    let scroll = app
+        .inspector
+        .inspection_scroll
+        .min(dlls.len().saturating_sub(1));
 
     let title = format!(" 模块列表 ({} 项) | /=搜索 ↑↓=滚动 ", dlls.len());
     let block = Block::default()
@@ -805,11 +838,11 @@ fn draw_dlls_tab(f: &mut Frame, area: Rect, app: &App, data: Option<&InspectionD
 
     if dlls.is_empty() {
         let msg = if data.is_none() {
-            "数据采集中… 按 r 刷新"
+            "数据采集中… 按 F5 刷新"
         } else if !query.is_empty() {
             "无匹配模块 — 修改搜索或按 Esc 清空"
         } else {
-            "⚠ 无已加载模块 — 此进程可能已退出或权限不足（按 r 刷新）"
+            "⚠ 无已加载模块 — 此进程可能已退出或权限不足（按 F5 刷新）"
         };
         let p = Paragraph::new(Span::styled(msg, theme::style_warning())).block(block);
         f.render_widget(p, area);

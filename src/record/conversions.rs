@@ -19,9 +19,14 @@ use super::frame::{
 
 impl From<&FrameProcess> for ProcessInfo {
     fn from(fp: &FrameProcess) -> Self {
+        // v0.6.0 阶段 4：FrameProcess.name 是 String（serde 兼容），转 Arc<str>
+        // 触发一次分配；replay 路径调用频次低，开销可忽略。
+        let name: std::sync::Arc<str> = std::sync::Arc::from(fp.name.as_str());
+        let name_lower: std::sync::Arc<str> = std::sync::Arc::from(fp.name.to_lowercase().as_str());
         ProcessInfo {
             pid: fp.pid,
-            name: fp.name.clone(),
+            name_lower,
+            name,
             cpu_usage: fp.cpu,
             memory: fp.memory,
             virtual_memory: 0,
@@ -30,9 +35,9 @@ impl From<&FrameProcess> for ProcessInfo {
             disk_write_speed: 0,
             net_sent_rate: 0,
             net_recv_rate: 0,
-            status: String::new(),
+            status: crate::collect::ProcessStatus::default(),
             exe: None,
-            cmd: Vec::new(),
+            cmd: std::sync::Arc::from(Vec::<String>::new()),
             cwd: None,
             parent_pid: None,
             session_id: None,

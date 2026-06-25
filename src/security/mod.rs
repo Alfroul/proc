@@ -5,7 +5,9 @@ pub mod hash_cache;
 pub mod parent_chain;
 pub mod path_check;
 pub mod privilege;
+pub mod restricted_spawn;
 pub mod score;
+pub mod self_mitigation;
 pub mod signature;
 
 pub use score::{BackgroundScorer, RiskCategory, RiskFactor, SecurityScore, SecurityScorer};

@@ -11,11 +11,13 @@
 //! 很轻(worker 5s 一次、用户操作偶发);`list_containers` 同步耗时
 //! 期间用户 restart/stop 操作排队等待是 acceptable 的。
 
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::error::ProcError;
+use crate::metrics::WorkerMetrics;
+use crate::metrics::crash::WorkerCrash;
 use crate::worker::SnapshotWorker;
 
 use super::{ContainerInfo, DockerMonitor};
@@ -32,36 +34,49 @@ pub type DockerSnapshotWorker = SnapshotWorker<DockerSnapshot>;
 
 /// 启动 worker。`monitor` 由调用方在首次 `DockerMonitor::connect()` 成功
 /// 后通过 `Arc::clone` 传入;worker 与 panel 共享同一个 Arc。
+///
+/// v0.6.0 阶段 3：`crash_tx` 用于 worker panic 时通知主线程显示 banner。
 #[must_use]
-pub fn spawn(monitor: Arc<Mutex<DockerMonitor>>) -> DockerSnapshotWorker {
-    SnapshotWorker::spawn("docker-snapshot-worker", move |snap_tx, shutdown_rx| {
-        worker_loop(monitor, snap_tx, shutdown_rx);
-    })
+pub fn spawn(
+    monitor: Arc<Mutex<DockerMonitor>>,
+    crash_tx: Option<Sender<WorkerCrash>>,
+) -> DockerSnapshotWorker {
+    SnapshotWorker::spawn(
+        "docker-snapshot-worker",
+        crash_tx,
+        move |snap_tx, shutdown_rx, metrics| {
+            worker_loop(monitor, snap_tx, shutdown_rx, &metrics);
+        },
+    )
 }
 
 fn worker_loop(
     monitor: Arc<Mutex<DockerMonitor>>,
     snap_tx: SyncSender<DockerSnapshot>,
     shutdown_rx: Receiver<()>,
+    metrics: &WorkerMetrics,
 ) {
     use std::sync::mpsc::{RecvTimeoutError, TrySendError};
 
     loop {
+        let t0 = std::time::Instant::now();
         let result = match monitor.lock() {
             Ok(monitor) => monitor.list_containers(true),
             // poisoned: 前一次 panic，把最终错误推一份给主线程后立即退出，
             // 避免每 5s 重复推同一错误造成 toast 风暴 + 线程泄漏。
             Err(e) => {
                 tracing::warn!("DockerMonitor mutex poisoned: {:?}", e);
+                metrics.record_error(format!("DockerMonitor mutex poisoned: {e:?}"));
                 let _ = snap_tx.try_send(DockerSnapshot {
                     result: Err(ProcError::docker("DockerMonitor mutex poisoned")),
                 });
                 break;
             }
         };
+        metrics.record_poll(t0.elapsed());
         match snap_tx.try_send(DockerSnapshot { result }) {
             Ok(()) => {}
-            Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Full(_)) => metrics.record_channel_full(),
             Err(TrySendError::Disconnected(_)) => break,
         }
 

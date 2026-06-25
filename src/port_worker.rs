@@ -6,8 +6,10 @@
 //! `try_recv`,拿到新快照后才做 `scan_ports_with_names` + diff/group/anomaly
 //! 等几毫秒级的纯内存计算。
 
+use std::sync::mpsc::Sender;
 use std::time::Duration;
 
+use crate::metrics::crash::WorkerCrash;
 use crate::worker::{SnapshotWorker, run_poll_loop};
 
 /// 3 秒采集间隔:连接变化没那么快,netstat2 本身开销大,频率太高收益递减。
@@ -22,15 +24,22 @@ pub struct PortSnapshot {
 pub type PortSnapshotWorker = SnapshotWorker<PortSnapshot>;
 
 /// 启动 port snapshot worker。
+///
+/// v0.6.0 阶段 3：`crash_tx` 由 `App::new` 传入，worker panic 时把
+/// `WorkerCrash` 推给主线程显示 banner。`None` 时 panic 静默吞掉（不推荐）。
 #[must_use]
-pub fn spawn() -> PortSnapshotWorker {
-    SnapshotWorker::spawn("port-snapshot-worker", |snap_tx, shutdown_rx| {
-        run_poll_loop(&snap_tx, &shutdown_rx, POLL_INTERVAL, || {
-            Some(PortSnapshot {
-                sockets: collect_sockets(),
-            })
-        });
-    })
+pub fn spawn(crash_tx: Option<Sender<WorkerCrash>>) -> PortSnapshotWorker {
+    SnapshotWorker::spawn(
+        "port-snapshot-worker",
+        crash_tx,
+        |snap_tx, shutdown_rx, metrics| {
+            run_poll_loop(&snap_tx, &shutdown_rx, &metrics, POLL_INTERVAL, || {
+                Some(PortSnapshot {
+                    sockets: collect_sockets(),
+                })
+            });
+        },
+    )
 }
 
 fn collect_sockets() -> Vec<netstat2::SocketInfo> {

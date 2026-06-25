@@ -183,7 +183,11 @@ fn parse_utf16_env(raw: &[u8]) -> Vec<EnvVar> {
             if key.is_empty() {
                 None
             } else {
-                Some(EnvVar { key, value })
+                Some(EnvVar {
+                    is_secret: super::env_mask::is_secret_key(&key),
+                    key,
+                    value,
+                })
             }
         })
         .collect()
@@ -209,6 +213,7 @@ pub fn collect_env(pid: u32) -> Result<Vec<EnvVar>> {
             };
             if !k.is_empty() {
                 out.push(EnvVar {
+                    is_secret: super::env_mask::is_secret_key(k),
                     key: k.to_string(),
                     value: v.to_string(),
                 });

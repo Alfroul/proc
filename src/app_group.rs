@@ -150,7 +150,7 @@ fn infer_role_hint(proc: &ProcessInfo) -> Option<String> {
     let name_lower = proc.name.to_lowercase();
 
     // Chromium/Electron --type= parameter
-    for arg in &proc.cmd {
+    for arg in proc.cmd.iter() {
         if let Some(rest) = arg.strip_prefix("--type=") {
             return Some(match rest {
                 "renderer" => "renderer".to_string(),
@@ -237,7 +237,7 @@ fn special_group_key(proc: &ProcessInfo) -> Option<String> {
         // Scan for -jar followed by arg
         let mut jar_name: Option<String> = None;
         let mut found_jar = false;
-        for arg in &proc.cmd {
+        for arg in proc.cmd.iter() {
             if found_jar {
                 jar_name = Some(arg.clone());
                 break;
@@ -333,11 +333,11 @@ pub fn compute_groups(
     let mut queried: std::collections::HashSet<String> = std::collections::HashSet::new();
     for proc in procs {
         if let Some(ref exe) = proc.exe
-            && !queried.contains(exe)
-            && !cache.contains_key(exe)
+            && !queried.contains(exe.as_ref())
+            && !cache.contains_key(exe.as_ref())
         {
-            queried.insert(exe.clone());
-            cache.insert(exe.clone(), query_version_info(exe));
+            queried.insert((*exe).to_string());
+            cache.insert((*exe).to_string(), query_version_info(exe));
         }
     }
 
@@ -367,7 +367,7 @@ pub fn compute_groups(
         let exe_dir = proc
             .exe
             .as_ref()
-            .and_then(|e| std::path::Path::new(e).parent())
+            .and_then(|e| std::path::Path::new(&**e).parent())
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
@@ -375,7 +375,7 @@ pub fn compute_groups(
         let vinfo = proc
             .exe
             .as_ref()
-            .and_then(|e| cache.get(e).and_then(|opt| opt.as_ref()));
+            .and_then(|e| cache.get(&**e).and_then(|opt| opt.as_ref()));
         let tier2_key = vinfo
             .and_then(|v| v.product_name.as_ref())
             .filter(|pn| !pn.is_empty())
@@ -453,7 +453,7 @@ pub fn compute_groups(
                     let proc = &procs[i];
                     AppGroupProcess {
                         pid: proc.pid,
-                        name: proc.name.clone(),
+                        name: (*proc.name).to_string(),
                         cpu_usage: proc.cpu_usage,
                         memory: proc.memory,
                         role_hint: infer_role_hint(proc),
@@ -468,7 +468,7 @@ pub fn compute_groups(
             let display_name = display_override.unwrap_or_else(|| {
                 // Try ProductName from version info
                 let first_exe = indices.iter().find_map(|&i| procs[i].exe.as_ref());
-                let vinfo = first_exe.and_then(|e| cache.get(e).and_then(|opt| opt.as_ref()));
+                let vinfo = first_exe.and_then(|e| cache.get(&**e).and_then(|opt| opt.as_ref()));
 
                 vinfo
                     .and_then(|v| v.product_name.clone())

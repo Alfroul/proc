@@ -54,16 +54,21 @@ pub fn find_volume_lockers_with_processes(
     for pid_usize in pids {
         let pid = pid_usize as u32;
 
-        let (name, exe) = processes
+        let (name, exe): (String, Option<String>) = processes
             .iter()
             .find(|p| p.pid == pid)
-            .map(|p| (p.name.clone(), p.exe.clone()))
+            .map(|p| {
+                (
+                    (*p.name).to_string(),
+                    p.exe.as_ref().map(|e| (*e).to_string()),
+                )
+            })
             .or_else(|| fallback_map.get(&pid).cloned())
             .unwrap_or_else(|| (format!("PID {}", pid), None));
 
         let proc_info = crate::collect::ProcessInfo {
             pid,
-            name: name.clone(),
+            name: std::sync::Arc::from(name.as_str()),
             cpu_usage: 0.0,
             memory: 0,
             virtual_memory: 0,
@@ -72,15 +77,16 @@ pub fn find_volume_lockers_with_processes(
             disk_write_speed: 0,
             net_sent_rate: 0,
             net_recv_rate: 0,
-            status: String::new(),
-            exe: exe.clone(),
-            cmd: Vec::new(),
+            status: crate::collect::ProcessStatus::default(),
+            exe: exe.as_ref().map(|s| std::sync::Arc::from(s.as_str())),
+            cmd: std::sync::Arc::from(Vec::<String>::new()),
             cwd: None,
             parent_pid: None,
             session_id: None,
             user_id: None,
             start_time: 0,
             run_time: 0,
+            name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
         };
         let process_class = crate::classify::classify_process(&proc_info);
 

@@ -192,6 +192,14 @@ pub enum Command {
         #[arg(long)]
         limit: Option<usize>,
     },
+
+    /// v0.6.0 阶段 3：worker 诊断 — 输出所有后台 worker 的 metrics
+    /// （avg/max/polls/drops），用户报 bug 时附上。
+    Diag {
+        /// 输出 JSON（默认 human-readable 表格）
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Docker 子命令（E3/E4/E1）。
