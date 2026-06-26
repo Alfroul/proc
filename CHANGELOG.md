@@ -5,7 +5,100 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased] — v0.6.0
+## [0.6.0] - 2026-06-26
+
+本次发布聚焦：**安全加固 + 可观测性 + 架构债清理**。8 个阶段累积 ~5000 行代码（含测试），无 API 破坏。
+
+**最终基线**（实测）：
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test --release` | ✅ 701+ passed / 0 failed / 3 ignored（baseline 700 → 阶段 8 +1 worker crash test） |
+| `cargo clippy --release --all-targets -- -D warnings` | ✅ 0 warnings |
+| `cargo build --release --no-default-features` | ✅ 编译通过 |
+| `cargo fmt --all -- --check` | ✅ fmt clean |
+
+### 阶段 8 — 批量修复 + 发布（本次发布）
+
+> 消费 `docs/reviews/REVIEW-7.md` 全部 P0（1 项）/ P1（9 项），归档 P2（14 项）到 `docs/tech-debt.md`。
+> README 完整重写、CHANGELOG 定稿、Cargo.toml 版本号 0.5.0 → 0.6.0、tag v0.6.0。
+
+- Fixed (P0-1 plan.md 状态错): plan.md「阶段总览」表 4 个阶段标 `⬜ 未开始` 实际
+  已落地（阶段 3/4/5/6/7 全部已 `[x] 已完成`），违反 ADR-0001 phase gating
+  「唯一勾选点」规则。同步修正 plan.md FAQ `masked` → `is_secret` 字段名 + 删
+  `--tb=no`（pytest 参数，cargo test 不认）。
+- Fixed (P1-1 文档 self-mitigation 漏 ImageLoad): `src/security/self_mitigation.rs`
+  实际开 5 项（DEP / ASLR / ProhibitDynamicCode / DisableExtensionPoints /
+  **ImageLoad NoRemote+NoLow+PreferSystem32**），CONTEXT.md / SECURITY.md 旧写
+  4 项漏 ImageLoad。SECURITY.md「Hardening」段补 ImageLoad 行；「已知限制」段
+  「4 项策略外」改「5 项策略外」。
+- Fixed (P1-2/P1-8 EnvVar 字段名): `src/inspect/mod.rs:21-28` 实际字段名
+  `is_secret: bool`；CONTEXT.md / plan.md FAQ 旧写 `masked: bool`。三处统一改
+  `is_secret`。
+- Fixed (P1-3 restricted_spawn 范围文档): `src/security/restricted_spawn.rs:17-19`
+  模块注释明确「不接入 docker exec / nvtop」，CONTEXT.md / SECURITY.md 旧写
+  「PowerShell DNS / docker exec / nvtop」错。改「仅接入 PowerShell DNS（elevated
+  时）；docker exec / nvtop 因自身需 privileged token 不接入（ADR-0008）」。
+- Fixed (P1-4 漏接 restricted_spawn): `src/eject/cache.rs::flush_write_cache`
+  + `src/smart/mod.rs::list_disks_wmi` + `src/smart/mod.rs::read_smart_via_wmi`
+  3 处 PowerShell `Command::new(...).output()` 改用新增的
+  `crate::security::restricted_spawn::run_with_reduced_privileges`，与 DNS spawn
+  路径统一（elevated 时剥离 SeDebugPrivilege）。
+  - 新增: `RestrictedOutput { status, stdout }` + `run_with_reduced_privileges`
+    便利函数（语义近似 `Command::output`，stderr 丢弃 — 一次性命令只看 stdout + exit）。
+- Fixed (P1-5 README 键位描述错): README.md 第 33 行 `r 强制重新采集` /
+  `a 调整 affinity`（实际未实现）→ 改为 `F5 强制重新采集`、`y 复制进程信息`、
+  `v 切换 Env Tab secret 脱敏`；删除 `a 调整 affinity` 误导。
+- Fixed (P1-6 详情页 r/c deprecation warning): `InspectorController::handle_key`
+  补 `KeyCode::Char('r')` / `KeyCode::Char('c')` 分支返回
+  `StatusMsg("⚠ 'r'/'c' 将在 v0.7.0 移除，请用 F5/y")`。`App::try_handle_tab_switch`
+  在 `mode == ProcessDetail` 时让 'c' 落入 InspectorController（不再被全局侧边栏
+  折叠抢键）。0.5.0 用户升级后按 'r' / 'c' 不再静默 noop，获得指引用 F5 / y。
+  - Test: `tests/test_inspector.rs` 原
+    `c_key_in_detail_toggles_sidebar_not_copy` / `r_key_in_detail_does_not_refresh`
+    重写为 `c_key_in_detail_shows_deprecation_warning` /
+    `r_key_in_detail_shows_deprecation_warning`，验证 status_message 含
+    `v0.7.0` + `F5`/`y`。
+- Fixed (P1-7 worker panic 不写 crash report): `src/worker.rs::spawn` 的
+  `catch_unwind` 截获 panic 后**不触发全局 panic hook**（Rust 标准库语义），
+  导致 worker 崩溃只发 banner，磁盘无 crash report。补一条
+  `crate::metrics::crash::write_worker_crash_report(thread_name, &msg, &bt_str)`
+  调用，文件名 `crash-worker-{name}-{ts}.txt` 与主线程 panic 区分。
+  - 新增: `src/metrics/crash.rs::write_worker_crash_report` /
+    `write_worker_crash_report_to` / `format_worker_crash_report`。best-effort
+    （写盘失败仅 `tracing::warn`，不阻塞 crash_tx 通知主线程）。
+  - Test: `metrics/crash.rs` 加 `write_worker_crash_report_to_writes_file_with_worker_name`
+    + `format_worker_crash_report_includes_all_fields`。
+- Fixed (P1-9 Cargo.toml 版本号): 0.5.0 → **0.6.0**。crash report /
+  `proc --version` / `cargo binstall` 都依赖此字段。
+- Docs: REVIEW-7.md 全部 P0/P1 项追加 `**Status: Fixed in commit XXX**`。
+- Docs: tech-debt.md（阶段 7 已建）覆盖 14 项 P2，按 v0.7.0（11 项）/
+  v0.8.0+（3 项）分组。
+- 验收: 全量回归 700 → **701+ passed / 0 failed / 3 ignored**；clippy 0 warnings；
+  fmt clean；`--no-default-features` 编译通过。
+
+### 阶段 7 — Review（本次发布）
+
+> 阶段 7 全局审查，产出 `docs/reviews/REVIEW-7.md`（P0 1 + P1 9 + P2 14）+
+> `docs/tech-debt.md`（P2 归档）。本阶段未修改任何代码（仅新增 REVIEW-7.md +
+> tech-debt.md）。
+
+- Review: 切片 A 安全审查（self-mitigation / env_mask / restricted_spawn / 录屏
+  强制 mask / EnvVar serde 兼容性 — 6 子项）— 发现 P1-1/P1-3/P1-4 文档漂移与
+  restricted_spawn 漏接。
+- Review: 切片 B 可观测性（日志 rotate / panic hook / WorkerMetrics CAS /
+  `proc diag` / help_panel 列宽 — 5 子项）— 发现 P1-7 worker panic 不写盘。
+- Review: 切片 C 性能（Arc deref / name_lower / rebuild_sorted_cache /
+  ProcessStatus 映射 — 4 子项）— 全部 ✓。
+- Review: 切片 D 架构（3 个 Controller 拆分 / 通信 / import 路径 / 循环依赖 /
+  WorkerManager::restart — 5 子项）— 发现 P2-4 restart 未实现，归档 tech-debt。
+- Review: 切片 E UX+测试（'r'/'c' deprecation / F5'y' 提示 / proptest 假设 /
+  Linux stub 覆盖 / 命名误导 — 5 子项）— 发现 P1-6 deprecation warning 未实现、
+  P2-7 命名误导。
+- Review: 横切 5 维度（架构一致性 / 文档完整性 / 测试覆盖 / 性能基线 / 安全）—
+  发现 P0-1 plan.md 状态错、P1-9 Cargo.toml 版本号未升。
+
+### 阶段 6 — 键位冲突修复（v0.6.0 收尾）
 
 ### 阶段 6 — 键位冲突修复（v0.6.0 收尾）
 

@@ -85,11 +85,25 @@ impl<T: Send + 'static> SnapshotWorker<T> {
                         .unwrap_or_else(|| "<non-string panic>".to_string());
                     let backtrace = std::backtrace::Backtrace::force_capture();
                     tracing::error!(worker = thread_name, panic = %msg, "worker panicked");
+                    // v0.6.0 阶段 8（REVIEW-7.md P1-7）：catch_unwind 截获 panic 后
+                    // 不会触发全局 panic hook（标准库语义），导致 worker 崩溃无磁盘
+                    // crash report。这里显式写一份到 crashes/ 目录，bug 报告时可附上。
+                    // 文件名带 worker 名字以与主线程 panic 区分。
+                    let bt_str = backtrace.to_string();
+                    if let Err(e) =
+                        crate::metrics::crash::write_worker_crash_report(thread_name, &msg, &bt_str)
+                    {
+                        tracing::warn!(
+                            worker = thread_name,
+                            error = %e,
+                            "无法写 worker crash report 到磁盘",
+                        );
+                    }
                     if let Some(tx) = crash_tx.as_ref() {
                         let _ = tx.send(WorkerCrash {
                             worker: thread_name,
                             message: msg,
-                            backtrace: backtrace.to_string(),
+                            backtrace: bt_str,
                             timestamp: std::time::SystemTime::now(),
                         });
                     }

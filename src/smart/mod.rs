@@ -257,15 +257,19 @@ pub fn list_disks() -> Vec<String> {
 fn list_disks_wmi() -> std::result::Result<Vec<String>, String> {
     // 用 PowerShell 跑一行查询,避免引入 wmi crate。
     // PowerShell 在所有受支持的 Windows 版本上都预装。
-    let output = std::process::Command::new("powershell.exe")
-        .args([
+    //
+    // v0.6.0 阶段 8：spawn 走 restricted token（同 DNS spawn 路径），
+    // 剥离 elevated 时继承的 SeDebugPrivilege（REVIEW-7.md P1-4）。
+    let output = crate::security::restricted_spawn::run_with_reduced_privileges(
+        "powershell.exe",
+        &[
             "-NoProfile",
             "-NonInteractive",
             "-Command",
             "Get-CimInstance Win32_DiskDrive | Select-Object -ExpandProperty DeviceID",
-        ])
-        .output()
-        .map_err(|e| format!("powershell 启动失败: {e}"))?;
+        ],
+    )
+    .map_err(|e| format!("powershell 启动失败: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut disks: Vec<String> = stdout
         .lines()
@@ -342,10 +346,12 @@ fn read_smart_via_wmi(device: &str) -> Result<Option<SmartData>> {
     // 的字段映射,所以放弃按 device 过滤,直接取所有记录;返回的 SmartData
     // 至少能告诉用户"系统层面有没有预测失败"。详细属性必须装 smartmontools。
     let script = "Get-WmiObject -Namespace root\\wmi -Class MSStorageDriver_FailurePredictStatus | Select-Object -ExpandProperty PredictFailure";
-    let output = match std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-    {
+    // v0.6.0 阶段 8：spawn 走 restricted token（同 DNS spawn 路径），
+    // 剥离 elevated 时继承的 SeDebugPrivilege（REVIEW-7.md P1-4）。
+    let output = match crate::security::restricted_spawn::run_with_reduced_privileges(
+        "powershell.exe",
+        &["-NoProfile", "-NonInteractive", "-Command", script],
+    ) {
         Ok(o) => o,
         Err(_) => return Ok(None),
     };

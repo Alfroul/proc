@@ -562,34 +562,45 @@ fn y_key_in_detail_triggers_clipboard_copy() {
 }
 
 #[test]
-fn c_key_in_detail_toggles_sidebar_not_copy() {
-    // v0.6.0 阶段 6：详情页 'c' 不再被 InspectorController 抢键复制；
-    // 落回全局 'c' 统一为侧边栏折叠（消除双语义冲突）。
+fn c_key_in_detail_shows_deprecation_warning() {
+    // v0.6.0 阶段 8（REVIEW-7.md P1-6）：详情页 'c' 不再静默落入全局，
+    // 也不再复制。返回 deprecation warning 指引用户到 'y'（vim yank）。
+    // v0.7.0 计划移除该 deprecation 分支。
     let mut app = enter_inspector_with_self_pid();
     let sidebar_before = app.sidebar_expanded;
     app.status_message = None;
     press(&mut app, KeyCode::Char('c'));
-    assert_ne!(
+    assert_eq!(
         app.sidebar_expanded, sidebar_before,
-        "详情页 'c' 应触发全局侧边栏折叠（不再被详情页抢键复制）"
+        "详情页 'c' 不应再触发侧边栏折叠（已捕获为 deprecation warning）"
     );
     assert!(
-        !app.status_message
+        app.status_message
             .as_deref()
-            .is_some_and(|m| m.contains("复制")),
-        "详情页 'c' 不应再触发复制 status_message"
+            .is_some_and(|m| m.contains("v0.7.0") && m.contains('y')),
+        "详情页 'c' 应写 deprecation warning 含 'v0.7.0' 与 'y'，实际：{:?}",
+        app.status_message
     );
 }
 
 #[test]
-fn r_key_in_detail_does_not_refresh() {
-    // v0.6.0 阶段 6：详情页 'r' 已迁移到 F5，原 'r' 不再触发刷新。
+fn r_key_in_detail_shows_deprecation_warning() {
+    // v0.6.0 阶段 8（REVIEW-7.md P1-6）：详情页 'r' 不再静默 noop，
+    // 返回 deprecation warning 指引用户到 F5。v0.7.0 计划移除。
     let mut app = enter_inspector_with_self_pid();
     app.inspector.inspection_data = None;
+    app.status_message = None;
     press(&mut app, KeyCode::Char('r'));
     assert!(
         app.inspector.inspection_data.is_none(),
         "详情页 'r' 不应再触发刷新（已迁移到 F5）"
+    );
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|m| m.contains("v0.7.0") && m.contains("F5")),
+        "详情页 'r' 应写 deprecation warning 含 'v0.7.0' 与 'F5'，实际：{:?}",
+        app.status_message
     );
 }
 

@@ -192,6 +192,42 @@ pub fn spawn_with_reduced_privileges(program: &str, args: &[&str]) -> io::Result
     }
 }
 
+/// 一次性运行子进程到结束并收集 stdout（语义近似 `std::process::Command::output`）。
+///
+/// 与 [`spawn_with_reduced_privileges`] 共享同样的 token 剥离 / fallback 策略。
+/// **stderr 被丢弃**（fallback 路径 `Stdio::null`，restricted 路径复用 stdout 管道）—
+/// 调用方需要 stderr 文本时请用 `spawn_*` 路径自行接管。一次性 PowerShell 命令
+/// （`Write-VolumeCache` / `Get-CimInstance` 等）通常只看 stdout + exit code。
+pub fn run_with_reduced_privileges(program: &str, args: &[&str]) -> io::Result<RestrictedOutput> {
+    let mut child = spawn_with_reduced_privileges(program, args)?;
+    let mut buf = Vec::new();
+    if let Some(mut s) = child.stdout.take() {
+        s.read_to_end(&mut buf)?;
+    }
+    let status = child.wait()?;
+    Ok(RestrictedOutput {
+        status,
+        stdout: buf,
+    })
+}
+
+/// 一次性命令运行结果。stderr 不收集（见 [`run_with_reduced_privileges`]）。
+#[derive(Debug, Clone)]
+pub struct RestrictedOutput {
+    /// 子进程退出状态。
+    pub status: RestrictedExitStatus,
+    /// stdout 全量字节。stderr 已丢弃。
+    pub stdout: Vec<u8>,
+}
+
+impl RestrictedOutput {
+    /// 退出码是否为 0。
+    #[must_use]
+    pub fn success(&self) -> bool {
+        self.status.success()
+    }
+}
+
 #[cfg(windows)]
 fn spawn_windows_restricted(program: &str, args: &[&str]) -> io::Result<RestrictedChild> {
     use std::os::windows::io::{FromRawHandle, RawHandle};

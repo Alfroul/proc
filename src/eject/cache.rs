@@ -1,23 +1,26 @@
 //! Windows 卷写入缓存刷新（PowerShell Write-VolumeCache）。整个模块 cfg-gate 到 Windows（见 ADR-0002）。
 
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
 use crate::error::{ProcError, Result};
+use crate::security::restricted_spawn::run_with_reduced_privileges;
 
 /// 刷新指定驱动器的写入缓存
 pub fn flush_write_cache(drive_letter: char) -> Result<()> {
     let script = format!("Write-VolumeCache {}:", drive_letter);
 
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .map_err(|e| ProcError::usb_detect_with("执行 Write-VolumeCache 失败", e))?;
+    let output = run_with_reduced_privileges(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
+    )
+    .map_err(|e| ProcError::usb_detect_with("执行 Write-VolumeCache 失败", e))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!("Write-VolumeCache 输出: {}", stderr);
+    if !output.success() {
+        tracing::warn!(
+            "Write-VolumeCache 退出码非零（exit = {:?}）",
+            output.status.code
+        );
     }
 
     thread::sleep(Duration::from_secs(3));

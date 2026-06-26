@@ -261,6 +261,19 @@ impl InspectorController {
                     return InspectorAction::CopyInfo(info);
                 }
             }
+            // v0.6.0 阶段 8（REVIEW-7.md P1-6）：保留 'r' / 'c' 兼容期 deprecation
+            // warning。0.5.0 用户升级后肌肉记忆按 'r' 刷新 / 'c' 复制 → 给一句话指
+            // 引到 F5 / y，避免「按了没反应」的 UX 退化。v0.7.0 计划移除。
+            KeyCode::Char('r') => {
+                return InspectorAction::StatusMsg(
+                    "⚠ 'r' 将在 v0.7.0 移除，请用 F5 刷新".to_string(),
+                );
+            }
+            KeyCode::Char('c') => {
+                return InspectorAction::StatusMsg(
+                    "⚠ 'c' 将在 v0.7.0 移除，请用 y 复制（vim yank）".to_string(),
+                );
+            }
             _ => {}
         }
         InspectorAction::Noop

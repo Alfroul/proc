@@ -2,6 +2,8 @@
 
 Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中。Windows 主开发平台，Linux/macOS 可降级运行。
 
+> **v0.6.0（2026-06-26）** 新增三大主题：**安全加固**（自我加固 / env 脱敏 / 录屏防护 / 子进程权限剥离）、**可观测性**（日志 rotate / crash report / worker metrics / `proc diag`）、**性能优化**（ProcessInfo Arc 化 / ProcessStatus 枚举 / 搜索缓存）。详见下方专门段。
+
 ## 功能
 
 `proc` 把 **进程管理 + 网络分析 + 安全评分 + 资源监控 + USB 占用 + 进程守护 + Docker + 终端录屏 + 告警** 融合到一个 TUI 中，所有面板共享一份系统快照（`SysinfoRegistry` 全局单例），后台 worker 体系（`SnapshotWorker<T>` / `LightWorker` / `HeavyWorker` / `BackgroundScorer`）保证主线程 50ms tick 不阻塞。
@@ -30,7 +32,7 @@ Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络�
 | **句柄**<sup>v0.5.0</sup> | 进程打开的所有句柄：File / RegistryKey / Event / Semaphore / Mutant / Section / Process / Thread / Token；**`Ctrl+F` 句柄内搜索** | Win: `NtQuerySystemInformation` + `DuplicateHandle` + `NtQueryObject`；Linux: `/proc/<pid>/fd` |
 | **内存映射**<sup>v0.5.0</sup> | VirtualQueryEx / `/proc/<pid>/maps` 内存区域：基址 / 大小 / 状态 / 保护 / 映射文件名 | Win: `VirtualQueryEx`；Linux: `/proc/<pid>/maps` |
 
-macOS 等非 Win/Linux 平台，环境 / DLL / 句柄 / 内存 Tab 显示「此平台不支持」降级提示。详情页内 `r` 强制重新采集、`/` 搜索、`Tab/Shift+Tab` 切 Tab、`+` / `-` 调整优先级、`a` 调整 affinity、`Esc` 先退搜索再退页面（双层语义）。
+macOS 等非 Win/Linux 平台，环境 / DLL / 句柄 / 内存 Tab 显示「此平台不支持」降级提示。详情页内 `F5` 强制重新采集（v0.6.0 起替代 `r`，`r` 兼容期显示 deprecation）、`y` 复制进程信息到剪贴板（vim yank，v0.6.0 起替代 `c`）、`v` 切换 Env Tab 的 secret 脱敏（录屏强制 mask）、`/` 搜索、`Tab/Shift+Tab` 切 Tab、`+` / `-` 调整优先级、`Esc` 先退搜索再退页面（双层语义）。
 
 ### 安全评分
 
@@ -93,6 +95,42 @@ Windows 平台专属。`DnsLogCollector` trait + `PowershellDnsCollector` 实现
 - **异常规则 R9**：新 PID 首次发起 DNS 查询且不在白名单 → Warning
 
 **隐私承诺**：DNS 查询记录**永不持久化**到磁盘，仅在内存中保留最近 1000 条；`record/frame.rs` 序列化类型不含 `DnsQuery`。
+
+### v0.6.0 安全加固
+
+阶段 2 引入 4 项独立的安全机制（详见 [SECURITY.md](SECURITY.md) 与 [ADR-0008](docs/adr/0008-self-mitigation-policy.md)）：
+
+| 机制 | 作用 |
+|---|---|
+| **self-mitigation** | 启动时最早调用 `apply_self_mitigations()`，通过 `SetProcessMitigationPolicy` 给自己上 5 项保护：DEP（Permanent）/ ASLR（HighEntropy）/ ProhibitDynamicCode / DisableExtensionPoints / **ImageLoad（NoRemote + NoLow + PreferSystem32）**。**不开 ProcessSignaturePolicy**（会让 nvml-wrapper 未签名 native 依赖挂） |
+| **env 脱敏** | 详情页 Env Tab 默认 mask 显示 `{前2字符}***(原长B)`；secret pattern 匹配 12 关键字（KEY/TOKEN/SECRET/PASSWORD/PASSWD/PWD/CREDENTIAL/PRIVATE/AUTH/API/DSN/CONNECTION_STRING）+ `DATABASE_URL` 特例 + `*_AUTHORIZATION` 后缀。按 `v` 切换 reveal，**录屏时强制 mask** |
+| **录屏防护** | 用户主动按 `R` 触发录屏时先弹确认（警告会捕获屏幕所有内容含 DNS 域名 / 进程 cmd），按 `y` 确认 / `n` 取消 |
+| **restricted spawn** | elevated 时 spawn PowerShell DNS 子进程前调 `CreateRestrictedToken` + `DISABLE_MAX_PRIVILEGE` 剥离继承的 `SeDebugPrivilege`，防子进程被劫持后变 credential theft 跳板。**仅接入 DNS spawn**（docker exec / nvtop 因自身需 privileged token 不接入） |
+
+### v0.6.0 可观测性
+
+阶段 3 引入完整的诊断链路：
+
+- **日志 rotate**：`tracing-appender::RollingFileAppender::daily` 每天一个文件 `~/.config/proc/proc.logYYYY-MM-DD`，自动清理 7 天前的日志（不再启动时 truncate）。
+- **crash report**：panic 时写到 `~/.config/proc/crashes/crash-{YYYYMMDD-HHMMSS}.txt`（主线程 panic）或 `crash-worker-{name}-{ts}.txt`（worker 线程 panic），含时间戳 + proc 版本 + panic info + `Backtrace::force_capture()`。**不上传任何位置**，用户报 bug 时手动附上。
+- **worker metrics**：每个 worker 自身记录 `poll_count / poll_total_us / poll_max_us / channel_full_count / last_error`（atomic），主线程聚合到 `proc diag` 输出。
+- **`proc diag` 子命令**：JSON 输出所有 worker 的 avg/max/polls/drops 指标，便于 bug 报告附上。`?` 帮助页 Workers 区段也展示精简版（带 `✓` / `⚠` 健康徽章）。
+- **worker crash banner**：worker 线程用 `catch_unwind` 包 body，panic 时通过 `crash_tx` 通知主线程，TUI 顶部渲染红色 banner；按 `D` 清空。
+
+### v0.6.0 性能优化
+
+阶段 4 把 `ProcessInfo` 的 `format!` String 分配全部换成 Arc：
+
+| 字段 | 旧类型 | 新类型 | 收益 |
+|---|---|---|---|
+| `name` | `String` | `Arc<str>` | heavy worker 一次分配，clone 走原子计数 |
+| `cmd` | `Vec<String>` | `Arc<[String]>` | 同上 |
+| `exe` / `cwd` / `user_id` | `Option<String>` | `Option<Arc<str>>` | 同上 |
+| `status` | `String`（`format!("{:?}", sysinfo::ProcessStatus)`） | `ProcessStatus` Copy 枚举（13 变体） | 零分配，按 sysinfo 0.34.2 真实命名对齐 |
+| `name_lower` | （每次搜索 `to_lowercase`） | `Arc<str>` 预计算 | 搜索 hot path 不再每按键重建 |
+| `query_lower` | （每次按键 `to_lowercase`） | `SearchState` 缓存 | 同上 |
+
+500 进程 × 1.5s 重采下，每秒堆分配减少 90%+；搜索框逐字符输入累积延迟从 ~50ms 降到 μs 级。
 
 ### TCP 传输质量<sup>v0.5.0</sup>
 
@@ -188,6 +226,7 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 | `proc affinity <pid> [--set 0xFF]`<sup>v0.5.0</sup> | 查询 / 设置 CPU affinity mask |
 | `proc smart [device]`<sup>v0.5.0</sup> | SMART 磁盘健康（省略 device 列出所有磁盘） |
 | `proc dns [--tail]`<sup>v0.5.0</sup> | DNS 查询日志（仅 Windows，内存 only） |
+| `proc diag`<sup>v0.6.0</sup> | worker metrics JSON 输出（avg/max/polls/drops），bug 报告附上 |
 | `proc monitor --add --pid N` / `--remove ID` | 监控管理（按 `--pid` / `--port` / `--command`） |
 | `proc record` / `proc replay <file>` | VT100 录屏 |
 | `proc export --format json\|csv [-o file] [--sort] [--limit]` | 进程数据导出（含 ISO-8601 本地时间戳） |
@@ -243,7 +282,9 @@ scoop install proc
 | `Shift+←→` | 回放：跳 10 帧 |
 | **`Tab` / `Shift+Tab`** | 详情页内切换 Inspector Tab（概要 / 环境 / 网络 / DLL / 句柄 / 内存）<sup>v0.5.0</sup> |
 | **`+` / `-`**<sup>v0.5.0</sup> | 详情页 Summary Tab：调整进程优先级（Idle ↔ Realtime 6 档） |
-| **`a`**<sup>v0.5.0</sup> | 详情页 Summary Tab：调整 CPU affinity |
+| **`F5`**<sup>v0.6.0</sup> | 详情页：强制刷新 Inspector 数据（替代 'r'，对齐 Mission Center / htop；旧 'r' 兼容期显示 deprecation warning） |
+| **`y`**<sup>v0.6.0</sup> | 详情页：复制进程信息到剪贴板（vim yank，替代 'c'；旧 'c' 显示 deprecation） |
+| **`v`**<sup>v0.6.0</sup> | 详情页：切换 Env Tab 的 secret 脱敏（录屏中强制 mask） |
 | **`Ctrl+F`**<sup>v0.5.0</sup> | 详情页句柄 / 内存 Tab：搜索过滤 |
 | **`D`（大写）**<sup>v0.5.0</sup> | 端口面板：切换 DNS 查询日志子视图 |
 | **`e`**<sup>v0.5.0</sup> | Docker 面板：exec 进容器（嵌入式 PTY） |
@@ -253,7 +294,9 @@ scoop install proc
 | `r`（详情页） | 重新采集 Inspector 数据（环境/网络/模块/句柄/内存） |
 | `q` / `Esc` | 退出 / 清搜索（详情页内第一次 Esc 只退搜索，第二次才返回列表） |
 
-详情页内的 `k` / `w` / `c` 保持原语义（终止 / 加监控 / 复制信息）。各面板有额外快捷键，底部状态栏有提示。
+> **v0.6.0 键位变更**：详情页 `r` → **`F5`**（刷新，对齐 Mission Center / htop）、`c` → **`y`**（vim yank 复制）、新增 `v` 切换 Env Tab secret 脱敏；Docker 面板 `r` → **`Shift+R`**（restart / 刷新镜像或卷）。旧 `r` / `c` 在 v0.6.0 兼容期会显示 deprecation warning 指引新键位，v0.7.0 移除。
+
+详情页内的 `k` / `w` 保持原语义（终止 / 加监控）。各面板有额外快捷键，底部状态栏有提示。
 
 ## 命令行
 
@@ -282,6 +325,7 @@ proc smart                                        # 列出所有磁盘 + 健康
 proc smart /dev/sda                               # 查看 /dev/sda SMART 详情
 proc smart '\\.\PhysicalDrive0'                   # Windows 物理磁盘 0
 proc dns --tail                                   # 流式输出新 DNS 事件（仅 Windows）
+proc diag                                         # 输出 worker metrics JSON（bug 报告附上）
 proc monitor --add --pid 1234                     # 监控 PID
 proc monitor --add --port 8080                    # 监控端口
 proc monitor --add --command "cargo run"          # 监控并自动重启
@@ -311,6 +355,8 @@ proc docker exec <container> bash -lc "env"       # exec 指定命令
 
 Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的功能不可用，启动时状态栏会一次性提示降级清单。
 
+**release CI 覆盖 5 个 target**（v0.6.0+）：`x86_64-pc-windows-msvc` / `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-gnu` / `aarch64-apple-darwin` / `x86_64-apple-darwin`。`cargo binstall proc` / `winget install Alfroul.proc` / `scoop install proc` 任选一种安装。
+
 | 功能 | Windows | Linux | macOS |
 |---|---|---|---|
 | 进程列表 / 树 | ✅ | ⚠️ 基础 | ⚠️ 基础 |
@@ -325,12 +371,14 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 | **GPU（多厂商）**<sup>v0.5.0</sup> | ✅ NVIDIA via NVML | ✅ AMD/Intel/NVIDIA via nvtop | ❌ |
 | **SMART 磁盘健康**<sup>v0.5.0</sup> | ✅ smartctl + WMI 降级 | ✅ smartctl | ✅ smartctl |
 | **per-process 网络流量**<sup>v0.5.0</sup> | ✅ IP Helper | ✅ nethogs 子进程 | ❌ |
-| **DNS 查询日志**<sup>v0.5.0</sup> | ✅ PowerShell | ❌（pcap 留 0.6.0+） | ❌ |
+| **DNS 查询日志**<sup>v0.5.0</sup> | ✅ PowerShell | ❌（pcap 留 v0.7+） | ❌ |
 | **TCP 传输质量**<sup>v0.5.0</sup> | ✅ GetTcpStatisticsEx2 | ✅ /proc/net/snmp | ❌ |
 | **进程句柄 Tab**<sup>v0.5.0</sup> | ✅ NtQuerySystemInformation | ✅ /proc/\<pid\>/fd | ❌ |
 | **内存映射 Tab**<sup>v0.5.0</sup> | ✅ VirtualQueryEx | ✅ /proc/\<pid\>/maps | ❌ |
 | **进程优先级 / affinity**<sup>v0.5.0</sup> | ✅ SetPriorityClass / SetProcessAffinityMask | ✅ setpriority / sched_setaffinity | ❌ |
 | **文件占用反查（who）**<sup>v0.5.0</sup> | ✅ filelocksmith | ⚠️ lsof 启发式 | ⚠️ lsof 启发式 |
+| **v0.6.0 安全加固**（self-mitigation / env mask / restricted spawn） | ✅ | ⚠️ self-mitigation 暂无（Linux prctl 留 v0.7+） | ⚠️ 同 Linux |
+| **v0.6.0 可观测性**（log rotate / crash report / worker metrics） | ✅ | ✅ | ✅ |
 | **Docker**（ps/inspect/top/logs/images/volumes/exec） | ✅ | ✅ | ✅ |
 | 进程级带宽（EStats） | ✅ | ❌ | ❌ |
 | Toast 通知 | ✅ | ❌ | ❌ |
@@ -352,11 +400,21 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 
 **smartctl 未安装？** Linux/macOS 必须装 `smartctl`（smartmontools 包）；Windows 装 smartctl 后 proc 自动用，未装时退化到 WMI `MSStorageDriver_FailurePredictStatus`（仅预测失败聚合状态，无详细属性）。
 
+**录屏会泄漏什么？**<sup>v0.6.0</sup> 录屏（VT100 recording）会捕获屏幕所有内容含 DNS 域名 / 进程 cmd / env 真值（如果 reveal 打开）。v0.6.0 起按 `R` 触发录屏时**先弹确认对话框**（按 `y` 确认 / `n` 取消），并在录屏期间强制 Env Tab 走 mask 模式（即便 `env_reveal=true` 也强制 mask）。录屏文件存 `~/.config/proc/recordings/*.prec`，**永不自动上传**。
+
+**self-mitigation 开了哪些策略？**<sup>v0.6.0</sup> 5 项：DEP（Permanent）/ ASLR（HighEntropy）/ ProhibitDynamicCode / DisableExtensionPoints / **ImageLoad（NoRemote + NoLow + PreferSystem32）**。**不开 ProcessSignaturePolicy**（会让 nvml-wrapper 未签名 native 依赖挂）。详见 [ADR-0008](docs/adr/0008-self-mitigation-policy.md)。可在 Process Explorer → Properties → Image File → Mitigation flags 验证。
+
+**crash report 在哪？**<sup>v0.6.0</sup> `~/.config/proc/crashes/` 下：主线程 panic → `crash-{YYYYMMDD-HHMMSS}.txt`；worker 线程 panic → `crash-worker-{name}-{ts}.txt`。文件含时间戳 + proc 版本 + panic info + `Backtrace::force_capture()`。报 bug 时把对应文件附上。
+
+**日志为什么不覆盖了？**<sup>v0.6.0</sup> v0.5.0 以前启动时 `File::create` truncate 覆盖旧日志，崩溃前最后一段全丢。v0.6.0 起改为 `tracing-appender::RollingFileAppender::daily`，每天一个文件 `proc.logYYYY-MM-DD`，自动清理 7 天前的日志。
+
+**worker 崩溃了怎么办？**<sup>v0.6.0</sup> TUI 顶部会渲染红色 banner（`[worker name] panicked: <message>`），按 `D` 清空。同时 crash report 写到 `crashes/crash-worker-*.txt`。worker 自身无热恢复（重启方法 `WorkerManager::restart` 未实现，见 [tech-debt](docs/tech-debt.md) TD-4），需重启 proc。
+
 **终端异常？** 退出后执行 `reset` 恢复。
 
-**配置文件在哪？** `~/.config/proc/` 下：`theme.txt`（主题索引）、`ui.toml`（排序偏好）、`alerts.toml`（告警规则）、`proc.log`（运行日志）、`recordings/`（默认录制路径）。
+**配置文件在哪？** `~/.config/proc/` 下：`theme.txt`（主题索引）、`ui.toml`（排序偏好）、`alerts.toml`（告警规则）、`proc.logYYYY-MM-DD`（运行日志，daily rotate 保留 7 天）、`crashes/`（panic crash report）、`recordings/`（默认录制路径）。
 
-**如何查看详细日志？** 日志默认写到 `~/.config/proc/proc.log`（启动时覆盖旧文件）。用 `RUST_LOG` 调级别：
+**如何查看详细日志？** 日志默认写到 `~/.config/proc/proc.logYYYY-MM-DD`（每天 rotate，保留 7 天）。用 `RUST_LOG` 调级别：
 
 ```bash
 RUST_LOG=proc=debug proc                 # debug 级别
@@ -364,7 +422,9 @@ RUST_LOG=proc::security=trace proc       # 仅安全模块 trace
 RUST_LOG=proc::port_map=debug proc ls    # CLI 子命令也生效
 ```
 
-未设置 `RUST_LOG` 时默认级别为 `info`。日志在每次启动时被覆盖（truncate）—— 如需保留历史请配合外部 logrotate。
+未设置 `RUST_LOG` 时默认级别为 `info`。
+
+**如何报 worker 性能问题？**<sup>v0.6.0</sup> 跑 `proc diag` 输出所有 worker 的 metrics JSON（avg_us/max_us/polls/drops/last_error），附在 bug 报告里。TUI 内按 `?` 进入帮助页也可看精简版（带 `✓` / `⚠` 健康徽章）。
 
 ## License
 

@@ -415,6 +415,14 @@ impl App {
                 // Sidebar 折叠/展开：阶段 2 B2。v0.6.0 阶段 6 起，详情页复制
                 // 迁移到 `y`（vim yank），`c` 在所有模式下统一为侧边栏折叠，
                 // 不再有「详情页 vs 全局」双语义冲突。
+                //
+                // v0.6.0 阶段 8（REVIEW-7.md P1-6）：详情页内 'c' 改为显示 deprecation
+                // warning 指引用户到 'y'（旧 0.5.0 用户肌肉记忆按 'c' 复制 → 给句话提示）。
+                // 让 'c' 落入 InspectorController::handle_key，那里返回 StatusMsg。
+                // v0.7.0 计划移除该 deprecation 分支，'c' 重新统一为侧边栏折叠。
+                if self.mode == AppMode::ProcessDetail {
+                    return false;
+                }
                 self.sidebar_expanded = !self.sidebar_expanded;
                 crate::ui_state::save_sidebar_expanded(self.sidebar_expanded);
                 self.status_message = Some(if self.sidebar_expanded {

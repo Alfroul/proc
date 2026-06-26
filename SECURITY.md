@@ -28,7 +28,7 @@
 **Elevated（管理员）**：
 - 持 `SeDebugPrivilege`，可枚举所有进程的句柄 / 内存 / 模块
 - 进程级带宽监控（`GetPerTcpConnectionEStats`）需要 elevated
-- v0.6.0 阶段 2 起：elevated 时 spawn 子进程（PowerShell DNS / docker exec / nvtop）会调 `CreateRestrictedToken` 剥离继承的 `SeDebugPrivilege`，避免子进程被滥用为 credential theft 跳板
+- v0.6.0 阶段 2 起：elevated 时 spawn PowerShell DNS 子进程会调 `CreateRestrictedToken` 剥离继承的 `SeDebugPrivilege`，避免子进程被滥用为 credential theft 跳板（仅覆盖 DNS spawn；docker exec / nvtop 因自身需 privileged token 不接入，详见 ADR-0008）
 
 ## Hardening（v0.6.0 阶段 2 起）
 
@@ -40,6 +40,7 @@
 | `ProcessASLRPolicy`（HighEntropy） | 高熵地址空间随机化 |
 | `ProcessDynamicCodePolicy`（Prohibit） | 禁止动态代码生成（挡 JIT shellcode） |
 | `ProcessExtensionPointDisablePolicy` | 禁 AppInit_DLLs / 全局 hooks |
+| `ProcessImageLoadPolicy`（NoRemote + NoLow + PreferSystem32） | 禁从 UNC / Low Mandatory Label 路径加载 DLL，优先系统目录 |
 
 策略调用失败时 `tracing::warn!` 但**不 panic**（用户机器可能是 Server Core 或老版 Windows，部分策略不支持）。
 
@@ -50,7 +51,7 @@
 - **未启用 `ProcessSignaturePolicy`**：会让 `nvml-wrapper` 等 native 依赖（NVML 库）因签名检查加载失败。等 ADR-0009+ 评估所有 native 依赖签名状态后再考虑。
 - **`ProcessSystemCallDisablePolicy` 未启用**：需测试 ratatui / crossterm 是否依赖 Win32k 系统调用。
 - Linux 平台暂无等价 self-mitigation（未来 v0.7.0+ 评估 `prctl(PR_SET_NO_NEW_PRIVS)` + seccomp）。
-- 进程注入防御是降低概率，不是绝对防护。如 proc 在 elevated 模式下被攻陷，仍可能成为攻击跳板（受限于上述 4 项策略外的攻击面）。
+- 进程注入防御是降低概率，不是绝对防护。如 proc 在 elevated 模式下被攻陷，仍可能成为攻击跳板（受限于上述 5 项策略外的攻击面）。
 
 ## 隐私承诺
 

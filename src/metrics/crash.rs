@@ -95,6 +95,62 @@ pub fn write_crash_report_to(dir: &std::path::Path, report: &str) -> std::io::Re
     Ok(path)
 }
 
+/// 写 worker panic crash report 到 `~/.config/proc/crashes/crash-worker-{name}-{ts}.txt`。
+///
+/// v0.6.0 阶段 8（REVIEW-7.md P1-7）：worker 线程用 `catch_unwind` 截获 panic 后
+/// 不触发全局 panic hook（Rust 标准库语义），导致 worker panic 不写盘。这里给
+/// worker.rs 一个独立入口，让 worker 崩溃也能产生磁盘 crash report，bug 报告
+/// 时可附上。文件名带 `worker-` 前缀 + worker 名字，与主线程 panic 区分。
+///
+/// best-effort：失败时只 tracing::warn，不阻塞 crash_tx 通知主线程 banner。
+pub fn write_worker_crash_report(
+    worker: &str,
+    message: &str,
+    backtrace: &str,
+) -> std::io::Result<PathBuf> {
+    write_worker_crash_report_to(&default_crashes_dir(), worker, message, backtrace)
+}
+
+/// 写 worker crash report 到指定目录（测试用）。
+pub fn write_worker_crash_report_to(
+    dir: &std::path::Path,
+    worker: &str,
+    message: &str,
+    backtrace: &str,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let report = format_worker_crash_report(worker, message, backtrace);
+    // 文件名形如 `crash-worker-dns_log_worker-20260626-121212.txt`。
+    // worker 名字来自代码常量（'static str），路径安全；为防止意外字符把空格替换成 `_`。
+    let safe_worker = worker.replace(' ', "_");
+    let path = dir.join(format!(
+        "crash-worker-{safe_worker}-{}.txt",
+        local_timestamp()
+    ));
+    std::fs::write(&path, report)?;
+    Ok(path)
+}
+
+/// 格式化 worker crash report 文本（导出供测试调用）。
+#[must_use]
+pub fn format_worker_crash_report(worker: &str, message: &str, backtrace: &str) -> String {
+    format!(
+        "proc worker crash report\n\
+         ====================\n\
+         time: {ts}\n\
+         version: {ver}\n\
+         platform: {platform}\n\
+         worker: {worker}\n\
+         \n\
+         panic: {message}\n\
+         \n\
+         backtrace:\n{backtrace}\n",
+        ts = local_timestamp(),
+        ver = env!("CARGO_PKG_VERSION"),
+        platform = std::env::consts::OS,
+    )
+}
+
 /// `~/.config/proc/crashes/`。
 #[must_use]
 pub fn default_crashes_dir() -> PathBuf {
@@ -156,5 +212,34 @@ mod tests {
     fn default_crashes_dir_under_config() {
         let dir: PathBuf = default_crashes_dir();
         assert!(dir.ends_with("crashes"));
+    }
+
+    #[test]
+    fn write_worker_crash_report_to_writes_file_with_worker_name() {
+        // v0.6.0 阶段 8（REVIEW-7.md P1-7）：worker panic 也应写盘，
+        // 文件名带 worker 名字以与主线程 panic 区分。
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let path =
+            write_worker_crash_report_to(&dir, "dns_log_worker", "boom", "fake_backtrace").unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.starts_with("crash-worker-dns_log_worker-"),
+            "文件名应含 worker 名字，got {name}"
+        );
+        assert!(name.ends_with(".txt"));
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("worker: dns_log_worker"));
+        assert!(content.contains("panic: boom"));
+        assert!(content.contains("fake_backtrace"));
+    }
+
+    #[test]
+    fn format_worker_crash_report_includes_all_fields() {
+        let report = format_worker_crash_report("port_worker", "test msg", "trace");
+        assert!(report.contains("proc worker crash report"));
+        assert!(report.contains("worker: port_worker"));
+        assert!(report.contains("panic: test msg"));
+        assert!(report.contains("trace"));
     }
 }
