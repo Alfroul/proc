@@ -24,6 +24,7 @@ fn make_process(pid: u32, name: &str, parent_pid: Option<u32>) -> ProcessInfo {
         start_time: 0,
         run_time: 0,
         name_lower: std::sync::Arc::from(name_arc.to_lowercase().as_str()),
+        throttled: proc::throttle::EcoQoSState::default(),
     }
 }
 

@@ -68,6 +68,7 @@ fn sample_process() -> ProcessInfo {
         start_time: 1_700_000_000,
         run_time: 3600,
         name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
+        throttled: proc::throttle::EcoQoSState::default(),
     }
 }
 
@@ -104,6 +105,7 @@ mod non_windows_stubs {
             start_time: 0,
             run_time: 0,
             name_lower: std::sync::Arc::from("stub"),
+            throttled: proc::throttle::EcoQoSState::default(),
         }
     }
 

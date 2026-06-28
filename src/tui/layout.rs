@@ -34,7 +34,7 @@ fn effective_tab_index(app: &App) -> usize {
     if app.mode == AppMode::Replay {
         tab_index(&app.replay_frame_mode())
     } else if app.mode == AppMode::ProcessList
-        && app.process_panel.process_view_mode == crate::collect::ProcessViewMode::Tree
+        && app.process_panel.panel.process_view_mode == crate::collect::ProcessViewMode::Tree
     {
         1
     } else {
@@ -64,6 +64,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     // v0.6.0 阶段 3：worker 崩溃 banner（顶部居中）。最近一条时间 + panic msg。
     if !app.active_crashes.is_empty() {
         draw_crash_banner(f, app);
+    }
+
+    // v0.7.0 阶段 3：Ctrl+P 命令面板浮层，渲染在最上层。
+    if app.is_palette_open() {
+        crate::tui::command_palette::draw(f, app);
     }
 }
 
@@ -186,7 +191,8 @@ fn draw_middle(f: &mut Frame, app: &App, area: Rect) {
     match app.mode {
         AppMode::ProcessList | AppMode::Replay => {
             let show_right = app.mode != AppMode::Replay
-                && app.process_panel.process_view_mode == crate::collect::ProcessViewMode::List;
+                && app.process_panel.panel.process_view_mode
+                    == crate::collect::ProcessViewMode::List;
 
             if show_right {
                 let [main_area, right_area] = Layout::default()
@@ -213,7 +219,7 @@ fn draw_middle(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_main_panel(f: &mut Frame, app: &App, area: Rect) {
     match app.mode {
-        AppMode::ProcessList => match app.process_panel.process_view_mode {
+        AppMode::ProcessList => match app.process_panel.panel.process_view_mode {
             crate::collect::ProcessViewMode::List => {
                 crate::tui::process_table::draw(f, area, app);
             }
@@ -260,7 +266,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         AppMode::ContainerExec => {
             " Ctrl+D/Ctrl+\\ 退出  Ctrl+C 中断容器  按键透传容器  q 退出 exec"
         }
-        AppMode::PortMap if app.port_panel.dns_view_active => {
+        AppMode::PortMap if app.port_panel.panel.dns_view_active => {
             " ↑↓滚动  /搜索  c清空  f切换follow  D/Esc退出DNS视图  q退出"
         }
         AppMode::PortMap => {
@@ -269,12 +275,14 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         AppMode::Replay => " Space播放/暂停  ←→快退/快进  +/-速度  q退出回放",
         AppMode::Help => " ↑↓/PgUp/PgDn滚动  Esc/q/? 返回  Home/End 顶/底",
         AppMode::ProcessList
-            if app.process_panel.process_view_mode == crate::collect::ProcessViewMode::AppGroup =>
+            if app.process_panel.panel.process_view_mode
+                == crate::collect::ProcessViewMode::AppGroup =>
         {
             " ↑↓移动  Enter展开/折叠  Space选择  k终止  S排序  v切换视图  /搜索  q退出"
         }
         AppMode::ProcessList
-            if app.process_panel.process_view_mode == crate::collect::ProcessViewMode::Tree =>
+            if app.process_panel.panel.process_view_mode
+                == crate::collect::ProcessViewMode::Tree =>
         {
             " ↑↓移动  Enter展开/折叠  Space选择  o选孤儿  z选僵尸  f过滤  k终止  /搜索  q退出"
         }

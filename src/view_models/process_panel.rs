@@ -549,6 +549,11 @@ impl ProcessPanel {
             KeyCode::Char('/') => {
                 self.search.active = true;
             }
+            // v0.7 阶段 4：':' 激活 FilterExpr 模式（ADR-0011）。
+            // 仅 List view 接入；Tree / AppGroup 视图暂保持 substring（详见 tech-debt）。
+            KeyCode::Char(':') => {
+                self.search.activate_filter_expr();
+            }
             KeyCode::Enter => {
                 if let Some(proc) = self.enter_detail(ctx.cached_sorted, ctx.cached_processes) {
                     *ctx.detail_process = Some(proc);

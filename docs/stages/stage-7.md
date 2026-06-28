@@ -13,7 +13,7 @@
 ### 任务 1：开工前回归验证
 
 ```bash
-cargo test --release --tb=no -q                       # 应 ~741 passed
+cargo test --release -q                       # 应 ~741 passed
 cargo clippy --release --all-targets -- -D warnings   # 0 warnings
 cargo fmt --all -- --check                            # 干净
 cargo build --release --no-default-features           # 编译通过
@@ -56,8 +56,8 @@ cargo build --release --no-default-features           # 编译通过
 **切片 E — UX + 测试（阶段 6）**：
 - 'r' / 'c' 键位的 deprecation warning 是否每次都显示（用户烦躁？）
 - F5 / 'y' 在详情页的快捷键提示是否完整
-- proptest 是否覆盖了真实的 panic 路径（不只是 happy path）
-- criterion bench 的 mock_process 是否反映真实数据分布
+- 是否需要引入 proptest（v0.7.0+ 评估；目前未引入）
+- 性能回归测试是否覆盖 hot path（`tests/test_perf_baseline.rs` 是否反映真实数据分布）
 - Linux stub 测试是否真的在 Linux CI 上跑（cfg-gate 正确？）
 
 **横切 1 — 架构一致性**：
@@ -184,7 +184,7 @@ test -f docs/reviews/REVIEW-7.md
 grep -c "^## P[012]" docs/reviews/REVIEW-7.md   # 应该 ≥ 3
 
 # 3. 测试基线未动
-cargo test --release --tb=no -q    # 仍是 ~741 passed
+cargo test --release -q    # 仍是 ~741 passed
 ```
 
 **验收标准**：

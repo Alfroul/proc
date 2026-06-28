@@ -37,7 +37,7 @@ fn draw_net_traffic_bar(f: &mut Frame, area: Rect, app: &App) {
 
     let adapter_name = adapters.first().map(|a| a.name.as_str()).unwrap_or("未知");
 
-    let sparkline_str = build_sparkline(&app.port_panel.connection_history);
+    let sparkline_str = build_sparkline(&app.port_panel.panel.connection_history);
 
     // 阶段 5 D2: TCP 传输质量片段。retrans/rst 都是累计值,展示时给百分比
     // 让数字可读。分母用 out_segs(累计输出段数);out_segs=0 时表示该平台
@@ -104,7 +104,7 @@ fn draw_net_traffic_bar(f: &mut Frame, area: Rect, app: &App) {
         ),
         Span::styled(format!("  连接: {}", sparkline_str), theme::style_muted()),
         Span::styled(
-            format!(" {}", app.port_panel.connection_diff.active_count),
+            format!(" {}", app.port_panel.panel.connection_diff.active_count),
             theme::style_header(),
         ),
     ];
@@ -123,14 +123,20 @@ fn split_with_traffic_bar(area: Rect) -> (Rect, Rect) {
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     // 阶段 8 D3：DNS 子视图优先（按 D 进入，覆盖常规端口视图）。
-    if app.port_panel.dns_view_active {
+    if app.port_panel.panel.dns_view_active {
         draw_dns_view(f, area, app);
         return;
     }
 
-    if let Some(ref detail) = app.port_panel.port_detail {
+    // v0.7 阶段 8：Flow 子视图（按 F 进入，覆盖常规端口视图）。ADR-0016。
+    if app.port_panel.panel.flow_view_active {
+        draw_flow_view(f, area, app);
+        return;
+    }
+
+    if let Some(ref detail) = app.port_panel.panel.port_detail {
         draw_port_detail(f, area, detail);
-    } else if app.port_panel.show_anomaly_detail {
+    } else if app.port_panel.panel.show_anomaly_detail {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(0), Constraint::Length(12)])
@@ -142,8 +148,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         draw_main_view(f, area, app);
     }
 
-    if app.port_panel.show_diagnostics
-        && let Some(ref diag) = app.port_panel.diagnostic
+    if app.port_panel.panel.show_diagnostics
+        && let Some(ref diag) = app.port_panel.panel.diagnostic
     {
         match diag.phase {
             crate::diag::DiagnosticPhase::Menu => {
@@ -164,7 +170,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 fn draw_dns_view(f: &mut Frame, area: Rect, app: &App) {
     use crate::dns_log::DnsResult;
 
-    let pp = &app.port_panel;
+    let pp = &app.port_panel.panel;
     let recent = &app.dns_log_recent;
 
     // 标题栏：显示 collector 状态 + 条数 + 操作提示
@@ -298,8 +304,118 @@ fn format_system_time(t: std::time::SystemTime) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
+/// v0.7 阶段 8：Flow 子视图（ADR-0016）。列出 `App::flows`（最近一份
+/// FlowAggregator drain 出的快照）。列：PID / comm / 远端 / 端口 / 域名 / 时间。
+///
+/// - ebpf feature 关闭 / 非 Linux 平台：显示「需要 Linux + ebpf feature」提示。
+/// - flows 为空但 worker 已启用：显示「尚无 flow（等 connect 事件）」。
+/// - `bytes_out / bytes_in` MVP 留 0（Part B 接 tcp_sendmsg/recvmsg），不渲染。
+fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
+    let pp = &app.port_panel.panel;
+    let flows = &app.flows;
+
+    let ebpf_enabled = crate::ebpf::EBPF_ENABLED;
+
+    // 标题栏：worker 状态 + 条数 + 操作提示
+    let ghost_count = flows.iter().filter(|f| f.is_ghost()).count();
+    let header_line = if ebpf_enabled && app.workers.ebpf_worker.is_some() {
+        if ghost_count > 0 {
+            format!(
+                " eBPF Flow graph（{} 条 · 👻{} 幽灵保留 ≤30s · connect + DNS 关联）  F/Esc 退出 · ↑↓滚动",
+                flows.len(),
+                ghost_count
+            )
+        } else {
+            format!(
+                " eBPF Flow graph（{} 条 · connect + DNS 关联）  F/Esc 退出 · ↑↓滚动",
+                flows.len()
+            )
+        }
+    } else if ebpf_enabled {
+        " eBPF Flow graph：worker 启动失败（无权限？内核 < 5.10？），详见日志".to_string()
+    } else {
+        " eBPF Flow graph：需要 Linux + ebpf feature（`cargo build --features ebpf`）".to_string()
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+
+    let header = Paragraph::new(header_line).style(theme::style_header());
+    f.render_widget(header, chunks[0]);
+
+    let header_row = Row::new(vec![
+        Cell::from("PID"),
+        Cell::from("进程名"),
+        Cell::from("远端"),
+        Cell::from("端口"),
+        Cell::from("域名"),
+        Cell::from("首次见到"),
+    ])
+    .style(theme::style_header());
+
+    let rows_visible = chunks[1].height.saturating_sub(3) as usize;
+    let scroll = pp.flow_scroll;
+    let window: Vec<&crate::ebpf::flow::ProcessFlow> =
+        flows.iter().skip(scroll).take(rows_visible).collect();
+
+    let rows: Vec<Row> = window
+        .iter()
+        .map(|flow| {
+            let dns_str = flow.dns_name.clone().unwrap_or_else(|| "—".into());
+            let comm = if flow.comm.is_empty() {
+                "?".to_string()
+            } else {
+                flow.comm.clone()
+            };
+            // Part B 任务 9：ghost flow（进程已退出，仍在 30s 保留窗口内）
+            // 加 👻 前缀 + 灰色斜体渲染，区别于 live flow。
+            let is_ghost = flow.is_ghost();
+            let pid_str = if is_ghost {
+                format!("👻{}", flow.pid)
+            } else {
+                flow.pid.to_string()
+            };
+            let row_style = if is_ghost {
+                theme::style_muted().add_modifier(Modifier::ITALIC)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(pid_str),
+                Cell::from(comm),
+                Cell::from(flow.remote_addr.clone()),
+                Cell::from(flow.remote_port.to_string()),
+                Cell::from(dns_str),
+                Cell::from(format_system_time(flow.first_seen)),
+            ])
+            .style(row_style)
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(7),
+            Constraint::Length(18),
+            Constraint::Length(16),
+            Constraint::Length(6),
+            Constraint::Min(20),
+            Constraint::Length(10),
+        ],
+    )
+    .header(header_row)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("ProcessFlow（connect + DNS 关联 · 隐私不持久化）"),
+    );
+    f.render_widget(table, chunks[1]);
+}
+
 fn draw_main_view(f: &mut Frame, area: Rect, app: &App) {
-    match app.port_panel.port_view_mode {
+    match app.port_panel.panel.port_view_mode {
         NetworkViewMode::Process => {
             draw_process_view(f, area, app);
             return;
@@ -414,7 +530,7 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
 
     let visible_rows: Vec<&DisplayRow> = display_rows
         .iter()
-        .skip(app.port_panel.port_scroll)
+        .skip(app.port_panel.panel.port_scroll)
         .take(rows_visible)
         .collect();
 
@@ -428,7 +544,7 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
     ])
     .style(theme::style_header());
 
-    let scroll_offset = app.port_panel.port_scroll;
+    let scroll_offset = app.port_panel.panel.port_scroll;
     let rows: Vec<Row> = visible_rows
         .iter()
         .enumerate()
@@ -449,7 +565,7 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
             let is_cursor = data_indices
                 .iter()
                 .position(|&di| di == global_display_i)
-                .map(|pos| pos == app.port_panel.port_cursor)
+                .map(|pos| pos == app.port_panel.panel.port_cursor)
                 .unwrap_or(false);
 
             let bg = if is_cursor {
@@ -477,23 +593,26 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let filter_label = app.port_panel.port_state_filter.label();
-    let sort_label = app.port_panel.port_sort_field.label();
+    let filter_label = app.port_panel.panel.port_state_filter.label();
+    let sort_label = app.port_panel.panel.port_sort_field.label();
 
-    let search_indicator = if app.port_panel.port_search.is_active() {
-        format!(" 搜索: {} | ESC取消", app.port_panel.port_search.query())
-    } else if !app.port_panel.port_search.query().is_empty() {
-        format!(" 过滤: {}", app.port_panel.port_search.query())
+    let search_indicator = if app.port_panel.panel.port_search.is_active() {
+        format!(
+            " 搜索: {} | ESC取消",
+            app.port_panel.panel.port_search.query()
+        )
+    } else if !app.port_panel.panel.port_search.query().is_empty() {
+        format!(" 过滤: {}", app.port_panel.panel.port_search.query())
     } else {
         String::new()
     };
 
-    let mode_label = if app.port_panel.port_is_admin {
+    let mode_label = if app.port_panel.panel.port_is_admin {
         "增强模式 ✓"
     } else {
         "基础模式"
     };
-    let diff = &app.port_panel.connection_diff;
+    let diff = &app.port_panel.panel.connection_diff;
     let anomaly_part = anomaly_indicator(app).unwrap_or_default();
     let title = format!(
         "端口映射 | {} | TCP:{} UDP:{} | ⬆+{} ⬇-{} 活跃{}{} | 过滤:[{}] 排序:{} f切换 s排序{}",
@@ -528,8 +647,9 @@ fn draw_port_view(f: &mut Frame, area: Rect, app: &App) {
     let mut state = TableState::default();
     let visible_cursor = app
         .port_panel
+        .panel
         .port_cursor
-        .saturating_sub(app.port_panel.port_scroll);
+        .saturating_sub(app.port_panel.panel.port_scroll);
     state.select(Some(visible_cursor));
     f.render_stateful_widget(table, table_area, &mut state);
 }
@@ -605,9 +725,14 @@ fn draw_remote_view(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let cursor = app.port_panel.port_remote_cursor.min(groups.len() - 1);
+    let cursor = app
+        .port_panel
+        .panel
+        .port_remote_cursor
+        .min(groups.len() - 1);
     let scroll = app
         .port_panel
+        .panel
         .port_remote_scroll
         .min(groups.len().saturating_sub(1));
     let visible: Vec<&RemoteGroup> = groups.iter().skip(scroll).take(rows_visible).collect();
@@ -721,13 +846,16 @@ fn draw_remote_view(f: &mut Frame, area: Rect, app: &App) {
         .filter(|g| g.ip_class == port_map::IpClass::Public)
         .count();
 
-    let filter_label = app.port_panel.port_state_filter.label();
-    let sort_label = app.port_panel.port_remote_sort.label();
+    let filter_label = app.port_panel.panel.port_state_filter.label();
+    let sort_label = app.port_panel.panel.port_remote_sort.label();
 
-    let search_indicator = if app.port_panel.port_search.is_active() {
-        format!(" 搜索: {} | ESC取消", app.port_panel.port_search.query())
-    } else if !app.port_panel.port_search.query().is_empty() {
-        format!(" 过滤: {}", app.port_panel.port_search.query())
+    let search_indicator = if app.port_panel.panel.port_search.is_active() {
+        format!(
+            " 搜索: {} | ESC取消",
+            app.port_panel.panel.port_search.query()
+        )
+    } else if !app.port_panel.panel.port_search.query().is_empty() {
+        format!(" 过滤: {}", app.port_panel.panel.port_search.query())
     } else {
         String::new()
     };
@@ -773,7 +901,8 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
     let groups = app.filtered_process_groups().to_vec();
     let rows_visible = table_area.height.saturating_sub(3) as usize;
 
-    let is_enhanced = app.port_panel.port_is_admin && app.port_panel.estats_collector.is_some();
+    let is_enhanced =
+        app.port_panel.panel.port_is_admin && app.port_panel.panel.estats_collector.is_some();
 
     if groups.is_empty() {
         let mode_label = if is_enhanced {
@@ -791,8 +920,12 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let cursor = app.port_panel.port_process_cursor.min(groups.len() - 1);
-    let expanded_pid = app.port_panel.port_expanded_pid;
+    let cursor = app
+        .port_panel
+        .panel
+        .port_process_cursor
+        .min(groups.len() - 1);
+    let expanded_pid = app.port_panel.panel.port_expanded_pid;
 
     let mut group_visual_pos: Vec<usize> = Vec::with_capacity(groups.len());
     let mut all_rows: Vec<(usize, Option<usize>)> = Vec::new();
@@ -811,6 +944,7 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
 
     let scroll = app
         .port_panel
+        .panel
         .port_process_scroll
         .min(all_rows.len().saturating_sub(1));
     let visible: Vec<&(usize, Option<usize>)> =
@@ -986,13 +1120,16 @@ fn draw_process_view(f: &mut Frame, area: Rect, app: &App) {
     } else {
         "基础模式"
     };
-    let filter_label = app.port_panel.port_state_filter.label();
-    let sort_label = app.port_panel.port_process_sort.label();
+    let filter_label = app.port_panel.panel.port_state_filter.label();
+    let sort_label = app.port_panel.panel.port_process_sort.label();
 
-    let search_indicator = if app.port_panel.port_search.is_active() {
-        format!(" 搜索: {} | ESC取消", app.port_panel.port_search.query())
-    } else if !app.port_panel.port_search.query().is_empty() {
-        format!(" 过滤: {}", app.port_panel.port_search.query())
+    let search_indicator = if app.port_panel.panel.port_search.is_active() {
+        format!(
+            " 搜索: {} | ESC取消",
+            app.port_panel.panel.port_search.query()
+        )
+    } else if !app.port_panel.panel.port_search.query().is_empty() {
+        format!(" 过滤: {}", app.port_panel.panel.port_search.query())
     } else {
         String::new()
     };
@@ -1140,6 +1277,7 @@ fn draw_anomaly_panel(f: &mut Frame, area: Rect, app: &App) {
     let visible = app.visible_anomalies();
     let cursor = app
         .port_panel
+        .panel
         .anomaly_cursor
         .min(visible.len().saturating_sub(1));
 
@@ -1213,7 +1351,7 @@ fn draw_diagnostic_menu(f: &mut Frame, area: Rect, app: &App) {
     let popup_area = crate::tui::centered_rect(60, 14, area);
     f.render_widget(Clear, popup_area);
 
-    let Some(ref diag) = app.port_panel.diagnostic else {
+    let Some(ref diag) = app.port_panel.panel.diagnostic else {
         return;
     };
     let tools = crate::diag::DiagnosticState::tool_list();
@@ -1345,7 +1483,7 @@ fn draw_diagnostic_result(f: &mut Frame, area: Rect, app: &App) {
     let popup_area = crate::tui::centered_rect(70, 20, area);
     f.render_widget(Clear, popup_area);
 
-    let Some(ref diag) = app.port_panel.diagnostic else {
+    let Some(ref diag) = app.port_panel.panel.diagnostic else {
         return;
     };
     let tools = crate::diag::DiagnosticState::tool_list();

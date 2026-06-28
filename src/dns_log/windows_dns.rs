@@ -43,7 +43,6 @@
 //! 详见 `docs/adr/0006-dns-subprocess-not-etw-dbus.md`。
 
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -235,13 +234,19 @@ impl PowershellDnsCollector {
     /// 仅 Windows 编译。spawn PowerShell 子进程 + reader 线程。
     pub fn new() -> Result<Self> {
         // 先 probe：确认 powershell.exe 在 PATH（Windows 自带，但 Server Core / 容器可能没有）。
-        let probe = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|e| ProcError::monitor(format!("powershell.exe 启动失败: {e}")))?;
-        if !probe.success() {
+        // v0.7.0 阶段 1 TD-10：probe 走 `spawn_with_reduced_privileges` + `wait`，
+        // 与下面主 spawn 路径统一 —— elevated 时 probe 也剥离 SeDebugPrivilege，
+        // 避免「probe 阶段短持 SeDebug → 被注入后跳板」的一致性漏洞。
+        // probe 子进程是 `exit 0`（零输出），stdout pipe 不会阻塞 wait。
+        let probe = spawn_with_reduced_privileges(
+            "powershell.exe",
+            &["-NoProfile", "-NonInteractive", "-Command", "exit 0"],
+        )
+        .map_err(|e| ProcError::monitor(format!("powershell.exe 启动失败: {e}")))?;
+        let probe_status = probe
+            .wait()
+            .map_err(|e| ProcError::monitor(format!("powershell.exe 等待失败: {e}")))?;
+        if !probe_status.success() {
             return Err(ProcError::monitor(
                 "powershell.exe 退出码非零，DNS 日志采集不可用",
             ));

@@ -15,11 +15,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
     let rows_visible = area.height.saturating_sub(3) as usize;
     let show_disk = matches!(
-        app.process_panel.sort_field,
+        app.process_panel.panel.sort_field,
         SortField::DiskRead | SortField::DiskWrite
     );
     let show_net = matches!(
-        app.process_panel.sort_field,
+        app.process_panel.panel.sort_field,
         SortField::NetSent | SortField::NetRecv
     );
 
@@ -71,16 +71,19 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let rows: Vec<Row> = sorted
         .iter()
         .enumerate()
-        .skip(app.process_panel.scroll_offset)
+        .skip(app.process_panel.panel.scroll_offset)
         .take(rows_visible)
         .map(|(i, (idx, class))| {
             let proc = &app.cached_processes[*idx];
-            let selected = app.process_panel.selected_pids.contains(&proc.pid);
-            let is_cursor = i == app.process_panel.cursor_index;
+            let selected = app.process_panel.panel.selected_pids.contains(&proc.pid);
+            let is_cursor = i == app.process_panel.panel.cursor_index;
 
             let checkbox = if selected { "☑ " } else { "☐ " };
             let mem_str = format_bytes(proc.memory);
             let cpu_str = format!("{:.1}", proc.cpu_usage);
+            // v0.7 阶段 6：EcoQoS 🍃 标记（ADR-0014）。Eco 状态在 name 后追加，
+            // Non-Eco 不渲染占位，避免列宽波动。
+            let name_str = format!("{}{}", proc.name, proc.throttled.badge());
             let (_, total_mem) = app.snapshot.memory_usage();
             let mem_pct = if total_mem > 0 {
                 format!("{:.1}", proc.memory as f64 / total_mem as f64 * 100.0)
@@ -127,7 +130,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(proc.status.to_string()),
                     Cell::from(class.label()).style(class_style(class)),
                     sec_cell,
-                    Cell::from(proc.name.to_string()),
+                    Cell::from(name_str.clone()),
                 ])
                 .style(row_style)
             } else if show_net {
@@ -144,7 +147,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(proc.status.to_string()),
                     Cell::from(class.label()).style(class_style(class)),
                     sec_cell,
-                    Cell::from(proc.name.to_string()),
+                    Cell::from(name_str.clone()),
                 ])
                 .style(row_style)
             } else {
@@ -157,7 +160,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(proc.status.to_string()),
                     Cell::from(class.label()).style(class_style(class)),
                     sec_cell,
-                    Cell::from(proc.name.to_string()),
+                    Cell::from(name_str.clone()),
                 ])
                 .style(row_style)
             }
@@ -193,9 +196,38 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         ]
     };
 
-    let sort_indicator = format!("排序: {} ◀▶切换", app.process_panel.sort_field.label());
-    let search_indicator = if app.process_panel.search.is_active() {
-        format!(" | 搜索: {} | ESC取消", app.process_panel.search.query())
+    let sort_indicator = format!(
+        "排序: {} ◀▶切换",
+        app.process_panel.panel.sort_field.label()
+    );
+    // v0.7 阶段 4：FilterExpr 模式下显示 mode 标识；parse 失败时改显 ⚠ 错误信息。
+    let search_indicator = if app.process_panel.panel.search.is_active() {
+        match app.process_panel.panel.search.mode {
+            crate::search::QueryMode::Substring => {
+                format!(
+                    " | 搜索:{} | ESC取消",
+                    app.process_panel.panel.search.query()
+                )
+            }
+            crate::search::QueryMode::FilterExpr => {
+                if let Some(err) = &app.process_panel.panel.search.filter_error {
+                    // 错误截到 60 字符避免标题栏溢出（错误信息含 position + msg）。
+                    let truncated = if err.chars().count() > 60 {
+                        let mut s: String = err.chars().take(59).collect();
+                        s.push('…');
+                        s
+                    } else {
+                        err.clone()
+                    };
+                    format!(" | ⚠ {} | ESC取消", truncated)
+                } else {
+                    format!(
+                        " | 过滤:{} | ESC取消",
+                        app.process_panel.panel.search.query()
+                    )
+                }
+            }
+        }
     } else {
         String::new()
     };
@@ -211,8 +243,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let mut state = TableState::default();
     let visible_cursor = app
         .process_panel
+        .panel
         .cursor_index
-        .saturating_sub(app.process_panel.scroll_offset);
+        .saturating_sub(app.process_panel.panel.scroll_offset);
     state.select(Some(visible_cursor));
     f.render_stateful_widget(table, area, &mut state);
 }

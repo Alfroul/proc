@@ -274,6 +274,17 @@ impl InspectorController {
                     "⚠ 'c' 将在 v0.7.0 移除，请用 y 复制（vim yank）".to_string(),
                 );
             }
+            // v0.7 阶段 6：T 切换 Windows 11 EcoQoS / Efficiency Mode（ADR-0014）。
+            // 当前 Eco → 切回 Normal；否则切到 Eco。非 Windows 平台 App 派发时
+            // set_throttle 会返回错误并写 status_message。
+            KeyCode::Char('T') => {
+                if let Some(p) = self.detail_process.as_ref() {
+                    return InspectorAction::ToggleEcoQoS {
+                        pid: p.pid,
+                        make_eco: p.throttled != crate::throttle::EcoQoSState::Eco,
+                    };
+                }
+            }
             _ => {}
         }
         InspectorAction::Noop
@@ -299,4 +310,7 @@ pub enum InspectorAction {
     /// `y` 复制进程信息到剪贴板。App 调 `arboard::Clipboard::set_text`。
     /// v0.6.0 阶段 6：原 `c` 迁移到 `y`（vim yank 风格）。
     CopyInfo(String),
+    /// v0.7 阶段 6：`T` 切换 EcoQoS。App 调 `throttle::set_throttle` +
+    /// 写 status_message（ADR-0014）。
+    ToggleEcoQoS { pid: u32, make_eco: bool },
 }

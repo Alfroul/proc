@@ -127,6 +127,22 @@ pub struct KillRequest {
     pub force: bool,
 }
 
+impl std::fmt::Debug for KillRequest {
+    /// v0.7.0 阶段 5：手动 impl Debug，避免在 `PanelAction::Kill` derive 时炸。
+    /// pids 列表可能含几十个 PID，截断到前 8 个避免日志膨胀。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pids_str = if self.pids.len() > 8 {
+            format!("{:?}...+{}]", self.pids[..8].to_vec(), self.pids.len() - 8)
+        } else {
+            format!("{:?}", self.pids)
+        };
+        f.debug_struct("KillRequest")
+            .field("pids", &pids_str)
+            .field("force", &self.force)
+            .finish()
+    }
+}
+
 pub struct OpRecord {
     pub time: String,
     pub message: String,
@@ -162,6 +178,48 @@ pub enum KeyResult {
     SwitchMode(AppMode),
     /// Toggle recording on/off.
     ToggleRecording,
+}
+
+/// v0.7.0 阶段 5：PanelController 的 handle_key 返回值。
+///
+/// 与 v0.6.0 `KeyResult` 共存（surgical：v0.8 评估合并）。`KeyResult` 是
+/// `Panel` trait 的返回值（v0.6 旧路径），`PanelAction` 是 `XxxPanelController`
+/// 的返回值（v0.7 新路径）。当前 5 个 controller 都只是把 inner panel 的
+/// `KeyResult` 翻译成 `PanelAction`；未来 controller 主动产副作用（如 docker
+/// exec spawn）时直接 emit `PanelAction::Kill` / `Clipboard` 等变体，不再走
+/// `PanelContext` mutable ref。
+///
+/// **对应 ADR-0012**。
+#[derive(Debug)]
+pub enum PanelAction {
+    /// 默认：无副作用（controller 已消化完状态变更）。
+    Noop,
+    /// 全局退出（q 键）。
+    Quit,
+    /// 切面板（1-6 / Tab）。App 调 `switch_mode`。
+    SwitchMode(AppMode),
+    /// 录屏开关（R 键）。
+    ToggleRecording,
+    /// 写一行 status_message（Docker / Inspector 等刷新结果）。
+    StatusMessage(String),
+    /// 请求 kill 进程。App 弹 kill_confirm dialog。
+    Kill(KillRequest),
+    /// 复制到剪贴板（Inspector y / Docker copy-id 等）。
+    Clipboard(String),
+}
+
+impl From<KeyResult> for PanelAction {
+    /// v0.7 阶段 5：旧 `KeyResult` 翻译为新 `PanelAction`。controller 包了 panel
+    /// 后用此 fn 转换；v0.8 评估彻底废掉 `KeyResult` 时移除。
+    fn from(r: KeyResult) -> Self {
+        match r {
+            KeyResult::Quit => Self::Quit,
+            KeyResult::SwitchMode(m) => Self::SwitchMode(m),
+            KeyResult::ToggleRecording => Self::ToggleRecording,
+            // Consumed / Ignored 都对 App 无副作用，统一映射 Noop。
+            KeyResult::Consumed | KeyResult::Ignored => Self::Noop,
+        }
+    }
 }
 
 /// Shared context passed to panels during tick and key handling.

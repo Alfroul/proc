@@ -183,6 +183,7 @@ fn build_self_proc_info() -> ProcessInfo {
         user_id: None,
         run_time: 0,
         name_lower: std::sync::Arc::from("self"),
+        throttled: proc::throttle::EcoQoSState::default(),
     }
 }
 

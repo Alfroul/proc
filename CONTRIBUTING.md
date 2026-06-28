@@ -25,7 +25,7 @@ Linux 依赖（可选）：
 每次提交前必须本地跑通以下 4 项检查（CI 也跑同样的）：
 
 ```bash
-cargo test --release --tb=no -q                          # 全量回归（611+ passed）
+cargo test --release -q                          # 全量回归（611+ passed）
 cargo clippy --release --all-targets -- -D warnings      # 0 warnings
 cargo fmt --all -- --check                               # 干净
 cargo build --release --no-default-features              # 跨 feature 编译通过

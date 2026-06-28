@@ -14,6 +14,13 @@ pub enum MetricName {
     CpuTemperature,
     GpuTemperature,
     CpuThrottlePercent,
+    /// v0.7 阶段 6：PSI（Pressure Stall Information）some/full avg10
+    /// （Linux 4.20+，详见 ADR-0013）。值 0-100 表示百分比。
+    CpuPressureSome,
+    MemPressureSome,
+    MemPressureFull,
+    IoPressureSome,
+    IoPressureFull,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +145,35 @@ impl MetricName {
             MetricName::CpuThrottlePercent => match snapshot.throttle_info() {
                 Some(ti) if ti.is_throttled => vec![(0, ti.throttle_pct as f64)],
                 _ => Vec::new(),
+            },
+            // v0.7 阶段 6：PSI 取 avg10（10s 滑动平均）作为告警依据 ——
+            // 比 avg60 / avg300 更敏感，能在压力出现时及时告警。
+            // 非 Linux / PSI 不可用时返回空 Vec，rule 自然不触发。
+            MetricName::CpuPressureSome => match snapshot.psi_stats() {
+                Some(psi) => vec![(0, f64::from(psi.cpu_some.avg10))],
+                None => Vec::new(),
+            },
+            MetricName::MemPressureSome => match snapshot.psi_stats() {
+                Some(psi) => vec![(0, f64::from(psi.mem_some.avg10))],
+                None => Vec::new(),
+            },
+            MetricName::MemPressureFull => match snapshot.psi_stats() {
+                Some(psi) => psi
+                    .mem_full
+                    .map(|f| vec![(0, f64::from(f.avg10))])
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            },
+            MetricName::IoPressureSome => match snapshot.psi_stats() {
+                Some(psi) => vec![(0, f64::from(psi.io_some.avg10))],
+                None => Vec::new(),
+            },
+            MetricName::IoPressureFull => match snapshot.psi_stats() {
+                Some(psi) => psi
+                    .io_full
+                    .map(|f| vec![(0, f64::from(f.avg10))])
+                    .unwrap_or_default(),
+                None => Vec::new(),
             },
         }
     }

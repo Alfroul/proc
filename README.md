@@ -2,7 +2,7 @@
 
 Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中。Windows 主开发平台，Linux/macOS 可降级运行。
 
-> **v0.6.0（2026-06-26）** 新增三大主题：**安全加固**（自我加固 / env 脱敏 / 录屏防护 / 子进程权限剥离）、**可观测性**（日志 rotate / crash report / worker metrics / `proc diag`）、**性能优化**（ProcessInfo Arc 化 / ProcessStatus 枚举 / 搜索缓存）。详见下方专门段。
+> **v0.7.0（2026-06-28）** 新增三大主题：**生态卡位**（`proc mcp serve` LLM agent 接入 / shell 补全 / Ctrl+P 命令面板 / FilterExpr 表达式搜索 `cpu > 5 AND name =~ /chrome/`）/ **平台深度**（Linux PSI 监控 / Win11 EcoQoS 切换 / Win ETW per-process 磁盘 IO / Linux eBPF flow graph）/ **架构债清理**（App 拆 5 个 panel controller）。全量回归 910 tests passed / 0 failed。详见 [CHANGELOG](CHANGELOG.md)。
 
 ## 功能
 
@@ -224,13 +224,63 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 | `proc handles [--pid N] [--file path]`<sup>v0.5.0</sup> | 枚举指定 PID 的所有句柄 / 反查占用路径的 PID 列表 |
 | `proc priority <pid> [--set normal]`<sup>v0.5.0</sup> | 查询 / 设置优先级（idle/belownormal/normal/abovenormal/high/realtime） |
 | `proc affinity <pid> [--set 0xFF]`<sup>v0.5.0</sup> | 查询 / 设置 CPU affinity mask |
+| `proc throttle <pid> on\|off`<sup>v0.7.0</sup> | Windows 11 EcoQoS / Efficiency Mode 切换（🍃 标记由 HeavyWorker 批量 query 维护） |
 | `proc smart [device]`<sup>v0.5.0</sup> | SMART 磁盘健康（省略 device 列出所有磁盘） |
 | `proc dns [--tail]`<sup>v0.5.0</sup> | DNS 查询日志（仅 Windows，内存 only） |
+| `proc flows [--limit N] [--json]`<sup>v0.7.0</sup> | eBPF flow graph（仅 Linux + `ebpf` feature；ADR-0016） |
 | `proc diag`<sup>v0.6.0</sup> | worker metrics JSON 输出（avg/max/polls/drops），bug 报告附上 |
 | `proc monitor --add --pid N` / `--remove ID` | 监控管理（按 `--pid` / `--port` / `--command`） |
 | `proc record` / `proc replay <file>` | VT100 录屏 |
 | `proc export --format json\|csv [-o file] [--sort] [--limit]` | 进程数据导出（含 ISO-8601 本地时间戳） |
 | `proc docker ps / inspect / top / logs / images / volumes / image-rm / volume-rm / compose / events / exec`<sup>v0.5.0</sup> | Docker 11 子命令 |
+| `proc mcp serve`<sup>v0.7.0</sup> | 启动 MCP server（stdio transport），把上述 17+ 子命令暴露为 `proc_*` MCP tools 供 Claude Desktop / Cursor 等 LLM agent 调用 |
+
+### MCP server（LLM agent 接入）<sup>v0.7.0</sup>
+
+`proc mcp serve` 把 proc 的进程 / 网络 / DNS / Docker 能力暴露为 [MCP](https://modelcontextprotocol.io/) tools，让 Claude Code / Cursor / Windsurf 等客户端直接调用。详见 [`docs/adr/0009-mcp-server.md`](docs/adr/0009-mcp-server.md)。
+
+**Claude Desktop 配置**（macOS：`~/Library/Application Support/Claude/claude_desktop_config.json`；Windows：`%APPDATA%\Claude\claude_desktop_config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "proc": {
+      "command": "proc",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+**Cursor / Windsurf 配置**（项目 `.cursor/mcp.json` 或全局）：同上 schema，把 `command` 改成 proc 的绝对路径（如 `C:\Users\YOU\.cargo\bin\proc.exe`）。
+
+**手动调试**：`npx mcp-inspector proc mcp serve` 在浏览器里看 schema、试调用。
+
+**可用 tool**（17 个）：
+
+| Tool | 对应 CLI | 返回 JSON |
+|---|---|---|
+| `proc_ls` | `proc ls` | `{ ok, sort, count, processes[] }` |
+| `proc_tree` | `proc tree` | `{ ok, roots[] }`（递归） |
+| `proc_port` | `proc port` | `{ ok, count, ports[] }` |
+| `proc_kill` | `proc kill` | `{ ok, pid, result }` |
+| `proc_pkill` | `proc pkill` | `{ ok, total, killed, failed, results[] }` |
+| `proc_eject` | `proc eject` | `{ ok, devices[] | locks[] }` |
+| `proc_who` | `proc who` | `{ ok, count, lockers[] }` |
+| `proc_handles` | `proc handles --pid` | `{ ok, count, handles[] }` |
+| `proc_priority` | `proc priority` | `{ ok, pid, action, priority }` |
+| `proc_affinity` | `proc affinity` | `{ ok, pid, action, affinity_mask }` |
+| `proc_smart` | `proc smart` | `{ ok, disks[] | disk }` |
+| `proc_dns` | `proc dns` | `{ ok, count, queries[] }`（drain 一次，非 tail） |
+| `proc_diag` | `proc diag --json` | `{ ok, workers[] }` |
+| `proc_monitor_list` | 监控配置快照 | `{ ok, count, monitors[] }` |
+| `proc_docker_ps` | `proc docker ps` | `{ ok, count, containers[] }` |
+| `proc_docker_top` | `proc docker top` | `{ ok, count, processes[] }` |
+| `proc_docker_logs` | `proc docker logs` | `{ ok, count, lines[] }`（非 follow） |
+
+未暴露（对 LLM 无意义）：`proc_record` / `proc_replay` / `proc_export`。后续阶段追加：`proc_psi` / `proc_throttle` / `proc_disk_io` / `proc_flows`。
+
+**字段裁剪**：`proc_ls` 不返回 `exe` / `cwd` / `user_id`，避免 LLM 上下文泄漏敏感路径（详见 ADR-0009）。
 
 ### 主题与持久化
 
@@ -258,6 +308,18 @@ winget install Alfroul.proc
 scoop install proc
 ```
 
+### Shell 补全（v0.7.0+）
+
+```bash
+# 在线生成补全脚本到 stdout，重定向到对应 shell 的补全目录。
+proc completions --shell bash    > ~/.bash_completion.d/proc
+proc completions --shell zsh     > ~/.zsh/completions/_proc
+proc completions --shell fish    > ~/.config/fish/completions/proc.fish
+proc completions --shell powershell > $PROFILE
+```
+
+Release artifact 也附带预生成的 4 个补全文件（`completions/` 目录），scoop / winget 安装时会一并部署。
+
 也可 `cargo install --path .` 装到 `~/.cargo/bin/`。
 
 ## 快捷键
@@ -267,6 +329,7 @@ scoop install proc
 | 键 | 功能 |
 |---|---|
 | `1-6` | 切换面板 |
+| **`Ctrl+P`**<sup>v0.7.0</sup> | **命令面板**（fuzzy 搜命令：kill / port panel / theme / sort by cpu / ...，~40 项直达，替代记忆键位） |
 | `v` | 切换进程视图（列表 ↔ 应用分组） |
 | `t` | 切换主题（持久化） |
 | `?` | 帮助页 |
@@ -367,7 +430,8 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 | per-core 频率<sup>v0.5.0</sup> | ✅ | ✅ sysfs cpufreq | ❌ |
 | per-core 温度<sup>v0.5.0</sup> | ✅ ACPI | ✅ hwmon | ❌ |
 | 每磁盘 I/O 速率 | ✅ | ❌ | ❌ |
-| 每进程磁盘 I/O | ✅ | ✅ | ✅ |
+| 每进程磁盘 I/O | ✅ sysinfo（IO 性能计数器） | ✅ | ✅ |
+| **每进程磁盘 I/O（ETW 高精度）**<sup>v0.7.0</sup> | ✅ NT Kernel Logger + DiskIo TypeGroup1（管理员；非管理员降级到 sysinfo） | ❌ | ❌ |
 | **GPU（多厂商）**<sup>v0.5.0</sup> | ✅ NVIDIA via NVML | ✅ AMD/Intel/NVIDIA via nvtop | ❌ |
 | **SMART 磁盘健康**<sup>v0.5.0</sup> | ✅ smartctl + WMI 降级 | ✅ smartctl | ✅ smartctl |
 | **per-process 网络流量**<sup>v0.5.0</sup> | ✅ IP Helper | ✅ nethogs 子进程 | ❌ |
@@ -376,6 +440,9 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 | **进程句柄 Tab**<sup>v0.5.0</sup> | ✅ NtQuerySystemInformation | ✅ /proc/\<pid\>/fd | ❌ |
 | **内存映射 Tab**<sup>v0.5.0</sup> | ✅ VirtualQueryEx | ✅ /proc/\<pid\>/maps | ❌ |
 | **进程优先级 / affinity**<sup>v0.5.0</sup> | ✅ SetPriorityClass / SetProcessAffinityMask | ✅ setpriority / sched_setaffinity | ❌ |
+| **Windows 11 EcoQoS 切换**<sup>v0.7.0</sup> | ✅ SetProcessInformation(ProcessPowerThrottling) + 进程列表 🍃 标记 | ❌（cgroup freezer / cpu.weight 留 v0.8+） | ❌ |
+| **Linux PSI 监控**<sup>v0.7.0</sup> | ❌ | ✅ /proc/pressure/{cpu,mem,io} + 监控面板 + 5 条 alert 规则 | ❌ |
+| **eBPF flow graph（端到端关联）**<sup>v0.7.0</sup> | ❌ | ⚠️ feature flag `ebpf`（内核 ≥ 5.10 + root / CAP_BPF）；端口面板按 `F` 进入 Flow 子视图 + `proc flows` CLI | ❌ |
 | **文件占用反查（who）**<sup>v0.5.0</sup> | ✅ filelocksmith | ⚠️ lsof 启发式 | ⚠️ lsof 启发式 |
 | **v0.6.0 安全加固**（self-mitigation / env mask / restricted spawn） | ✅ | ⚠️ self-mitigation 暂无（Linux prctl 留 v0.7+） | ⚠️ 同 Linux |
 | **v0.6.0 可观测性**（log rotate / crash report / worker metrics） | ✅ | ✅ | ✅ |
@@ -407,6 +474,12 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 **crash report 在哪？**<sup>v0.6.0</sup> `~/.config/proc/crashes/` 下：主线程 panic → `crash-{YYYYMMDD-HHMMSS}.txt`；worker 线程 panic → `crash-worker-{name}-{ts}.txt`。文件含时间戳 + proc 版本 + panic info + `Backtrace::force_capture()`。报 bug 时把对应文件附上。
 
 **日志为什么不覆盖了？**<sup>v0.6.0</sup> v0.5.0 以前启动时 `File::create` truncate 覆盖旧日志，崩溃前最后一段全丢。v0.6.0 起改为 `tracing-appender::RollingFileAppender::daily`，每天一个文件 `proc.logYYYY-MM-DD`，自动清理 7 天前的日志。
+
+**如何启用 eBPF flow graph？**<sup>v0.7.0</sup> 仅 Linux 平台，需自行编译：`cargo install --features ebpf` 或本仓库 `cargo build --release --features ebpf`。release CI 在 `linux-musl` / `linux-arm` 两个 target 各产一份 `proc_ebpf-{target}.tar.gz` 后缀二进制（v0.7.0 已加），解压拿到 `proc_ebpf` 单独运行。启动后端口面板按 `F` 进入 Flow 子视图，CLI 用 `proc flows`。详见 [ADR-0016](docs/adr/0016-ebpf-flow-graph.md)。
+
+**eBPF 需要什么权限？** root 或 `CAP_BPF` + `CAP_PERFMON` capability，内核 ≥ 5.10（CO-RE / BTF 支持）。Ubuntu 20.04+ / Debian 11+ / RHEL 9 默认满足。无权限 / 内核不满足 → `EbisuBpfWorker::try_spawn` 返回 `None`，UI 显示降级提示，proc 其它功能不受影响。
+
+**R15 安全评分（外联行为）怎么触发？**<sup>v0.7.0</sup> 默认不启用。需要显式创建 `~/.config/proc/sni_whitelist.txt`（一行一个允许的域名，`#` 开头注释），R15 才激活。两条命中条件（任一扣 30 分）：dns_name 不在白名单 / 10s 内 ≥ 50 个不同 IP（端口扫描特征）。空文件 = "所有 dns_name 都不在白名单"（用户自负）。详见 [ADR-0016](docs/adr/0016-ebpf-flow-graph.md#securityrule-r15-外联行为评分)。
 
 **worker 崩溃了怎么办？**<sup>v0.6.0</sup> TUI 顶部会渲染红色 banner（`[worker name] panicked: <message>`），按 `D` 清空。同时 crash report 写到 `crashes/crash-worker-*.txt`。worker 自身无热恢复（重启方法 `WorkerManager::restart` 未实现，见 [tech-debt](docs/tech-debt.md) TD-4），需重启 proc。
 

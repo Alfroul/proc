@@ -11,7 +11,7 @@ use crate::tree::TreeFilter;
 use crate::tui::theme;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
-    let visible = app.process_panel.get_filtered_tree_visible();
+    let visible = app.process_panel.panel.get_filtered_tree_visible();
     let rows_visible = area.height.saturating_sub(3) as usize;
 
     let header = Row::new(vec![
@@ -29,13 +29,17 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
     let rows: Vec<Row> = visible
         .iter()
-        .skip(app.process_panel.tree_scroll)
+        .skip(app.process_panel.panel.tree_scroll)
         .take(rows_visible)
         .enumerate()
         .map(|(i, node)| {
-            let global_i = i + app.process_panel.tree_scroll;
-            let is_cursor = global_i == app.process_panel.tree_cursor;
-            let is_selected = app.process_panel.tree_selected_pids.contains(&node.pid);
+            let global_i = i + app.process_panel.panel.tree_scroll;
+            let is_cursor = global_i == app.process_panel.panel.tree_cursor;
+            let is_selected = app
+                .process_panel
+                .panel
+                .tree_selected_pids
+                .contains(&node.pid);
 
             let checkbox = if is_selected { "☑ " } else { "☐ " };
 
@@ -143,29 +147,31 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     ];
 
     let (orphan_count, zombie_count) = {
-        let filtered =
-            crate::tree::filter_tree(&app.process_panel.tree_nodes, app.process_panel.tree_filter);
+        let filtered = crate::tree::filter_tree(
+            &app.process_panel.panel.tree_nodes,
+            app.process_panel.panel.tree_filter,
+        );
         crate::tree::count_anomalies(&filtered)
     };
 
-    let filter_label = match app.process_panel.tree_filter {
+    let filter_label = match app.process_panel.panel.tree_filter {
         TreeFilter::All => "全部",
         TreeFilter::MyProcesses => "用户进程",
         TreeFilter::SystemProcesses => "系统进程",
     };
 
-    let search_indicator = if app.process_panel.tree_search.is_active() {
+    let search_indicator = if app.process_panel.panel.tree_search.is_active() {
         format!(
             " | 搜索: {} | ESC取消",
-            app.process_panel.tree_search.query()
+            app.process_panel.panel.tree_search.query()
         )
-    } else if !app.process_panel.tree_search.query().is_empty() {
-        format!(" | 过滤: {}", app.process_panel.tree_search.query())
+    } else if !app.process_panel.panel.tree_search.query().is_empty() {
+        format!(" | 过滤: {}", app.process_panel.panel.tree_search.query())
     } else {
         String::new()
     };
 
-    let selected_count = app.process_panel.tree_selected_pids.len();
+    let selected_count = app.process_panel.panel.tree_selected_pids.len();
     let selected_info = if selected_count > 0 {
         format!(" | 已选{}个", selected_count)
     } else {
@@ -178,7 +184,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         String::new()
     };
 
-    let sort_indicator = format!("排序: {} ◀▶切换", app.process_panel.tree_sort_field.label());
+    let sort_indicator = format!(
+        "排序: {} ◀▶切换",
+        app.process_panel.panel.tree_sort_field.label()
+    );
 
     let title = format!(
         "进程树 | {} f切换 | {}{}{}{}",
@@ -195,8 +204,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let mut state = TableState::default();
     let visible_cursor = app
         .process_panel
+        .panel
         .tree_cursor
-        .saturating_sub(app.process_panel.tree_scroll);
+        .saturating_sub(app.process_panel.panel.tree_scroll);
     state.select(Some(visible_cursor));
     f.render_stateful_widget(table, area, &mut state);
 }

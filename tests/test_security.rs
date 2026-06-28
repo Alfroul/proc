@@ -32,6 +32,7 @@ fn make_proc(
         start_time: 0,
         run_time: 0,
         name_lower: std::sync::Arc::from(name_arc.to_lowercase().as_str()),
+        throttled: proc::throttle::EcoQoSState::default(),
     }
 }
 
@@ -424,8 +425,8 @@ fn test_score_cache_hit() {
     let proc = make_proc(1, "test.exe", Some("C:\\test.exe"), vec![], None);
     let all_procs = vec![proc.clone()];
 
-    let score1 = scorer.score(&proc, &all_procs, &[]);
-    let score2 = scorer.score(&proc, &all_procs, &[]);
+    let score1 = scorer.score(&proc, &all_procs, &[], &[]);
+    let score2 = scorer.score(&proc, &all_procs, &[], &[]);
 
     assert_eq!(score1.score, score2.score, "Cached score should match");
     assert_eq!(score1.factors.len(), score2.factors.len());
@@ -438,14 +439,14 @@ fn test_score_cache_invalidation() {
     proc.start_time = 100;
     let all_procs = vec![proc.clone()];
 
-    let _score1 = scorer.score(&proc, &all_procs, &[]);
+    let _score1 = scorer.score(&proc, &all_procs, &[], &[]);
 
     // 仅 (pid=2, _) 存活 —— (1, 100) 应被清掉。
     let mut alive = std::collections::HashSet::new();
     alive.insert((2, 0));
     scorer.invalidate_dead(&alive);
 
-    let score2 = scorer.score(&proc, &all_procs, &[]);
+    let score2 = scorer.score(&proc, &all_procs, &[], &[]);
     assert!(score2.score <= 100);
 }
 
@@ -459,7 +460,7 @@ fn test_score_cache_pid_reuse_isolation() {
     let mut proc_a = make_proc(1234, "test.exe", Some("C:\\test.exe"), vec![], None);
     proc_a.start_time = 1000;
     let all_a = vec![proc_a.clone()];
-    let score_a = scorer.score(&proc_a, &all_a, &[]);
+    let score_a = scorer.score(&proc_a, &all_a, &[], &[]);
 
     // B: 同 PID, 同 exe, 不同 start_time —— 模拟 OS 复用 PID
     let mut proc_b = make_proc(1234, "test.exe", Some("C:\\test.exe"), vec![], None);
@@ -468,7 +469,7 @@ fn test_score_cache_pid_reuse_isolation() {
 
     // 缓存里 A 的 entry 不应该被 B 命中：score() 必须重新跑一遍签名检查等。
     // 用 factors 数量间接验证 —— 重新评分与首次评分的 factors 长度一致。
-    let score_b = scorer.score(&proc_b, &all_b, &[]);
+    let score_b = scorer.score(&proc_b, &all_b, &[], &[]);
     assert_eq!(
         score_b.factors.len(),
         score_a.factors.len(),
@@ -482,8 +483,62 @@ fn test_score_cache_pid_reuse_isolation() {
     scorer.invalidate_dead(&alive);
 
     // 再次评 B：B 还在 alive 集合里，缓存应命中，得分不变。
-    let score_b_cached = scorer.score(&proc_b, &all_b, &[]);
+    let score_b_cached = scorer.score(&proc_b, &all_b, &[], &[]);
     assert_eq!(score_b.score, score_b_cached.score);
+}
+
+/// v0.7 阶段 8 R15：端口扫描模式应在 SecurityScorer::score 中命中扣 30 分。
+///
+/// 注：dons_name=None → cond1（SNI 白名单）即便 SniWhitelist 加载到也不会触发。
+/// 因此本测试不依赖 `~/.config/proc/sni_whitelist.txt` 文件状态。
+#[test]
+fn test_r15_port_scan_integration() {
+    use proc::ebpf::flow::ProcessFlow;
+
+    let mut scorer = SecurityScorer::new();
+    let mut proc = make_proc(4321, "scanner.exe", Some("C:\\scanner.exe"), vec![], None);
+    proc.start_time = 999;
+    let all_procs = vec![proc.clone()];
+
+    let now = std::time::SystemTime::now();
+    let flows: Vec<ProcessFlow> = (0..60)
+        .map(|i| ProcessFlow {
+            pid: 4321,
+            start_time: 999,
+            comm: String::new(),
+            local_addr: String::new(),
+            remote_addr: format!("10.0.0.{i}"),
+            remote_port: 443,
+            bytes_out: 0,
+            bytes_in: 0,
+            dns_name: None,
+            first_seen: now,
+            last_seen: now,
+            exit_time: None,
+        })
+        .collect();
+
+    let score = scorer.score(&proc, &all_procs, &[], &flows);
+    let r15 = score
+        .factors
+        .iter()
+        .find(|f| f.name == "r15_port_scan")
+        .expect("R15 端口扫描模式应命中");
+    assert_eq!(r15.weight, 30);
+    assert_eq!(r15.category, RiskCategory::NetworkBehavior);
+}
+
+/// v0.7 阶段 8 R15：无 flows（典型 Windows / 无 ebpf feature 路径）→ 不应命中 R15。
+#[test]
+fn test_r15_disabled_when_flows_empty() {
+    let mut scorer = SecurityScorer::new();
+    let proc = make_proc(4321, "scanner.exe", Some("C:\\scanner.exe"), vec![], None);
+    let all_procs = vec![proc.clone()];
+
+    let score = scorer.score(&proc, &all_procs, &[], &[]);
+    let r15 = score.factors.iter().find(|f| f.name.starts_with("r15_"));
+    // 任何 r15_* 因子都不应出现（无 flows 任何条件都不会触发）
+    assert!(r15.is_none(), "无 flows 时 R15 不应命中，但看到: {:?}", r15);
 }
 
 #[test]

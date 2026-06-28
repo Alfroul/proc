@@ -189,6 +189,17 @@ pub fn cycle_theme() {
     save_theme(new);
 }
 
+/// v0.7 阶段 3：直接跳到第 `idx` 个主题（命令面板 `SetTheme(N)` 用）。
+/// 越界时静默 clamp 到合法区间 —— 命令注册侧已保证 0-9。
+pub fn set_theme_index(idx: usize) {
+    init_persisted_theme();
+    if idx >= THEMES.len() {
+        return;
+    }
+    THEME_INDEX.store(idx, Ordering::Relaxed);
+    save_theme(idx);
+}
+
 #[must_use]
 pub fn theme_name() -> &'static str {
     current().name

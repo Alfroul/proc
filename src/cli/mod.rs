@@ -5,19 +5,24 @@ pub mod def;
 pub mod diag;
 pub mod dns;
 pub mod docker_cmd;
+// v0.7 阶段 3：`proc completions --shell <SHELL>` 在线生成补全脚本。
+pub mod completions;
 pub mod eject;
 pub mod export;
+pub mod flows;
 pub mod handles;
 pub mod kill;
 pub mod ls;
+pub mod mcp_cmd;
 pub mod monitor;
 pub mod port;
 pub mod priority;
 pub mod record;
 pub mod smart;
+pub mod throttle;
 
 // 让旧路径 `proc::cli::Cli` / `proc::cli::Command` / `proc::cli::DockerSub` 继续 work。
-pub use def::{Cli, Command, DockerSub};
+pub use def::{Cli, Command, DockerSub, McpSub};
 
 /// CLI dispatch 总入口 — `main.rs` 收到 `cli_args.command` 后转交给它。
 ///
@@ -25,7 +30,11 @@ pub use def::{Cli, Command, DockerSub};
 /// 此处仅做 match dispatch。本函数与 `def.rs::Command` 同步演进。
 pub fn run_subcommand(cmd: &Command) {
     match cmd {
-        Command::Ls { sort, limit } => ls::run_ls(sort, limit),
+        Command::Ls {
+            sort,
+            limit,
+            filter,
+        } => ls::run_ls(sort, limit, filter),
         Command::Kill { pid, force } => kill::run_kill(*pid, *force),
         Command::Pkill {
             name,
@@ -43,6 +52,8 @@ pub fn run_subcommand(cmd: &Command) {
         Command::Handles { pid, file } => handles::run_handles(pid, file),
         Command::Priority { pid, set } => priority::run_priority(*pid, set),
         Command::Affinity { pid, set } => priority::run_affinity(*pid, set),
+        // v0.7 阶段 6：`proc throttle <pid> on|off` —— Windows 11 EcoQoS。
+        Command::Throttle { pid, state } => throttle::run_throttle(*pid, state),
         Command::Monitor {
             add,
             remove,
@@ -53,6 +64,8 @@ pub fn run_subcommand(cmd: &Command) {
         Command::Docker { sub } => docker_cmd::run_docker(sub),
         Command::Smart { device } => smart::run_smart(device.as_deref()),
         Command::Dns { tail, since } => dns::run_dns(*tail, since.as_deref()),
+        // v0.7 阶段 8：`proc flows` —— eBPF flow graph CLI 视图（ADR-0016）。
+        Command::Flows { limit, json } => flows::run_flows(*limit, *json),
         Command::Record { output } => record::run_record(output),
         Command::Replay { file } => record::run_replay(file),
         Command::Export {
@@ -62,5 +75,13 @@ pub fn run_subcommand(cmd: &Command) {
             limit,
         } => export::run_export(format, output, sort, limit),
         Command::Diag { json } => diag::run_diag(*json),
+        // v0.7.0 阶段 2：`proc mcp serve` 启动 stdio MCP server。
+        // `sub=None` 时 fall back 到 `serve`，让 `proc mcp` 等价 `proc mcp serve`。
+        Command::Mcp { sub } => match sub {
+            Some(s) => mcp_cmd::run_mcp(s),
+            None => mcp_cmd::run_mcp(&McpSub::Serve),
+        },
+        // v0.7.0 阶段 3：`proc completions --shell <SHELL>` 在线生成补全脚本。
+        Command::Completions { shell } => completions::run_completions(*shell),
     }
 }

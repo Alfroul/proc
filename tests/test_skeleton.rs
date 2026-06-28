@@ -113,7 +113,11 @@ fn test_cli_ls_parsing() {
     let cli = Cli::try_parse_from(["proc", "ls", "--sort", "mem", "--limit", "10"]);
     let cli = cli.expect("CLI parse should succeed");
     match cli.command {
-        Some(Command::Ls { sort, limit }) => {
+        Some(Command::Ls {
+            sort,
+            limit,
+            filter: _,
+        }) => {
             assert_eq!(sort, "mem");
             assert_eq!(limit, Some(10));
         }
@@ -248,6 +252,7 @@ fn test_process_info_construction() {
         start_time: 1000,
         run_time: 500,
         name_lower: std::sync::Arc::from("test.exe"),
+        throttled: proc::throttle::EcoQoSState::default(),
     };
     assert_eq!(info.pid, 1234);
     assert_eq!(info.name.as_ref(), "test.exe");
@@ -493,9 +498,10 @@ fn test_security_scorer_returns_100() {
         start_time: 0,
         run_time: 0,
         name_lower: std::sync::Arc::from("test.exe"),
+        throttled: proc::throttle::EcoQoSState::default(),
     };
     let all_procs = vec![proc.clone()];
-    let score = scorer.score(&proc, &all_procs, &[]);
+    let score = scorer.score(&proc, &all_procs, &[], &[]);
     // Score may not be 100 depending on signature status (non-elevated)
     assert!(score.score <= 100);
 }

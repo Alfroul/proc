@@ -4,11 +4,13 @@
 
 **目标**：键位 'r' / 'c' 去歧义（#12/#13）；引入 proptest + criterion + Linux stub 测试。
 
+> ⚠ **v0.6.0 实际只做了任务 1/2（键位修复），任务 3-5（proptest / criterion / Linux stub）推迟到 v0.7.0+** — 见 `CHANGELOG.md` 阶段 6 段说明。本文件剩余内容应作为 v0.7.0+ 评估输入，不要作为 v0.6.0 已落地内容引用。
+
 **前置依赖**：阶段 5 已完成（Controller 已抽出，键位改在 controller 内更容易）。
 
 **依赖测试**（开工时跑这些测试的详情）：
-- `cargo test --release --tb=no -q`（全量回归 summary，应 ~691）
-- `cargo test --release test_inspector test_workers --tb=no -q`（阶段 5 拆分后必须不破坏的测试）
+- `cargo test --release -q`（全量回归 summary，应 ~691）
+- `cargo test --release test_inspector test_workers -q`（阶段 5 拆分后必须不破坏的测试）
 - 在 Linux CI runner 上跑 `cargo test --release test_inspect_stub test_eject_stub test_gpu_stub`（阶段 6 新增 Linux stub 测试）
 
 **预期代码量**：~800 行（含测试）
@@ -465,7 +467,7 @@ CONTEXT.md：「术语演进历史」段 r/c 键位变更条目标「阶段 6 �
 ### 验收命令
 
 ```bash
-cargo test --release --tb=no -q    # 阶段 5 完工后 ~691 → 阶段 6 新增 ~50 → ~741
+cargo test --release -q    # 阶段 5 完工后 ~691 → 阶段 6 新增 ~50 → ~741
 cargo clippy --release --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo build --release --no-default-features

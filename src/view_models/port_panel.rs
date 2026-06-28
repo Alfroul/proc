@@ -92,6 +92,14 @@ pub struct PortPanel {
     pub dns_scroll: usize,
     pub dns_follow: bool,
     pub dns_search: crate::search::SearchState,
+
+    // v0.7 阶段 8：eBPF Flow 子视图（ADR-0016）。按 `F`（大写）切换。
+    // 独立子模式：flow_view_active=true 时 port_table 渲染 App::flows 列表
+    // （pid / comm / remote_addr / remote_port / dns_name / first_seen）。
+    // 非 Linux / 无 ebpf feature 时进入会显示「需要 Linux + ebpf feature」提示。
+    pub flow_view_active: bool,
+    pub flow_cursor: usize,
+    pub flow_scroll: usize,
 }
 
 /// DNS 子视图列表行数（每行一条 DnsQuery）。filtered = 搜索过滤后剩余条数。
@@ -188,6 +196,9 @@ impl PortPanel {
             dns_scroll: 0,
             dns_follow: true,
             dns_search: crate::search::SearchState::new(),
+            flow_view_active: false,
+            flow_cursor: 0,
+            flow_scroll: 0,
         }
     }
 
@@ -697,6 +708,60 @@ impl PortPanel {
             .collect()
     }
 
+    /// v0.7 阶段 8：Flow 子视图按键处理（ADR-0016）。
+    /// 简化版 MVP：只支持光标移动 + Esc/F 退出，无搜索（DNS 子视图的搜索
+    /// 列可在 Part B 复用 `dns_search` 模式加，目前 flows 通常很少 ≤ 50 条）。
+    fn handle_flow_view_key(&mut self, key: KeyEvent) -> KeyResult {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('F') => {
+                self.flow_view_active = false;
+                KeyResult::Consumed
+            }
+            KeyCode::Up => {
+                self.flow_cursor = self.flow_cursor.saturating_sub(1);
+                KeyResult::Consumed
+            }
+            KeyCode::Down => {
+                self.flow_cursor = self.flow_cursor.saturating_add(1);
+                KeyResult::Consumed
+            }
+            KeyCode::PageUp => {
+                self.flow_cursor = self.flow_cursor.saturating_sub(10);
+                KeyResult::Consumed
+            }
+            KeyCode::PageDown => {
+                self.flow_cursor = self.flow_cursor.saturating_add(10);
+                KeyResult::Consumed
+            }
+            KeyCode::Home => {
+                self.flow_cursor = 0;
+                KeyResult::Consumed
+            }
+            KeyCode::End => {
+                // End 需要总数；用 saturating_add(usize::MAX / 2) 让 clamp 处理。
+                self.flow_cursor = self.flow_cursor.saturating_add(usize::MAX / 2);
+                KeyResult::Consumed
+            }
+            _ => KeyResult::Ignored,
+        }
+    }
+
+    /// 主线程 tick 后调，clamp `flow_cursor` 到当前 flows 列表范围。
+    pub(crate) fn flow_clamp_cursor(&mut self, total: usize) {
+        if total == 0 {
+            self.flow_cursor = 0;
+            self.flow_scroll = 0;
+            return;
+        }
+        if self.flow_cursor >= total {
+            self.flow_cursor = total - 1;
+        }
+        // 简单 scroll 跟随：cursor < scroll → scroll = cursor；cursor >= scroll+window → scroll 跟进
+        if self.flow_cursor < self.flow_scroll {
+            self.flow_scroll = self.flow_cursor;
+        }
+    }
+
     fn handle_anomaly_detail_key(&mut self, key: KeyEvent) -> KeyResult {
         let visible = self.visible_anomalies();
         match key.code {
@@ -788,6 +853,11 @@ impl Panel for PortPanel {
             return self.handle_dns_view_key(key, ctx);
         }
 
+        // v0.7 阶段 8 Flow 子视图：激活后接管所有按键（除 `F`/`Esc` 退出外）。
+        if self.flow_view_active {
+            return self.handle_flow_view_key(key);
+        }
+
         // Anomaly detail overlay
         if self.show_anomaly_detail {
             return self.handle_anomaly_detail_key(key);
@@ -806,6 +876,13 @@ impl Panel for PortPanel {
                 self.dns_scroll = 0;
                 self.dns_follow = true;
                 self.dns_search.clear();
+                return KeyResult::Consumed;
+            }
+            KeyCode::Char('F') => {
+                // v0.7 阶段 8：进入 Flow 子视图（小写 f 留给 state filter 切换）
+                self.flow_view_active = true;
+                self.flow_cursor = 0;
+                self.flow_scroll = 0;
                 return KeyResult::Consumed;
             }
             KeyCode::Char('q') => return KeyResult::Quit,

@@ -24,6 +24,13 @@ pub enum Command {
         /// 限制显示数量
         #[arg(long)]
         limit: Option<usize>,
+
+        /// v0.7 阶段 4：过滤表达式（ADR-0011）。例：`cpu > 5 AND name =~ /chrome/i`。
+        /// 详细语法见 `?` 帮助页 FilterExpr 段或 docs/adr/0011-filter-expression.md。
+        /// 注意：CLI 模式不计算 security_score，过滤表达式中 security_score 字段
+        /// 默认按 100 处理（不会报错但语义偏）。
+        #[arg(long)]
+        filter: Option<String>,
     },
 
     /// 进程树
@@ -115,6 +122,18 @@ pub enum Command {
         set: Option<String>,
     },
 
+    /// v0.7 阶段 6：切换 Windows 11 EcoQoS / Efficiency Mode（ADR-0014）。
+    /// `on` 启用（进程降频 / 调度到 E-core / 降功耗）；`off` 恢复 Normal。
+    /// Windows 11+ only；其它平台返回错误。
+    Throttle {
+        /// 目标进程 PID
+        pid: u32,
+
+        /// on = 启用 EcoQoS，off = 禁用
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+
     /// 进程监控
     Monitor {
         /// 添加监控
@@ -161,6 +180,23 @@ pub enum Command {
         since: Option<String>,
     },
 
+    /// v0.7 阶段 8：列出活跃 ProcessFlow（eBPF 关联：pid + 远端 + DNS）。
+    /// 仅 Linux + `ebpf` feature 启用时返回真实数据；其它平台给出降级提示。
+    /// 详见 docs/adr/0016-ebpf-flow-graph.md。
+    #[command(
+        name = "flows",
+        about = "List active process flows (Linux + ebpf feature)"
+    )]
+    Flows {
+        /// 限制显示条数（默认全部）
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// 输出 JSON（默认 human-readable 表格）
+        #[arg(long)]
+        json: bool,
+    },
+
     /// 录制系统快照
     Record {
         /// 输出文件路径（默认: ~/.config/proc/recordings/recording_{timestamp}.prec）
@@ -200,6 +236,35 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// v0.7.0 阶段 2：MCP server 模式（stdio transport）。
+    /// 把 proc 的 17+ CLI 子命令暴露为 MCP tools 供 LLM agent 调用。
+    /// 详见 docs/adr/0009-mcp-server.md。
+    #[command(name = "mcp", about = "MCP server mode (stdio transport)")]
+    Mcp {
+        #[command(subcommand)]
+        sub: Option<McpSub>,
+    },
+
+    /// v0.7.0 阶段 3：生成 shell 补全脚本（bash / zsh / fish / powershell / elvish）。
+    /// 用法示例：`proc completions --shell bash > ~/.bash_completion.d/proc`
+    #[command(name = "completions", about = "Generate shell completions")]
+    Completions {
+        /// Target shell
+        #[arg(long, short)]
+        shell: clap_complete::Shell,
+    },
+}
+
+/// `proc mcp <sub>` — v0.7.0 阶段 2 新增。
+///
+/// 第一版只有 `serve`（启动 stdio MCP server）。未来可能扩 `list`（打印 tool 清单）
+/// 和 `inspect <tool>`（打印某 tool 的 schema）—— v0.8 评估。
+#[derive(Subcommand, Debug)]
+pub enum McpSub {
+    /// 启动 MCP server（stdio transport），阻塞直到 client 关闭流。
+    /// 接入 Claude Desktop / Cursor 见 docs/adr/0009-mcp-server.md。
+    Serve,
 }
 
 /// Docker 子命令（E3/E4/E1）。

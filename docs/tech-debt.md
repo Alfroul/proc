@@ -7,7 +7,7 @@
 
 ## v0.7.0 候选（11 项）
 
-### TD-1（P2-1）：清理文档中错误的 `--tb=no` 测试参数
+### TD-1（P2-1）：清理文档中错误的 `--tb=no` 测试参数 ✅ Fixed in v0.7.0 阶段 1
 
 **位置**：`CONTRIBUTING.md:28` / `plan.md:209` / `docs/stages/stage-{2,3,4,5,6,7}.md` 多处
 **现状**：文档把 `cargo test --release --tb=no -q` 当作命令。`--tb=no` 是 pytest 参数，cargo test 不认（实测报错 `unexpected argument '--tb'`）。
@@ -15,7 +15,7 @@
 **修复**：全文 grep `--tb=no` 删除（保留 `cargo test --release -q`）。
 **验证**：`grep -rn "--tb=no" .` 应无结果。
 
-### TD-2（P2-2）：stage-6.md 标注任务 3-5 推迟
+### TD-2（P2-2）：stage-6.md 标注任务 3-5 推迟 ✅ Fixed in v0.7.0 阶段 1
 
 **位置**：`docs/stages/stage-6.md:5`
 **现状**：第 5 行「目标」仍写「引入 proptest + criterion + Linux stub 测试」，但 CHANGELOG 第 51-53 行已明确"任务 3-5 不在本 slice 范围"。
@@ -23,7 +23,7 @@
 **修复**：stage-6.md 头部加"⚠ v0.6.0 实际只做了任务 1/2（键位修复），任务 3-5（proptest/criterion/Linux stub）推迟到 v0.7.0+ — 见 CHANGELOG"。
 **验证**：stage-6.md 头部包含推迟声明。
 
-### TD-3（P2-3）：stage-7.md 切片 E 假设错误
+### TD-3（P2-3）：stage-7.md 切片 E 假设错误 ✅ Fixed in v0.7.0 阶段 1
 
 **位置**：`docs/stages/stage-7.md:59-60`
 **现状**：第 59-60 行问"proptest 是否覆盖了真实的 panic 路径" / "criterion bench 的 mock_process 是否反映真实数据分布"。项目从未引入这两个工具。
@@ -31,7 +31,7 @@
 **修复**：stage-7.md 切片 E 改问"是否需要引入 proptest（v0.7.0+ 评估）" / "性能回归测试是否覆盖 hot path"。
 **验证**：stage-7.md 切片 E 不再假设 proptest/criterion 存在。
 
-### TD-4（P2-4）：CONTEXT.md 显眼标注 WorkerManager::restart 未实现
+### TD-4（P2-4）：CONTEXT.md 显眼标注 WorkerManager::restart 未实现 ✅ Fixed in v0.7.0 阶段 1
 
 **位置**：`CONTEXT.md:55`
 **现状**：第 55 行写"restart(name) 故障恢复方法尚未实现（无调用方，surgical 原则不预实现）"，但藏在表格里不够显眼。
@@ -39,7 +39,7 @@
 **修复**：CONTEXT.md 顶部加"已知限制"段或 ⚠️ 标注；README 平台支持表加"worker 崩溃后只能重启 proc"。
 **验证**：CONTEXT.md 顶部"已知限制"段含 restart 条目。
 
-### TD-5（P2-5）：WorkerManager 含 Docker worker metrics
+### TD-5（P2-5）：WorkerManager 含 Docker worker metrics ✅ Fixed in v0.7.0 阶段 1
 
 **位置**：`src/workers/manager.rs:7-9` / `src/cli/diag.rs:25`
 **现状**：Docker logs worker 由 `DockerPanel` 自管（生命周期与 panel 绑定），`metrics_snapshot()` 不含它。`proc diag` 输出缺 Docker 行。
@@ -47,15 +47,15 @@
 **修复**：让 `DockerPanel` 实现 `metrics()` 接口（或暴露 `Arc<WorkerMetrics>`），App::worker_metrics 追加 Docker 行。注意 DockerPanel 可能 spawn 多个 logs worker（每容器一个），需聚合。
 **验证**：`proc diag --json` 输出含 `{"name": "docker_logs_*", ...}`。
 
-### TD-6（P2-6）：App 进一步拆 5 个 panel controller
+### TD-6（P2-6）：App 进一步拆 5 个 panel controller ✅ Fixed in v0.7.0 阶段 5
 
 **位置**：`src/app.rs`（1707 行 / 40+ 字段）
-**现状**：v0.6.0 阶段 5 已拆出 InspectorController / ReplayController / WorkerManager（共 15 字段）。剩余 5 个 panel 字段（process_panel / port_panel / usb_panel / monitor_panel / docker_panel）仍直接持在 App。
-**影响**：App 仍是协调器 + 部分状态混合；新功能加在 panel 时 App 字段会再膨胀。
-**修复**：v0.7.0+ 评估把 5 个 panel 拆出对应 controller（PortPanelController / UsbPanelController / MonitorPanelController / DockerPanelController / ProcessPanelController），App 只持 controller 引用 + 全局状态（mode/snapshot/should_quit/...）。
-**验证**：App 字段数从 40+ 降到 < 20；App::handle_key 简化为 dispatch。
+**现状（已修复）**：v0.6.0 阶段 5 已拆出 InspectorController / ReplayController / WorkerManager（共 15 字段）。v0.7.0 阶段 5 把剩余 5 个 panel 字段（process_panel / port_panel / usb_panel / monitor_panel / docker_panel）拆出对应 controller。App 字段类型 `XxxPanel` → `XxxPanelController`，字段名保留（外部访问路径 `app.xxx_panel.panel.<field>`）。
+**影响**：App 仍是协调器 + 全局状态容器；新功能加 panel 时只动对应 controller，不膨胀 App。
+**修复（已落地）**：5 个 controller（`src/view_models/{process,port,usb,monitor,docker}_panel_controller.rs`），每个包装 inner panel + 提供 `panel()` / `panel_mut()` 访问器 + `handle_key` forward。`PanelAction` 枚举统一副作用，与 InspectorAction / ReplayAction 共存（v0.8 评估合并）。详见 ADR-0012。
+**验证**：`tests/test_panel_controllers.rs` 6 case + 全量 100 passed；App::handle_key dispatch 改用 PanelAction；`wc -l src/app.rs` 受 ADR-0012 metrics 部分达成（handle_key 切到 PanelAction dispatch；app.rs 主体受其他阶段影响未压到 ≤ 1000，留 v0.7 阶段 6+ 评估）。
 
-### TD-7（P2-7）：test_stage8_perf_regress.rs 改名
+### TD-7（P2-7）：test_stage8_perf_regress.rs 改名 ✅ Fixed in v0.7.0 阶段 1
 
 **位置**：`tests/test_stage8_perf_regress.rs`
 **现状**：文件注释写"Stage-8 一次性性能回归基线"，但实际是 stage-4 落地时一起写的（ProcessInfo 字段对齐）。当前在 stage-7，stage-8 还没开始。
@@ -63,7 +63,7 @@
 **修复**：改名 `test_perf_baseline.rs`（或 `test_stage4_perf_regress.rs`）；注释更新。
 **验证**：`grep -rn "stage8_perf" .` 应只在 git history / 旧引用出现。
 
-### TD-8（P2-8）：help_panel Workers 区段自适应列宽
+### TD-8（P2-8）：help_panel Workers 区段自适应列宽 ✅ Fixed in v0.7.0 阶段 1
 
 **位置**：`src/tui/help_panel.rs:156-178`
 **现状**：硬编码列宽 `name<10` `avg>5μs` `max>5μs` `polls>7` `drops>5`。worker 名 > 10 字符（如 `dns_log_worker` = 14）破坏对齐；终端窄时 `Paragraph::wrap(Wrap{trim:false})` 让整行软换行打乱表格。
@@ -71,7 +71,7 @@
 **修复**：worker 名 truncate 到 10 字符 + ellipsis；或改用 `Table` widget 替代 `Paragraph` + 手工对齐。
 **验证**：worker 名 14 字符时表格列对齐无错位。
 
-### TD-9（P2-9）：SearchState 增量 lowercase append
+### TD-9（P2-9）：SearchState 增量 lowercase append ✅ Fixed in v0.7.0 阶段 1
 
 **位置**：`src/search.rs:50-56`
 **现状**：每次按键 `self.query_lower = self.query.to_lowercase()` 整体重算。注释承认"保持简单"未做增量。
@@ -79,7 +79,7 @@
 **修复**：`Char(c)` 时 `query_lower.push(c.to_ascii_lowercase())`（c 已经是 char，O(1)）；`Backspace` 时 `query_lower.pop()`。Unicode 大小写映射复杂的字符（如 `İ` → `i̇`）走整体重算 fallback。
 **验证**：criterion bench（如 v0.7.0 引入）显示 query=64 时 lowercase 耗时降一个数量级。
 
-### TD-10（P2-10）：DNS PowerShell probe 也走 restricted_spawn
+### TD-10（P2-10）：DNS PowerShell probe 也走 restricted_spawn ✅ Fixed in v0.7.0 阶段 1
 
 **位置**：`src/dns_log/windows_dns.rs:238`
 **现状**：probe `Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"])` 未走 restricted_spawn。
@@ -95,9 +95,19 @@
 **修复**：v0.7.0+ 评估是否对所有 watchdog spawn 走 restricted_spawn（可能破坏用户依赖 elevated token 的自定义命令 — 需 config 选项 "inherit_privileges"）。
 **验证**：决策落地后 — 文档说明 watchdog spawn 的权限模型。
 
+> **决策（v0.7.0 阶段 1）**：**不修**。watchdog spawn 是用户主动配置的命令
+> （`alerts.toml` 自定义），威胁模型与 DNS PowerShell probe 本质不同：
+> 1. PowerShell 走 `-Command` 接受任意脚本，是 RCE 经典跳板；
+> 2. watchdog 命令是用户自己写的 binary / shell pipeline，用户最清楚是否需要
+>    elevated token（如某些运维命令依赖 SeDebugPrivilege）。
+>
+> 强制走 restricted_spawn 会破坏依赖 elevated token 的合法用例，引入
+> `inherit_privileges` config 选项又会让用户困惑。v0.8.0+ 若有真实需求反馈
+> 再加 config 开关；现在不预实现。
+
 ---
 
-## v0.8.0+ 候选（3 项）
+## v0.8.0+ 候选（6 项）
 
 ### TD-12（P2-12）：Linux stub 测试覆盖增强
 
@@ -115,13 +125,63 @@
 **修复**：阶段 8 验证 GitHub Actions Linux job 实际跑了 `test_inspector.rs` / `test_platform_compat.rs` 的 Linux 部分；若没跑，加 `cargo test --release` 到 Linux CI step。
 **验证**：CI Linux job log 显示测试数 > 0（不是"0 tests run"）。
 
-### TD-14（P2-14）：panic hook chain 时序验证
+### TD-14（P2-14）：panic hook chain 时序验证 ✅ Fixed in v0.7.0 阶段 1
 
 **位置**：`src/main.rs:60-61` + `src/tui/mod.rs::setup_terminal`（未读）
 **现状**：`main.rs` 先 `init_tracing` 再 `install_panic_hook`；`run_tui` 内 `setup_terminal` 会用 `take_hook` chain 我们的 hook。需验证 chain 顺序：terminal restore → crash report → 默认 hook。
 **影响**：若顺序错，TUI 模式 panic 时终端可能不被 restore（用户看到乱码），或 crash report 不写盘。
 **修复**：阶段 8 在 TUI 模式手动触发 panic（如临时加 `panic!("test")` 到 tick），验证：终端正常恢复 + `crashes/` 下出现文件 + stderr 有崩溃提示。
 **验证**：手动触发 panic 后终端正常 + crash report 生成。
+
+### TD-15：FilterExpr 仅接入 List view（Tree / AppGroup 视图保留 substring）— v0.7.0 阶段 4 遗留
+
+**位置**：`src/view_models/process_panel.rs::handle_tree_key` / `handle_app_group_key` / `app_group_filtered_visual_items`
+**现状**：v0.7.0 阶段 4 把 FilterExpr 接入了 List view（`:` 激活 + cached_sorted 缓存按 mode 分支）。Tree / AppGroup 视图按 ADR-0011 task #7 计划接入，但实际数据模型不匹配：
+- Tree view 的 `tree::TreeNode` 是 `ProcessInfo` 派生的精简结构，但 filter 通过 `get_filtered_tree_visible()` 走 substring，没接 FilterExpr 入口。
+- AppGroup view 的 `AppGroupProcess` 只有 `pid/name/cpu_usage/memory/role_hint` 4 字段，不持 `&ProcessInfo`，FilterExpr::apply 接 `EvalCtx{process: &ProcessInfo, ...}` 直接调不到。要接需改 `app_group_filtered_visual_items` 签名传 cached_processes 进来，或改 AppGroup 结构持 Arc<ProcessInfo>。
+**影响**：用户在 Tree / AppGroup 视图按 `:` 没反应（不切 FilterExpr 模式），只能用 `/` substring。文档已显式标注限制。
+**修复**（v0.8 候选）：
+1. AppGroup view：改 `app_group_filtered_visual_items(&self, cached_processes: &[ProcessInfo])` 签名，按 pid 查原始 ProcessInfo；或预计算 pid→ProcessInfo map 存在 ProcessPanel。
+2. Tree view：在 `get_filtered_tree_visible` 加 mode 分支，FilterExpr 走 TreeNode 含的 ProcessInfo 字段。
+3. 两个视图的 `:` 激活加进 handle_tree_key / handle_app_group_key。
+**验证**：Tree / AppGroup 视图按 `:` 进 FilterExpr 模式，`cpu > 5` 正确过滤。
+
+### TD-16：FilterExpr 错误信息用 nom 内部 ErrorKind 直出 — v0.7.0 阶段 4 遗留
+
+**位置**：`src/filter/parser.rs::to_parse_error`
+**现状**：parse 失败时 `msg` 字段直接 `format!("expected {:?}", ErrorKind::TakeWhile1)` 等 nom 内部枚举名，用户看不懂。
+**影响**：TUI 标题栏 / CLI stderr 显示「filter parse error at offset 5: expected TakeWhile1」之类，用户不知道是缺值。
+**修复**（v0.8 候选）：写一个 ErrorKind → 中文的映射表，例如 `TakeWhile1 → "缺少字段名/值"`、`Tag → "缺少关键字/操作符"`、`Verify → "正则编译失败"`。
+**验证**：parse("cpu >") 错误信息含「缺少值」字样。
+
+### TD-17：eBPF TLS SNI / JA4 指纹采集 — v0.7.0 阶段 8 遗留
+
+**位置**：`src/ebpf/` 整个模块
+**现状**：v0.7 阶段 8 MVP 只关联 DNS + connect（[`ProcessFlow`] 的 `dns_name` 通过 [`FlowAggregator`] 的 5s 窗口向前查 DnsQuery 填入）。TLS SNI 需要在 `SSL_write` / `SSL_read` 上挂 uprobe（OpenSSL / BoringSSL / LibreSSL 多个版本分支 + offset 不同），第一版未做。`bytes_out` / `bytes_in` 也留 0（要 hook `tcp_sendmsg` / `tcp_recvmsg`）。
+**影响**：
+- 命中 DNS cache 的查询（系统直接走 /etc/hosts 或缓存）关联不到 → `dns_name = None`，但 R15 仍能通过条件 2（端口扫描）兜底。
+- 无字节计数 → UI Flow 子视图不能回答"实际发了多少字节"，仅能回答"谁连到哪里"。
+**修复**（v0.8 候选）：
+1. 用 `aya-rs` uprobe 在 `SSL_write` 入口抓 ClientHello 明文 SNI 字段（OpenSSL 优先，BoringSSL / LibreSSL 后续）。
+2. JA4 指纹：从 ClientHello 抓 cipher suites + extensions + ALPN，按 [RFC 9503](https://www.ietf.org/archive/id/draft-ietf-tls-wg-tls-essentials-01.html) JA4 algorithm hash。
+3. `tcp_sendmsg` / `tcp_recvmsg` kprobe 累计 bytes_out / bytes_in（按 `(pid, saddr, daddr)` 聚合）。
+**验证**：curl https://example.com 后，端口面板 Flow 子视图该 flow 的 `dns_name == "example.com"` + `bytes_out > 0` + JA4 hash 字段。
+
+### TD-18：Windows ETW Schannel 抓 SNI（同名功能 Win 版本）— v0.7.0 阶段 8 遗留
+
+**位置**：`src/ebpf/` cfg-gate 失效的 Windows 平台
+**现状**：v0.7 阶段 8 eBPF flow graph 仅 Linux + `ebpf` feature 启用。Windows 用户没此功能（仅有 DNS 日志 + per-process 网络速率半关联）。Windows 等价物：ETW `Microsoft-Windows-Schannel` event 196（Operations 196 含 SNI 字段），schema 复杂未做。
+**影响**：Windows 用户不能回答"哪个二进制和哪个域名说了多少字节"，定位挖矿 / C2 弱于 Linux。
+**修复**（v0.8 候选）：在 `src/disk_io_etw/provider.rs` 同款手写 windows-rs ETW 框架基础上，新开 Schannel session 抓 event 196，关联 (pid, sni, ts) → 与 DNS 日志互补。
+**验证**：Windows 上 curl https://example.com → 端口面板 / `proc flows` 显示 SNI。
+
+### TD-19：eBPF Linux 真实编译验证缺失 — v0.7.0 阶段 8 遗留
+
+**位置**：`src/ebpf/{worker.rs,elf_loader.rs}` + `src/ebpf/ebpf-ebpf/src/main.rs`
+**现状**：Part A + Part B 都在 Windows 会话落地，未在真实 Linux + root + 内核 5.10+ 环境验证：aya `TracePoint::attach` 真实签名、`RingBuf::try_from` API、tracepoint arg offset（`sys_enter_connect` 偏移 16 / `sched_process_exit` 偏移 24 在不同内核可能不同）、`include_bytes!` ELF 路径硬编码、内核态 `bpf_current_task_start_time` 占位 0（需 aya-tool BTF binding 补完）。
+**影响**：Linux 用户首次 `cargo build --features ebpf` 可能失败；attach 失败时 App::flows 为空，UI 显示降级提示（不崩，但功能不可用）。
+**修复**（v0.7 收尾或 v0.8）：Linux 会话跑 `cargo +nightly build --target bpfel-unknown-none -p proc-ebpf` + `cargo build --release --features ebpf` + `sudo cargo test --release --features ebpf --test test_ebpf_flow -- --ignored`，按报错修。
+**验证**：Linux 真实环境 `proc flows` 显示活跃 flow；端口面板按 F 切换 Flow 子视图有数据。
 
 ---
 
@@ -130,4 +190,4 @@
 - v0.6.0 Review（本文件来源）：`docs/reviews/REVIEW-7.md` 产出 1 P0 + 9 P1 + 14 P2。
 - v0.6.0 阶段 8 应修：1 P0 + 9 P1（详见 REVIEW-7.md）。
 - v0.7.0 候选：本文件 v0.7.0 段 11 项。
-- v0.8.0+ 候选：本文件 v0.8.0+ 段 3 项。
+- v0.8.0+ 候选：本文件 v0.8.0+ 段 6 项（含 v0.7.0 阶段 8 遗留的 TD-17 / TD-18 / TD-19 eBPF 相关）。

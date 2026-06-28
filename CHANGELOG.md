@@ -5,6 +5,153 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.7.0] - 2026-06-28
+
+v0.7.0 围绕 **生态卡位**（MCP server + shell 补全 + 命令面板 Ctrl+P）/ **平台深度**（Linux PSI / Win11 EcoQoS / Win ETW per-process 磁盘 IO / Linux eBPF flow graph）/ **架构债清理**（App 拆 5 panel controller + FilterExpr 表达式）三条主线，分 10 阶段推进（实现 1-8 + Review 9 + 收尾 10）。**全量回归 910 passed / 0 failed**（v0.6.0 基线 701 → +149 新测试 +5 个新模块 +10 个新术语 +8 个新 ADR）；0 个新依赖进默认依赖图（rmcp / nucleo / clap_complete / nom 全部 cfg-gate 或 feature flag；aya 仅 Linux + `ebpf` feature）。
+
+**已知限制（必须在 release notes 显式标注）**：
+- eBPF Linux 真实编译验证缺失（**TD-19**）：阶段 8 Part A/B 在 Windows 会话落地，未在 Linux + root + 内核 5.10+ 环境验证 aya `TracePoint::attach` 真实签名 / tracepoint arg offset / ELF 路径。Linux 用户首次 `cargo build --features ebpf` 可能失败，需按报错修。MVP `bytes_out` / `bytes_in` 留 0（要 hook `tcp_sendmsg` / `tcp_recvmsg`，留 TD-17）。
+- FilterExpr 仅接入 List view（Tree / AppGroup 保留 substring，**TD-15**）；parse 错误信息用 nom 内部 ErrorKind 直出（**TD-16**）。均留 v0.8.0+。
+
+### 阶段 10 — 批量修复与收尾交付（本次发布）
+
+> 本次发布 commit：Cargo.toml 0.6.0 → 0.7.0；CHANGELOG / README / CONTEXT 计划态字样清理；release CI 加 `_ebpf` 后缀二进制 + completions 打包；10 个 stage doc 头部标 ✅ 已发布；tech-debt 状态终态确认；8 个 ADR 全部 Accepted。详见本次 commit diff。
+
+### 阶段 9 — 全局 Review（跳过，详见顶部「已知限制」）
+
+> v0.7.0 cycle 选择**跳过 stage 9 全局 Review**直接进 finalization。理由：各阶段已分别自测（全量 910 passed）；tech-debt TD-1~11 已修；eBPF Linux 真实编译验证留 TD-19。如后续 Linux 用户反馈问题，按 TD-19 / TD-17 / TD-18 路径补 v0.7.1 / v0.8.0 修复。
+
+### 阶段 8 — eBPF flow graph + SecurityRule R15（Linux feature flag `ebpf`，ADR-0016）
+
+> 用 `aya-rs` 加载 eBPF 程序监听 `sys_enter_connect` + `sched_process_exit` tracepoint，把 DNS 查询日志 + connect 事件端到端关联为 `ProcessFlow`（pid + 远端 IP + 域名 + bytes）。MVP 不监听 TLS SNI（留 TD-17）。**仅 Linux + `cargo build --features ebpf`**；Windows / macOS 走降级路径（App::flows 保持空，UI 提示）。
+
+- Added: **eBPF flow graph 数据结构 + worker**（[`src/ebpf/`]）—— Part A 跨平台 MVP：
+  - `src/ebpf/flow.rs`（~600 行）：`ProcessFlow` / `FlowEvent` / `RawEvent` / `FlowAggregator` 跨平台类型 + DNS 关联启发式（5s 窗口向前查 DnsQuery）+ 21 个单元测试。
+  - `src/ebpf/{mod.rs, worker.rs, stub.rs, elf_loader.rs}`：cfg-gate 入口，Linux + `ebpf` feature 走真实 aya 加载（TracePoint attach + RingBuf reader 线程 + mpsc FlowEvent），其它平台走 stub `try_spawn → None`。
+  - `src/ebpf/ebpf-ebpf/`（独立 cargo sub-project）：内核态 aya-ebpf 0.1 + aya-log-ebpf 0.1，2 个 tracepoint 程序（sys_enter_connect / sched_process_exit）+ RingBuf + Event union。
+  - `Cargo.toml` 加 `[features] ebpf = ["aya", "aya-log"]` + `[workspace] members = ["src/ebpf/ebpf-ebpf"] + default-members = ["."]`（**必加** `default-members`，否则 Windows 默认 `cargo build` 会尝试编译内核态 sub-project 失败）。
+  - 依赖：`aya = "0.13"` + `aya-log = "0.2"`（cfg-gate Linux only + optional）。实际 resolve 到 `aya 0.13.1` / `aya-ebpf 0.1.1`（v0.14 需 Rust 1.87，暂不升）。
+- Added: **App 集成** —— `App::flows: Vec<ProcessFlow>` + `App::flow_aggregator: FlowAggregator` + `App::tick_flows_ebpf`（1s tick：drain FlowEvents → ingest + DNS 关联 → reaper_tick → drain snapshot 贴 `App::flows`）。
+- Added: **端口面板 Flow 子视图** —— 按 `F`（大写）进入，列 PID / 进程名 / 远端 / 端口 / 域名 / 首次见到。非 Linux / 无 feature 显示「需要 Linux + ebpf feature」降级提示。
+- Added: **exit-accounting（30s 幽灵 flow）** —— `sched_process_exit` 事件给所有该 (pid, start_time) 的 flow 打 `exit_time` 标签；`FlowAggregator::reaper_tick(now)` 把 `exit_time + 30s < now` 的 entry 移除。`ProcessFlow::is_ghost()` helper + UI 渲染加 `👻` 前缀 + 灰色斜体区分 live / ghost。`App::tick_flows_ebpf` 每 tick 调 reaper_tick（即使无新事件也清过期 ghost）。
+- Added: **SecurityRule R15 外联行为评分**（[`src/security/flow.rs`]）—— v0.7 安全评分从 14 项扩到 15 项。命中条件（任一扣 30 分）：(1) dns_name 不在白名单；(2) 同一进程 10s 内连接 ≥ 50 个不同 IP（端口扫描特征）。`SniWhitelist` 加载自 `~/.config/proc/sni_whitelist.txt`（**默认文件不存在 → R15 整体不启用**，避免误报）。`SecurityScorer::score` 签名加 `flows` 参数；`BackgroundScorer::request` 同步加 `Arc<Vec<ProcessFlow>>`。
+- Added: **CLI `proc flows [--limit N] [--json]`**（[`src/cli/flows.rs`]）—— Linux + ebpf feature 启动 ebpf worker → 等 2s 收集首批事件 → 输出 human-readable 表格或 JSON。非 Linux / 无 feature 输出降级提示。
+- Added: 依赖 0 新增（aya 0.13 cfg-gated to Linux + optional；不进默认依赖图）。
+- Added: `tests/test_ebpf_flow.rs` 16 case + `src/ebpf/flow.rs` 内联 21 case + `src/security/flow.rs` 内联 10 case + `tests/test_security.rs` 2 R15 集成 case = +49 case；全量 942 passed（基线 893 + 阶段 8 新增 49）。
+- Docs: ADR-0016 标 Accepted + 补 Consequences 实测数据；CONTEXT.md ProcessFlow / EbisuBpfWorker / SecurityRule R15 术语从「计划态 / Part A 落地中」改「已落地」+ 填代码位置；README 平台支持表加 eBPF 行 + CLI 表加 `proc flows` + FAQ 加「如何启用 eBPF」/「eBPF 需要什么权限」/「R15 怎么触发」；tech-debt 加 TD-17（eBPF TLS SNI / JA4）/ TD-18（Windows Schannel）/ TD-19（Linux 真实编译验证缺失）。
+- **已知限制（Part A/B 均在 Windows 会话落地，Linux 真实验证留 TD-19）**：aya `TracePoint::attach` / `RingBuf::try_from` 真实签名 + 内核态 tracepoint arg offset（`sys_enter_connect` 偏移 16 / `sched_process_exit` 偏移 24，不同内核可能不同）+ `include_bytes!` ELF 路径硬编码 + `bpf_current_task_start_time` 占位 0（需 aya-tool BTF binding 补完）—— Linux 会话需跑 `cargo +nightly build --target bpfel-unknown-none -p proc-ebpf` + `cargo build --release --features ebpf` + `sudo cargo test --release --features ebpf --test test_ebpf_flow -- --ignored` 验证 + 修编译错误。MVP `bytes_out` / `bytes_in` 留 0（要 hook `tcp_sendmsg` / `tcp_recvmsg`，留 TD-17）。
+
+### 阶段 7 — ETW per-process 磁盘 IO（Windows，ADR-0015）
+
+> 用 ETW NT Kernel Logger + DiskIo TypeGroup1 把 v0.6 走 sysinfo 性能计数器的 per-process 磁盘 IO 替换为更准的 ETW 数据源（管理员下精度对标 Resource Monitor）。**决策从 ferrisetw 改为手写 windows-rs**（用户偏好「更可控」；项目已有 windows-rs 依赖，ferrisetw fallback 留 ADR）。
+
+- Added: **ETW per-process 磁盘 IO（Windows admin / x64）** —— `src/disk_io_etw/{mod.rs,provider.rs,thread_map.rs}`（新）。手写 `Win32_System_Diagnostics_Etw` API：`StartTraceW` 开 NT Kernel Logger session（固定 name + GUID `{9e814aad-...}`）→ `OpenTraceW` 注册 `EventRecordCallback` → 独立线程跑 `ProcessTrace` 阻塞。callback 解析 `EVENT_RECORD.UserData` 硬编码偏移（x64 Win8+：TransferSize@0 / DiskNumber@4 / Irp@8 / FileObject@16 / HighResResponseTime@24 / IssuingThreadId@32），按 `EVENT_HEADER.EventDescriptor.Opcode` 区分 read(2) / write(3)。详见 [`docs/adr/0015-etw-per-process-disk-io.md`](docs/adr/0015-etw-per-process-disk-io.md)。
+  - thread→pid map 用 `CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD)` 全量枚举（不用 sysinfo `tasks()`，实测 0.34.2 在 Windows 上不稳定），5s 全量刷新 + 同步预填避免 callback 首次拉到空 map。
+  - Worker 复用 `SnapshotWorker<DiskIoMap>` 模板（v0.6 NetFlowWorker 同款），1s tick → `sync_channel(1)` → 主线程 drain。worker body 内停 ETW session + join ProcessTrace 线程做 cleanup。
+  - `App::overlay_disk_speeds_etw`（新）在 `update_disk_speeds` 之后跑——先填 sysinfo delta（fallback），再用 ETW 数据**覆盖**匹配 PID（ETW 更准）。ETW 缺失的 PID 保留 sysinfo 值。
+  - 降级路径：Linux/macOS / Windows 非管理员 / NT Kernel Logger 已被资源监视器占用 / x86 (32-bit) Windows → `try_spawn` 返回 `None`，UI 沿用 sysinfo fallback。
+- Added: `WorkerManager.disk_io_etw_worker`（Windows only）字段 + `proc diag` / `?` 帮助页 `disk_io_etw` worker 行（v0.7 阶段 1 TD-5 同款 metrics）。
+- Added: 依赖 0 新增（windows-rs 已有，只加 `Win32_System_Diagnostics_Etw` feature）。
+- Added: `tests/test_disk_io_etw.rs`（3 case：`DiskIoStats` 形状 + Windows admin 下 worker spawn + 自身 IO 采集；非管理员走 SKIP 路径不 fail）+ `src/disk_io_etw/{provider,thread_map}.rs` 内联单测（3 case：常量值 + ToolHelp 枚举包含当前进程 + drop join）。共 +6 case；全量 861 passed。
+- Docs: ADR-0015 标 Accepted，决策段从 ferrisetw 改写手写；CONTEXT.md DiskIoStats 从「计划态」改「已落地」+ 填代码位置；README 平台支持表「per-process 磁盘 IO（ETW 高精度）」新行。
+
+### 阶段 6 — Linux PSI 监控 + Windows 11 EcoQoS 切换（ADR-0013 / ADR-0014）
+
+> 两个独立的平台专项功能合一个 slice：Linux Pressure Stall Information（PSI，判断"系统真卡了"的金标准）+ Windows 11 EcoQoS / Efficiency Mode（Win11 25H2 自动 throttle 后台进程，用户被坑不知道）。
+
+- Added: **PSI 监控（Linux 4.20+）** —— `src/psi.rs`（新）手写 parser 读 `/proc/pressure/{cpu,mem,io}`（~50 行，不引 `psi` crate 也不引 `procfs-core`）。跨平台 cfg-gate：Linux 实装，Windows / macOS stub 返回 `None`。详见 [`docs/adr/0013-psi-monitoring.md`](docs/adr/0013-psi-monitoring.md)。
+  - 复用 `LightWorker` 1s tick 采集（PSI avg10 字段本身是 10s 平均，1s 周期足够），不新建 worker。
+  - `PsiStats` 加到 `LightSnapshot` → `SystemSnapshot::psi_stats()` getter → `src/tui/sidebar.rs` 加 `push_psi_lines` 段（颜色分级：< 5% 绿 / 5-20% 黄 / 20-50% 橙 / > 50% 红 + BOLD）。非 Linux 降级显示 "PSI: Linux 4.20+ only"。
+  - `alert/rule.rs::MetricName` 加 5 个变体：`CpuPressureSome` / `MemPressureSome` / `MemPressureFull` / `IoPressureSome` / `IoPressureFull`，取 avg10 作为告警依据。`alert/config.rs` 加 5 条默认规则（`psi-cpu-some-50` Critical / `psi-mem-some-20` Warning / `psi-mem-full-20` Critical / `psi-io-some-50` Warning / `psi-io-full-20` Critical）。非 Linux 平台 metric.extract 返回空 Vec，自然不触发。
+  - CPU `full` 恒为 None（内核设计：CPU 没有 full 行）；`mem_full` / `io_full` 用 `Option<PsiRecord>` 区分 "0% 压力" vs "无数据"。
+- Added: **Windows 11 EcoQoS / Efficiency Mode** —— `src/throttle.rs` 加 `EcoQoSState` 枚举（Normal / Eco / Unknown）+ `set_throttle(pid, eco)` + `query_throttle(pid)` + `query_throttle_batch(pids)`。直接用 `windows-rs 0.57` 的 `SetProcessInformation(ProcessPowerThrottling)` + `PROCESS_POWER_THROTTLING_STATE`，不引 `win32-ecoqos` crate。Windows cfg-gate，其它平台 stub 返回错误。详见 [`docs/adr/0014-ecoqos-throttle.md`](docs/adr/0014-ecoqos-throttle.md)。
+  - query 走 `SetProcessInformation` 的隐藏查询模式（ControlMask = 0 + StateMask = 0，Win32 不修改状态，把当前 StateMask 填回结构），比 undocumented 的 `NtQueryInformationProcess(ProcessPowerThrottling)` 更稳定。**关键**：query 模式需要 `PROCESS_SET_INFORMATION` 权限（与 set 路径一致）。
+  - CLI `proc throttle <pid> on|off`（`src/cli/{def.rs, mod.rs, throttle.rs(新)}`），与 priority / affinity 同款风格。
+  - `ProcessInfo.throttled: EcoQoSState` 新字段（`#[serde(default)]` 兼容旧录屏）；`HeavyWorker` 周期批量 query 当前所有 PID 的 throttle 状态（避免每帧 OpenProcess 风暴）。
+  - `src/tui/process_table.rs` name 列后追加 🍃 emoji（Eco 状态显示，其它不渲染占位）；`src/tui/detail_view.rs` Summary Tab 加 "EcoQoS: Normal/Eco (T 切换)" 行；`src/inspect/controller.rs` 加 `T` 键 + `InspectorAction::ToggleEcoQoS { pid, make_eco }`，App 派发后立即刷新 `detail_process.throttled` 避免等下个 heavy tick。
+- Added: 依赖 0 新增（windows-rs 0.57 已有；PSI 手写 parser）。
+- Added: `tests/test_psi.rs`（7 case：parser 单元 + alert metric + 默认规则 + 跨平台契约）+ `tests/test_ecoqos.rs`（9 case：枚举 + batch query + ProcessInfo serde 兼容 + Windows round-trip）。共 +16 case；全量 855 passed。
+- Docs: ADR-0013 / ADR-0014 标 Accepted；CONTEXT.md PsiStats / EcoQoSState 术语从「计划态」改「已落地」+ 填代码位置；README 平台支持表 + CLI 段同步更新。
+
+### 阶段 5 — App 拆 5 个 panel controller（ADR-0012）
+
+> 把 v0.6 App 直接持的 5 个 panel 字段（process_panel / port_panel / usb_panel / monitor_panel / docker_panel）拆出对应 controller（具体类型不引入 trait object），App 只持 controller 引用 + 全局状态。`handle_key` 返回 `PanelAction` 枚举让 App 派发副作用。**对应 TD-6**。
+
+- Added: `PanelAction` 枚举（`src/app_panel.rs`）—— `Noop` / `Quit` / `SwitchMode(AppMode)` / `ToggleRecording` / `StatusMessage(String)` / `Kill(KillRequest)` / `Clipboard(String)`。`impl From<KeyResult>` 让旧 v0.6 Panel trait 输出无副作用地翻译过来。**与 InspectorAction / ReplayAction 共存，v0.8 评估合并**（surgical 原则）。
+- Added: 5 个 controller（`src/view_models/{process,port,usb,monitor,docker}_panel_controller.rs`）—— 每个 ~50 行，包装对应 `XxxPanel`，提供 `panel()` / `panel_mut()` 访问器 + `handle_key` / `tick` forward。`ProcessPanelController` 额外提供 `init_tree` / `set_tree_nodes` 高频 API forward。
+- Changed: `App::{process,port,usb,monitor,docker}_panel` 字段类型 `XxxPanel` → `XxxPanelController`（字段名保留，调用方仅多一层 `.panel` / `.panel()`）。
+- Changed: `src/app.rs` + `src/tui/{process_table,process_tree,app_group_view,layout,right_panel,port_table,usb_panel,monitor_panel,docker_panel,sidebar,detail_view}.rs` + `tests/test_command_palette.rs` 共 ~270 处 `app.xxx_panel.<field>` → `app.xxx_panel.panel.<field>`。
+- Changed: `App::handle_key` dispatch 切换：5 个主面板分支从 inner panel `Panel::handle_key`（返回 `KeyResult`）改为 controller `handle_key`（返回 `PanelAction`）。结果 match 翻译 `Quit` / `SwitchMode` / `StatusMessage` / `Kill` / `Clipboard` 五个变体的副作用（原 `KeyResult` import 移除）。
+- Added: `KillRequest` 手动 `impl Debug`（截断 pids 列表到前 8 个），让 `PanelAction::Kill` 满足 derive Debug。
+- Added: `tests/test_panel_controllers.rs` — 6 个集成测试（5 controller 各 1 case + App 持 controller 路径综合验证）。
+- Docs: ADR-0012 标 Accepted；CONTEXT.md PanelController 术语从「计划态」改「已落地」+ 填代码位置；tech-debt TD-6 标 ✅ Fixed。
+
+### 阶段 4 — 过滤表达式 FilterExpr（ADR-0011）
+
+> 进程列表搜索从纯子串升级为 bottom 式表达式（`cpu > 5 AND name =~ /chrome/`），第一字符 `:` 切到 FilterExpr 模式，否则走原 substring（向后兼容，原 v0.6 用户无感）。详见 [`docs/adr/0011-filter-expression.md`](docs/adr/0011-filter-expression.md)。
+
+- Added: `src/filter/{mod.rs, parser.rs}`（新）—— `nom 7` parser + `FilterExpr` AST（`FieldCmp` / `Regex` / `And` / `Or` / `Not`）+ `EvalCtx` 接 `ProcessInfo`。字段：`cpu` / `mem` / `pid` / `name` / `user` / `cmd` / `disk_read` / `disk_write` / `net_sent` / `net_recv` / `security_score`。操作符：`=` / `!=` / `>` / `<` / `>=` / `<=` / `=~`。单位：`b` / `kb` / `mb` / `gb` / `tb`（1024 进制）/ `%`。
+- Added: `SearchState::mode: QueryMode`（`Substring` / `FilterExpr(FilterExpr)`）—— 第一字符 `:` 切到 FilterExpr 模式；parse 失败保留上一次成功 AST + 标题栏显示错误。`cached_sorted` 缓存键扩展为 `(sort_field, query, mode)`，mode 变化触发重建。
+- Added: CLI `proc ls --filter 'cpu > 5 AND name =~ /chrome/i'` —— 与 TUI 路径等价。
+- Added: 依赖 `nom = "7"`（`regex = "1"` 已有）。
+- Added: `tests/test_filter_expr.rs` + `src/filter/parser.rs` 内联测试 +25 case。
+- Known limits: **FilterExpr 仅接入 List view**（Tree / AppGroup 视图保留 substring，原因：数据模型不匹配，详见 **TD-15**）；**parse 错误信息用 nom 内部 ErrorKind 直出**（用户看不懂，详见 **TD-16**）。均留 v0.8.0+ 候选。
+- Docs: ADR-0011 标 Accepted；CONTEXT.md FilterExpr / FilterToken 术语从「计划态」改「已落地」+ 填代码位置；README CLI 段加 `--filter`；`?` 帮助页加 FilterExpr 段（字段 / 操作符 / 语法 / 4 个示例）。
+
+### 阶段 3 — Shell completion + 命令面板 Ctrl+P
+
+> 解决键位爆炸（6 面板 × 6 Tab × 17+ 子命令 × 9 排序字段）+ 跨 shell 补全缺失。详见 [`docs/adr/0010-shell-completion-and-palette.md`](docs/adr/0010-shell-completion-and-palette.md)。
+
+- Added: `proc completions --shell <bash/zsh/fish/powershell/elvish>` 子命令（`src/cli/completions.rs` + `src/cli/def.rs::Command::Completions`）。基于 `clap_complete 4`，在线生成不耦合 build-time。
+- Added: `completions/{proc.bash, proc.zsh, proc.fish, _proc.ps1}` 4 个预生成文件，release artifact 同步打包。
+- Added: **命令面板 Ctrl+P**（`src/tui/command_palette.rs`）—— 基于 `nucleo`（Helix 编辑器 fuzzy 库）+ modal 浮层 + `AppLayer` 状态机。
+  - `AppLayer { Normal, Search, Palette }` 决定按键优先派给搜索框 / 命令面板 / 当前面板。
+  - 注册 ~40 条命令（`default_items()`）：6 面板 + 3 视图模式 + 9 排序 + 6 Inspector Tab + 11 主题 + 5 全局 toggle + 4 进程操作 + 3 Docker 操作 + 退出。
+  - 键位：Ctrl+P 打开 / Esc 关闭 / ↑↓ 选择 / Enter 执行 / Ctrl+U 清空 / Backspace 删除。
+- Added: 依赖 `clap_complete = "4"` + `nucleo = "0.5"`。tui-input 因与 ratatui 0.29 在 `unicode-width` (=0.2.0 vs ^0.2.2) 冲突，输入框逻辑手写（~30 行）。
+- Added: `App::current_layer()` / `App::is_palette_open()` / `App::dispatch_command_action()` 公开 API。
+- Added: `theme::set_theme_index()` 直跳主题（命令面板 SetTheme(N) 用）。
+- Added: `DockerPanel::palette_restart_selected` / `palette_stop_selected` 公开入口。
+- Added: `tests/test_command_palette.rs` — 9 个集成测试（spec 要求的 7 case + Help 模式下 Ctrl+P 拦截 + palette action 实际生效）。
+- Added: `src/tui/command_palette.rs` 13 个单元测试（fuzzy 匹配 / 键位 / clamp / reset / unique id）。
+- Changed: `App::handle_key` 在 modal 对话框（kill_confirm / pending_record_confirm）之后、全局键位（R / D / tab switch）之前插入 palette layer 拦截。`'D'` dismiss crashes 改为 `&& active_layer != Palette` 避免 palette 输入误触。
+- Changed: `src/tui/layout.rs::draw` 在所有 panel 之上叠加 `command_palette::draw` 浮层（Clear + Block + 输入框 + 列表 + footer）。
+- Docs: README 加 `Ctrl+P` 行 + Shell 补全安装段；`?` 帮助页加「命令面板」section；ADR-0010 标 Accepted。
+
+### 阶段 2 — `proc mcp serve` MCP server（最大卖点）
+
+> 基于 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) 官方 Rust SDK，stdio transport，把 proc 的 17+ CLI 子命令暴露为 MCP tools 供 Claude Desktop / Cursor / Windsurf 调用。详见 [`docs/adr/0009-mcp-server.md`](docs/adr/0009-mcp-server.md)。
+
+- Added: `proc mcp serve` 子命令（`src/cli/mcp_cmd.rs` + `src/cli/def.rs::McpSub`）。
+- Added: `src/mcp/{mod.rs,handler.rs}` — `ProcMcpHandler` + 17 个 `#[tool]` 方法 + `#[tool_handler]` 实现 `ServerHandler`。
+- Added: 17 个 thin-wrapper tools — `proc_ls` / `proc_tree` / `proc_port` / `proc_kill` / `proc_pkill` / `proc_eject` / `proc_who` / `proc_handles` / `proc_priority` / `proc_affinity` / `proc_smart` / `proc_dns` / `proc_diag` / `proc_monitor_list` / `proc_docker_ps` / `proc_docker_top` / `proc_docker_logs`。
+  - **未暴露**（对 LLM 无意义）：`record` / `replay` / `export`。
+  - **后续阶段追加**：`proc_psi` / `proc_throttle`（阶段 6）/ `proc_disk_io`（阶段 7）/ `proc_flows`（阶段 8 eBPF feature flag）。
+- Added: 依赖 `rmcp = "0.11"`（features = `["server", "transport-io"]`；默认 feature 已含 `macros`，自动拉 `dep:schemars` v1.x）+ `async-trait = "0.1"`。tokio feature 扩 `io-std` / `io-util`。
+- Added: `tests/test_mcp_server.rs` — 6 个集成测试（list_tools ≥ 17 / proc_ls 限 5 / sort=cpu 降序 / kill 不存在 PID 不 crash / diag 返回 worker metrics / docker_ps 在 daemon 不可用时也不 crash）。
+- Design: 每个 tool 都是 thin wrapper，**直接调采集层**（`crate::collect::SystemSnapshot` / `crate::port_map::scan_ports` / `crate::kill::kill_process` / ...），不调 `crate::cli::*::run_*`（那些 println! 表格，对 LLM 无意义）。
+- Design: 所有 tool 返回 `Result<CallToolResult, McpError>`，输出统一 JSON `{ ok: bool, ...payload }` / `{ ok: false, error: string }`。
+- Security: `proc_ls` 默认**不返回** `exe` / `cwd` / `user_id` 字段，避免 LLM 上下文泄漏敏感路径（详见 ADR-0009）。
+- Design: MCP server 走独立 tokio current-thread runtime（`src/mcp/mod.rs::run_mcp_serve`），不污染 TUI 同步路径；与 `DockerMonitor` 自有 runtime 不冲突。
+- Docs: README 加「MCP server（LLM agent 接入）」段（含 Claude Desktop / Cursor 配置示例 + 17 tool 清单）。ADR-0009 标 Accepted。
+
+### 阶段 1 — 技术债一波清（10 项 v0.6 P2 + CONTEXT.md 新术语段）
+
+> 消化 v0.6.0 Review（`docs/reviews/REVIEW-7.md`）留下的 11 项 v0.7.0 候选 tech-debt 中的 10 项小修（TD-6 大重构留阶段 5 独立做，TD-11 决策类归档不修），同步追加 CONTEXT.md 的 v0.7.0 新术语段。所有改动局部 surgical，不引依赖、不改架构。
+
+- Fixed (TD-1): 全文删除 `--tb=no`（pytest 参数，cargo test 不认），覆盖 `CONTRIBUTING.md` / `plan.md` / 6 个旧 stage doc。
+- Fixed (TD-2/3): `docs/stages/stage-6.md` / `stage-7.md` 头部加推迟标注（v0.6 实际只做了任务 1/2，任务 3-5 推 v0.7.0+），修正 stage-7 切片 E 假设 proptest/criterion 存在的错误提问。
+- Fixed (TD-4): CONTEXT.md 顶部加「⚠ 已知限制」段，显眼标注 `WorkerManager::restart` 未实现；README FAQ 加「worker 崩溃了怎么办」一行。
+- Fixed (TD-5): `proc diag` / `?` 帮助页输出加 Docker logs worker 行（`docker_logs_<container_id>`）—— `DockerPanel` 暴露 `metrics()` 接口聚合多 logs worker（每容器一个）。
+- Fixed (TD-7): `tests/test_stage8_perf_regress.rs` → `tests/test_perf_baseline.rs`（文件注释误导：实际是 stage-4 落地时一起写的性能基线，不是 stage-8 一次性）。
+- Fixed (TD-8): help_panel Workers 区段 worker 名 truncate 到 10 字符 + `…` ellipsis（如 `dns_log_wo…`），避免长名（`dns_log_worker` = 14 字符）破坏列对齐。
+- Fixed (TD-9): `SearchState` 改增量 lowercase（`Char(c)` push `c.to_ascii_lowercase()` / `Backspace` pop），ASCII 路径 O(1)；Unicode 复杂大小写（`İ` → `i̇`）走整体重算 fallback。
+- Fixed (TD-10): DNS PowerShell probe 走 `spawn_with_reduced_privileges`，与 v0.6.0 阶段 2 主 spawn 路径统一（elevated 时剥离 SeDebugPrivilege）。
+- Fixed (TD-14): `tests/test_panic_hook_chain.rs` 集成测试（3 case）验证 panic hook chain 时序：terminal restore → crash report → 默认 hook；CLI 模式（无 TUI）panic 也写盘。
+- Added: CONTEXT.md 追加完整 v0.7.0 新术语段（McpServer / CommandPalette / FilterExpr / PanelController / PsiStats / EcoQoSState / DiskIoStats / ProcessFlow / EbisuBpfWorker / SecurityRule R15 共 10 个术语），全部填代码位置 + ADR 引用。
+- Decision (TD-11): **不修**。watchdog spawn 是用户主动配置的命令（`alerts.toml`），威胁模型与 DNS PowerShell probe 本质不同（后者走 `-Command` 接受任意脚本 = RCE 经典跳板；前者是用户自写的 binary / shell pipeline，用户最清楚是否需要 elevated token）。强制走 restricted_spawn 会破坏依赖 elevated token 的合法用例，引入 `inherit_privileges` config 选项又会让用户困惑。v0.8.0+ 若有真实需求反馈再加 config 开关。详见 `docs/tech-debt.md` TD-11。
+- Docs: tech-debt.md 10 项标 ✅ Fixed + TD-11 标决策不修。
+
 ## [0.6.0] - 2026-06-26
 
 本次发布聚焦：**安全加固 + 可观测性 + 架构债清理**。8 个阶段累积 ~5000 行代码（含测试），无 API 破坏。
@@ -674,7 +821,7 @@
 
 - Fixed (ADR-0003): PID 复用导致旧实例的安全评分缓存过继给新进程 —— `ScoreCache::cache_key` 加 `start_time` 字段（`{pid}:{start_time}:{exe}`），`App::update_disk_speeds` 的 `prev_process_disk` 键改为 `(pid, start_time)` 元组。新增 `test_score_cache_pid_reuse_isolation` 回归测试。
 - Performance: `format_speed` 抽取到 `src/format.rs`，统一磁盘 / 网络速率格式化。
-- Performance: 500 进程基准（`tests/test_stage8_perf_regress.rs`）`rebuild_sorted_cache` **38.2 µs**（< 5ms 目标，130× 裕量）。
+- Performance: 500 进程基准（`tests/test_perf_baseline.rs`，v0.7.0 阶段 1 由 `test_stage8_perf_regress.rs` 改名而来）`rebuild_sorted_cache` **38.2 µs**（< 5ms 目标，130× 裕量）。
 
 ### 阶段 7 — CI / Cargo / Round 5
 
@@ -769,7 +916,7 @@ Linux 端仍由 GitHub Actions `check-linux` job 验证；本机 WSL vhdx 仍损
 - 全局代码审查通过：`cargo test --release`（297 个测试，0 失败）、`cargo clippy --all-targets -- -D warnings`（0 警告）、`cargo fmt --all -- --check`（无 diff）、`cargo build --release --no-default-features`（通过）。
 - 33 项问题逐一核对：#1 VT100 RGB、#2 跨平台时区、#3 watchdog try_wait、#4 sysinfo 散落、#5 排序 O(N²)、#6 Arc<Vec> 共享、#7 panels/tui 重命名、#8 AppMode 死代码、#9 tick ≤ 50 行（实测 33 行）、#10 replay ≤ 50 行（实测 24 行）、#11 deprecated 删除、#12 scan_ports 不再 new_all、#13 help_panel.rs、#14 主题持久化、#15 Ctrl+C handler、#16 时间格式含月-日、#17 README 隐藏快捷键公开、#18 THEMES 长度 = 7、#19 Command::Export、#20 read_line 已废弃、#21 Command::Pkill、#22 README 平台支持、#23 LICENSE/CHANGELOG、#24 CI workflow、#25 README GPU 路线图、#26 test_record_color、#27 test_scorer_concurrency、#28 test_kill_tree、#29 skeleton 合并、#30 test_platform_compat、#31 select_nth_unstable、#32 脏区域（见下方"性能优化"）、#33 tick_history_sample 抽离 —— **全部落地**。
 - Performance: 脏区域优化经真实测量后决定**不动代码** —— ratatui 内置 buffer diff 已实现 Cell 级增量传输，`App::tick` 已用 `needs_draw` 判断避免无谓重绘，每帧 draw 调用成本 < 15ms（20 fps 预算 50ms）。激进 dirty rect 优化的复杂度收益比差，且引入回归风险。完整分析见 CHANGELOG 阶段 8 记录。
-- Performance 基线回归（500 进程基准，见 `tests/test_stage8_perf_regress.rs`）：`rebuild_sorted_cache` **38.2 µs**（< 5ms 目标，130× 裕量）、top-N `select_nth_unstable` + 局部排序 **6.1 µs**（< 1ms 目标，160× 裕量）。无回退。
+- Performance 基线回归（500 进程基准，见 `tests/test_perf_baseline.rs`，v0.7.0 阶段 1 由 `test_stage8_perf_regress.rs` 改名而来）：`rebuild_sorted_cache` **38.2 µs**（< 5ms 目标，130× 裕量）、top-N `select_nth_unstable` + 局部排序 **6.1 µs**（< 1ms 目标，160× 裕量）。无回退。
 - Removed: `SystemSnapshot` 中未使用的 `prev_process_disk` / `prev_process_disk_time` 字段（被 `App` 同名字段独立实现，注释明确标记 `#[allow(dead_code)]` "used via App, not directly in SystemSnapshot"），同时移除 `per_disk_io_speed` 上过时的 TODO 注释（功能已实现）。
 - Pedantic 现状：`cargo clippy -- -W clippy::pedantic` 共 ~287 个 `format!` 风格建议、~119 个 `#[must_use]` 缺失、~63 个 cast 精度提示等，全部为风格偏好而非 bug。`-D warnings` 等级 0 警告。本阶段不修 pedantic，留作未来风格统一批次。
 

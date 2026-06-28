@@ -36,7 +36,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     draw_title(f, chunks[0], app);
-    match app.docker_panel.view_mode {
+    match app.docker_panel.panel.view_mode {
         DockerViewMode::Containers => {
             draw_container_list(f, chunks[1], app);
             draw_event_log(f, chunks[2], app);
@@ -51,23 +51,23 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    if app.docker_panel.detail.is_some() {
+    if app.docker_panel.panel.detail.is_some() {
         draw_detail_popup(f, area, app);
     }
 
-    if app.docker_panel.log_viewer.is_some() {
+    if app.docker_panel.panel.log_viewer.is_some() {
         draw_logs_overlay(f, area, app);
     }
 }
 
 fn draw_title(f: &mut Frame, area: Rect, app: &App) {
-    let conn_status = if app.docker_panel.connected {
+    let conn_status = if app.docker_panel.panel.connected {
         Span::styled(" ✅ 已连接 Docker ", theme::style_success())
     } else {
         Span::styled(" ❌ Docker 未运行 ", theme::style_danger())
     };
 
-    let mode = app.docker_panel.view_mode;
+    let mode = app.docker_panel.panel.view_mode;
     let tabs_line = Line::from(vec![
         Span::styled(" 视图: ", theme::style_muted()),
         Span::styled(
@@ -109,9 +109,9 @@ fn draw_title(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_container_list(f: &mut Frame, area: Rect, app: &App) {
-    let containers = &app.docker_panel.containers;
+    let containers = &app.docker_panel.panel.containers;
 
-    let empty_msg = if app.docker_panel.connected {
+    let empty_msg = if app.docker_panel.panel.connected {
         "  暂无容器"
     } else {
         "  Docker 未运行或未安装\n  提示: WSL Docker 需配置 TCP 端口 — dockerd -H tcp://0.0.0.0:2375"
@@ -127,7 +127,7 @@ fn draw_container_list(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let selected = i == app.docker_panel.cursor;
+                let selected = i == app.docker_panel.panel.cursor;
                 let bg = if selected {
                     theme::accent()
                 } else {
@@ -175,17 +175,19 @@ fn draw_container_list(f: &mut Frame, area: Rect, app: &App) {
 
     let mut state = ListState::default();
     if !containers.is_empty() {
-        state.select(Some(app.docker_panel.cursor.min(containers.len() - 1)));
+        state.select(Some(
+            app.docker_panel.panel.cursor.min(containers.len() - 1),
+        ));
     }
     f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_event_log(f: &mut Frame, area: Rect, app: &App) {
-    let events = &app.docker_panel.events;
+    let events = &app.docker_panel.panel.events;
 
     let items: Vec<ListItem> = if events.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
-            if app.docker_panel.connected {
+            if app.docker_panel.panel.connected {
                 "  监听中 — 容器启停事件将实时显示"
             } else {
                 "  暂无事件"
@@ -234,7 +236,7 @@ fn draw_event_log(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_image_list(f: &mut Frame, area: Rect, app: &App) {
-    let images = &app.docker_panel.images;
+    let images = &app.docker_panel.panel.images;
 
     let items: Vec<ListItem> = if images.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
@@ -246,7 +248,7 @@ fn draw_image_list(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .enumerate()
             .map(|(i, img)| {
-                let selected = i == app.docker_panel.images_cursor;
+                let selected = i == app.docker_panel.panel.images_cursor;
                 let bg = if selected {
                     theme::accent()
                 } else {
@@ -277,13 +279,15 @@ fn draw_image_list(f: &mut Frame, area: Rect, app: &App) {
     let list = List::new(items).block(Block::default().borders(Borders::NONE));
     let mut state = ListState::default();
     if !images.is_empty() {
-        state.select(Some(app.docker_panel.images_cursor.min(images.len() - 1)));
+        state.select(Some(
+            app.docker_panel.panel.images_cursor.min(images.len() - 1),
+        ));
     }
     f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_image_hint(f: &mut Frame, area: Rect, app: &App) {
-    let hint = if let Some(target) = &app.docker_panel.delete_pending {
+    let hint = if let Some(target) = &app.docker_panel.panel.delete_pending {
         match target {
             crate::view_models::docker_panel::DeleteTarget::Image { display, .. } => {
                 format!("⚠ 再按 d 删除 {} (Esc 取消)", display)
@@ -301,7 +305,7 @@ fn draw_image_hint(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_volume_list(f: &mut Frame, area: Rect, app: &App) {
-    let volumes = &app.docker_panel.volumes;
+    let volumes = &app.docker_panel.panel.volumes;
 
     let items: Vec<ListItem> = if volumes.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
@@ -313,7 +317,7 @@ fn draw_volume_list(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .enumerate()
             .map(|(i, v)| {
-                let selected = i == app.docker_panel.volumes_cursor;
+                let selected = i == app.docker_panel.panel.volumes_cursor;
                 let bg = if selected {
                     theme::accent()
                 } else {
@@ -350,13 +354,15 @@ fn draw_volume_list(f: &mut Frame, area: Rect, app: &App) {
     let list = List::new(items).block(Block::default().borders(Borders::NONE));
     let mut state = ListState::default();
     if !volumes.is_empty() {
-        state.select(Some(app.docker_panel.volumes_cursor.min(volumes.len() - 1)));
+        state.select(Some(
+            app.docker_panel.panel.volumes_cursor.min(volumes.len() - 1),
+        ));
     }
     f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_volume_hint(f: &mut Frame, area: Rect, app: &App) {
-    let hint = if let Some(target) = &app.docker_panel.delete_pending {
+    let hint = if let Some(target) = &app.docker_panel.panel.delete_pending {
         match target {
             crate::view_models::docker_panel::DeleteTarget::Volume { name } => {
                 format!("⚠ 再按 d 删除 {} (Esc 取消)", name)
@@ -381,7 +387,7 @@ fn draw_logs_overlay(f: &mut Frame, area: Rect, app: &App) {
         .split(area);
     let log_area = chunks[1];
 
-    let Some(lv) = &app.docker_panel.log_viewer else {
+    let Some(lv) = &app.docker_panel.panel.log_viewer else {
         return;
     };
     let container = lv.container.as_deref().unwrap_or("");
@@ -443,12 +449,12 @@ fn draw_detail_popup(f: &mut Frame, area: Rect, app: &App) {
     let popup_area = centered_rect(60, 18, area);
     f.render_widget(ratatui::widgets::Clear, popup_area);
 
-    let container = match &app.docker_panel.detail {
+    let container = match &app.docker_panel.panel.detail {
         Some(c) => c,
         None => return,
     };
 
-    let stats_section = match &app.docker_panel.detail_stats {
+    let stats_section = match &app.docker_panel.panel.detail_stats {
         Some(s) => vec![
             Line::from(format!("  CPU:  {:.1}%", s.cpu_percent)),
             Line::from(format!(
@@ -505,22 +511,29 @@ fn draw_detail_popup(f: &mut Frame, area: Rect, app: &App) {
     all_lines.extend(stats_section);
 
     // E4 — 容器内进程区块（按 t 展开 / 折叠）。
-    if app.docker_panel.show_top_processes {
+    if app.docker_panel.panel.show_top_processes {
         all_lines.push(Line::from(""));
         all_lines.push(Line::from(Span::styled(
             format!(
                 " 容器内进程（{} 个，r 刷新）:",
-                app.docker_panel.top_processes.len()
+                app.docker_panel.panel.top_processes.len()
             ),
             Style::default().add_modifier(Modifier::BOLD),
         )));
-        if app.docker_panel.top_processes.is_empty() {
+        if app.docker_panel.panel.top_processes.is_empty() {
             all_lines.push(Line::from(Span::styled(
                 "  （无进程或容器未运行）",
                 theme::style_muted(),
             )));
         } else {
-            for (i, p) in app.docker_panel.top_processes.iter().take(10).enumerate() {
+            for (i, p) in app
+                .docker_panel
+                .panel
+                .top_processes
+                .iter()
+                .take(10)
+                .enumerate()
+            {
                 all_lines.push(Line::from(format!(
                     "  {:>3}. {:<10} {}",
                     i + 1,
@@ -528,10 +541,10 @@ fn draw_detail_popup(f: &mut Frame, area: Rect, app: &App) {
                     p.command.chars().take(80).collect::<String>()
                 )));
             }
-            if app.docker_panel.top_processes.len() > 10 {
+            if app.docker_panel.panel.top_processes.len() > 10 {
                 all_lines.push(Line::from(format!(
                     "  ... +{} 个进程未显示",
-                    app.docker_panel.top_processes.len() - 10
+                    app.docker_panel.panel.top_processes.len() - 10
                 )));
             }
         }

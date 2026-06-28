@@ -27,6 +27,14 @@ pub struct WorkerManager {
     pub usb_worker: crate::eject::snapshot_worker::UsbSnapshotWorker,
     pub net_flow_worker: Option<crate::net_flow::worker::NetFlowWorker>,
     pub dns_log_worker: Option<crate::dns_log::worker::DnsLogWorker>,
+    /// v0.7 阶段 7：ETW per-process disk IO（Windows 管理员 / x64 only）。
+    /// 其它场景为 None，主线程走 sysinfo delta fallback（v0.6 行为）。
+    pub disk_io_etw_worker: Option<crate::disk_io_etw::DiskIoEtwWorker>,
+    /// v0.7 阶段 8：eBPF flow graph（Linux + feature `ebpf` only）。
+    /// 非 Linux / 无 feature / attach 失败时为 None，主线程走 fallback
+    /// （`App::flows` 保持空，UI 显示「需要 Linux + ebpf feature」提示）。
+    /// 详见 ADR-0016 + `src/ebpf/mod.rs`。
+    pub ebpf_worker: Option<crate::ebpf::EbisuBpfWorker>,
 }
 
 impl WorkerManager {
@@ -40,11 +48,15 @@ impl WorkerManager {
             .map(|c| crate::net_flow::worker::spawn(c, crash_tx.cloned()));
         let dns_log_worker = crate::dns_log::detect_collector()
             .map(|c| crate::dns_log::worker::spawn(c, crash_tx.cloned()));
+        let disk_io_etw_worker = crate::disk_io_etw::try_spawn(crash_tx.cloned());
+        let ebpf_worker = crate::ebpf::try_spawn(crash_tx.cloned());
         Self {
             port_worker,
             usb_worker,
             net_flow_worker,
             dns_log_worker,
+            disk_io_etw_worker,
+            ebpf_worker,
         }
     }
 
@@ -70,6 +82,12 @@ impl WorkerManager {
         if let Some(w) = &self.dns_log_worker {
             out.push(NamedWorkerStats {
                 name: "dns_log",
+                stats: w.metrics.snapshot(),
+            });
+        }
+        if let Some(w) = &self.disk_io_etw_worker {
+            out.push(NamedWorkerStats {
+                name: "disk_io_etw",
                 stats: w.metrics.snapshot(),
             });
         }

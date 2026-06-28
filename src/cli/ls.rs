@@ -6,7 +6,7 @@ use crate::classify;
 use crate::collect::{self, SortField};
 use crate::format::format_bytes;
 
-pub fn run_ls(sort: &str, limit: &Option<usize>) {
+pub fn run_ls(sort: &str, limit: &Option<usize>, filter: &Option<String>) {
     let mut snapshot = match collect::SystemSnapshot::new() {
         Ok(s) => s,
         Err(e) => {
@@ -32,6 +32,27 @@ pub fn run_ls(sort: &str, limit: &Option<usize>) {
         "net_recv" | "netrecv" => SortField::NetRecv,
         _ => SortField::Cpu,
     };
+
+    // v0.7 阶段 4：过滤表达式（ADR-0011）。CLI 与 TUI 用同款 parser。
+    // CLI 模式 security_score 不计算（lazy），过滤表达式中 security_score 字段
+    // 默认按 100 处理 — 与 TUI 列表视图（走 App::security_scores）不同。
+    if let Some(expr_str) = filter {
+        match crate::filter::parse(expr_str) {
+            Ok(expr) => {
+                processes.retain(|p| {
+                    let ctx = crate::filter::EvalCtx {
+                        process: p,
+                        security_score: None,
+                    };
+                    expr.apply(&ctx)
+                });
+            }
+            Err(e) => {
+                eprintln!("{} {}", "filter 语法错误:".red(), e);
+                std::process::exit(1);
+            }
+        }
+    }
 
     crate::collect::sort_processes(&mut processes, sort_field);
 

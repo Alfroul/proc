@@ -245,6 +245,7 @@ fn collect_missing_processes(
                     start_time,
                     run_time,
                     name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
+                    throttled: crate::throttle::EcoQoSState::default(),
                 });
             }
         }
@@ -635,6 +636,11 @@ pub struct ProcessInfo {
     /// `#[serde(skip)]`：录屏文件不持久化，重算成本低且能减小 .prec 体积。
     #[serde(skip)]
     pub name_lower: std::sync::Arc<str>,
+    /// v0.7 阶段 6：Windows 11 EcoQoS / Efficiency Mode 状态（ADR-0014）。
+    /// 由 HeavyWorker 批量 query 填入；非 Windows 平台恒为 `Unknown`。
+    /// `#[serde(default)]`：旧录屏文件能反序列化（缺字段 → Unknown）。
+    #[serde(default)]
+    pub throttled: crate::throttle::EcoQoSState,
 }
 
 impl Default for ProcessInfo {
@@ -665,6 +671,7 @@ impl Default for ProcessInfo {
             start_time: 0,
             run_time: 0,
             name_lower: std::sync::Arc::clone(empty_str),
+            throttled: crate::throttle::EcoQoSState::default(),
         }
     }
 }
@@ -966,6 +973,7 @@ impl HeavyWorker {
                                     now.saturating_sub(proc.start_time())
                                 },
                                 name_lower,
+                                throttled: crate::throttle::EcoQoSState::default(),
                             },
                         );
                     }
@@ -975,6 +983,18 @@ impl HeavyWorker {
                         processes.keys().copied().collect();
                     for proc in collect_missing_processes(&existing_pids, &HashMap::new()) {
                         processes.insert(proc.pid, proc);
+                    }
+
+                    // v0.7 阶段 6：批量 query 当前所有 PID 的 EcoQoS 状态
+                    // （ADR-0014）。每个周期一次批量调用，不在每帧 OpenProcess，
+                    // 避免 500 进程下 500 次 syscall 风暴。失败的 PID 自然返回
+                    // Unknown，UI 渲染时不显示 🍃。
+                    let pids: Vec<u32> = processes.keys().copied().collect();
+                    let throttle_map = crate::throttle::query_throttle_batch(&pids);
+                    for (pid, state) in &throttle_map {
+                        if let Some(p) = processes.get_mut(pid) {
+                            p.throttled = *state;
+                        }
                     }
 
                     let _ = result_tx.send(HeavyResult { processes });
@@ -1021,6 +1041,9 @@ struct LightSnapshot {
     /// 当前实现：sysinfo 的 Components 通常只给一个全局 CPU 温度，无法分核；
     /// 把全局温度填到第 0 核，其余留 None。Sidebar 折叠模式仍用 `temperatures`。
     per_core_temp: Vec<Option<f32>>,
+    /// v0.7 阶段 6：Linux PSI（Pressure Stall Information）。Linux only；
+    /// 其他平台恒为 `None`，监控面板降级显示。详见 ADR-0013。
+    psi: Option<crate::psi::PsiStats>,
 }
 
 struct LightWorker {
@@ -1186,6 +1209,10 @@ fn light_worker_loop(
             .map(|d| (d.total_space() - d.available_space(), d.total_space()))
             .unwrap_or((0, 0));
 
+        // v0.7 阶段 6：Linux PSI 1s tick 采集（详见 ADR-0013）。
+        // 其他平台 read_psi() 返回 None，无开销。
+        let psi = crate::psi::read_psi();
+
         let snapshot = LightSnapshot {
             gpu_info,
             temperatures: (cpu_temp, gpu_temp),
@@ -1195,6 +1222,7 @@ fn light_worker_loop(
             throttle_info,
             per_core_freq,
             per_core_temp,
+            psi,
         };
 
         match snap_tx.try_send(snapshot) {
@@ -1348,6 +1376,9 @@ pub struct SystemSnapshot {
     per_core_freq_cache: Vec<u64>,
     /// Per-core CPU 温度（°C，None=该核不可用）—— 由 worker 推送
     per_core_temp_cache: Vec<Option<f32>>,
+    /// v0.7 阶段 6：Linux PSI 缓存 —— 由 LightWorker 推送。Linux only；
+    /// 其他平台恒为 None。详见 ADR-0013。
+    psi_cache: Option<crate::psi::PsiStats>,
     /// SMART 数据缓存 —— 由 SmartWorker 30s 推送一次
     smart_cache: Vec<crate::smart::SmartData>,
     // Replay mode overrides
@@ -1468,6 +1499,7 @@ impl SystemSnapshot {
                 .as_ref()
                 .map(|s| s.per_core_temp.clone())
                 .unwrap_or_default(),
+            psi_cache: first_snap.as_ref().and_then(|s| s.psi.clone()),
             smart_cache: first_smart.unwrap_or_default(),
             replay_cpu: None,
             replay_memory: None,
@@ -1512,6 +1544,7 @@ impl SystemSnapshot {
             self.throttle_info = s.throttle_info;
             self.per_core_freq_cache = s.per_core_freq;
             self.per_core_temp_cache = s.per_core_temp;
+            self.psi_cache = s.psi;
         }
 
         // SMART 数据 —— 30s 推一次,这里只是 try_recv 缓存覆盖。
@@ -1785,6 +1818,14 @@ impl SystemSnapshot {
     #[must_use]
     pub fn per_core_temp(&self) -> &[Option<f32>] {
         &self.per_core_temp_cache
+    }
+
+    /// v0.7 阶段 6：Linux PSI（Pressure Stall Information）缓存。
+    /// 非 Linux 平台 / 内核 < 4.20 / `CONFIG_PSI=n` 时返回 `None`。
+    /// 详见 ADR-0013。
+    #[must_use]
+    pub fn psi_stats(&self) -> Option<&crate::psi::PsiStats> {
+        self.psi_cache.as_ref()
     }
 
     /// 获取上次刷新时间

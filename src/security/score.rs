@@ -153,6 +153,10 @@ pub struct SecurityScorer {
     verify_budget: usize,
     dll_check_budget: usize,
     hash_reputation: super::hash_cache::HashReputation,
+    /// v0.7 阶段 8 R15：SNI 白名单。`None` = 文件不存在，R15 条件 1 跳过；
+    /// `Some(空)` = 用户显式建空文件，所有 dns_name 都视为不在白名单。
+    /// 加载自 `~/.config/proc/sni_whitelist.txt`，构造时一次性读取。
+    sni_whitelist: Option<super::flow::SniWhitelist>,
 }
 
 impl Default for SecurityScorer {
@@ -169,6 +173,8 @@ impl SecurityScorer {
             verify_budget: VERIFY_BUDGET_PER_PASS,
             dll_check_budget: DLL_CHECK_BUDGET_PER_PASS,
             hash_reputation: super::hash_cache::HashReputation::new(),
+            // 文件不存在 → None，R15 自动跳过；解析失败也降级为 None 避免误报。
+            sni_whitelist: super::flow::SniWhitelist::load(),
         }
     }
 
@@ -186,6 +192,7 @@ impl SecurityScorer {
         proc: &ProcessInfo,
         all_procs: &[ProcessInfo],
         port_entries: &[crate::port_map::PortEntry],
+        flows: &[crate::ebpf::flow::ProcessFlow],
     ) -> SecurityScore {
         let exe_path = proc.exe.as_deref().unwrap_or("");
         // ADR-0003：键加 start_time，PID 复用后旧实例的签名缓存不会过继给新进程。
@@ -283,6 +290,21 @@ impl SecurityScorer {
             }
         }
 
+        // 15. R15：外联行为评分（v0.7 阶段 8，ADR-0016 §8）。基于 ProcessFlow
+        // 的 2 条命中条件：SNI 不在白名单 / 端口扫描特征。flows 为空（非 Linux
+        // / 无 ebpf feature / 内核不支持）→ 自动 no-op，与 v0.6 行为一致。
+        // （PID 复用：按 (pid, start_time) 双字段过滤，与缓存键一致。）
+        let flows_for_pid: Vec<&crate::ebpf::flow::ProcessFlow> = flows
+            .iter()
+            .filter(|f| f.pid == proc.pid && f.start_time == proc.start_time)
+            .collect();
+        let now = std::time::SystemTime::now();
+        if let Some(risk) =
+            super::flow::check_flow_risk(&flows_for_pid, self.sni_whitelist.as_ref(), now)
+        {
+            factors.push(risk);
+        }
+
         let total_deduction: u32 = factors.iter().map(|f| f.weight).sum();
         let score = 100u32.saturating_sub(total_deduction);
 
@@ -335,6 +357,9 @@ enum ScoringRequest {
     Score {
         processes: Arc<Vec<ProcessInfo>>,
         ports: Arc<Vec<crate::port_map::PortEntry>>,
+        /// v0.7 阶段 8 R15：FlowAggregator drain 出的 ProcessFlow 快照。
+        /// 非 Linux / 无 ebpf feature 时为空 Vec，R15 自动 no-op。
+        flows: Arc<Vec<crate::ebpf::flow::ProcessFlow>>,
     },
     Shutdown,
 }
@@ -393,7 +418,11 @@ impl BackgroundScorer {
                     }
 
                     match req {
-                        ScoringRequest::Score { processes, ports } => {
+                        ScoringRequest::Score {
+                            processes,
+                            ports,
+                            flows,
+                        } => {
                             let started = std::time::Instant::now();
                             let alive: HashSet<(u32, u64)> =
                                 processes.iter().map(|p| (p.pid, p.start_time)).collect();
@@ -403,6 +432,7 @@ impl BackgroundScorer {
 
                             let procs_slice: &[ProcessInfo] = processes.as_ref();
                             let ports_slice: &[crate::port_map::PortEntry] = ports.as_ref();
+                            let flows_slice: &[crate::ebpf::flow::ProcessFlow] = flows.as_ref();
                             let mut scores = HashMap::new();
                             for proc in procs_slice {
                                 // Honor global Ctrl+C so a long pass can be
@@ -411,13 +441,15 @@ impl BackgroundScorer {
                                 if crate::shutdown::requested() {
                                     break;
                                 }
-                                let score = scorer.score(proc, procs_slice, ports_slice);
+                                let score =
+                                    scorer.score(proc, procs_slice, ports_slice, flows_slice);
                                 scores.insert(proc.pid, score);
                             }
                             scorer.flush();
                             tracing::debug!(
                                 elapsed_ms = started.elapsed().as_millis() as u64,
                                 procs = procs_slice.len(),
+                                flows = flows_slice.len(),
                                 "BackgroundScorer 评分完成",
                             );
                             let _ = res_tx.send(scores);
@@ -441,9 +473,14 @@ impl BackgroundScorer {
         &self,
         processes: Arc<Vec<ProcessInfo>>,
         ports: Arc<Vec<crate::port_map::PortEntry>>,
+        flows: Arc<Vec<crate::ebpf::flow::ProcessFlow>>,
     ) {
         if let Some(tx) = &self.request_tx {
-            let _ = tx.try_send(ScoringRequest::Score { processes, ports });
+            let _ = tx.try_send(ScoringRequest::Score {
+                processes,
+                ports,
+                flows,
+            });
         }
     }
 

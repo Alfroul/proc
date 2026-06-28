@@ -44,6 +44,7 @@ impl From<&FrameProcess> for ProcessInfo {
             user_id: None,
             start_time: 0,
             run_time: 0,
+            throttled: crate::throttle::EcoQoSState::default(),
         }
     }
 }

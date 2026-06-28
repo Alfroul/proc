@@ -31,8 +31,27 @@ jobs:
       - name: Install musl tools (linux)
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get install -y musl-tools
-      - name: Build
+      - name: Install nightly + bpf-linker (linux ebpf)
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          cargo +nightly install bpf-linker
+      - name: Build (default)
         run: cargo build --release --target ${{ matrix.target }}
+      # v0.7.0 阶段 10：ebpf 后缀二进制构建（ADR-0016 / TD-19）。
+      # continue-on-error = true：Linux 真实编译未在 v0.7.0 周期验证过，
+      # 失败不阻断主 release（5 target 主二进制优先发货）；后续步骤用
+      # steps.build_kernel_elf.outcome == 'success' 条件触发。
+      - name: Build ebpf kernel ELF (linux only)
+        id: build_kernel_elf
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-gnu'
+        continue-on-error: true
+        run: cargo +nightly build -p proc-ebpf --target bpfel-unknown-none --release
+      - name: Build proc_ebpf userspace (linux only)
+        id: build_userspace_ebpf
+        if: steps.build_kernel_elf.outcome == 'success'
+        continue-on-error: true
+        run: cargo build --release --features ebpf --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
@@ -41,17 +60,35 @@ jobs:
           # Windows 二进制是 proc.exe，Linux/mac 是 proc
           # 用通配符 proc* 同时覆盖两种情况，但要清理掉非二进制（如有）
           cp README.md LICENSE CHANGELOG.md proc-${{ matrix.target }}/
+          cp -r completions/ proc-${{ matrix.target }}/
           ${{ matrix.archive_cmd }} proc-${{ matrix.target }}.${{ matrix.archive }} proc-${{ matrix.target }}
+      - name: Package proc_ebpf (linux only)
+        if: steps.build_userspace_ebpf.outcome == 'success'
+        shell: bash
+        run: |
+          mkdir -p proc_ebpf-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/proc proc_ebpf-${{ matrix.target }}/proc_ebpf
+          cp README.md LICENSE CHANGELOG.md proc_ebpf-${{ matrix.target }}/
+          cp -r completions/ proc_ebpf-${{ matrix.target }}/
+          tar czf proc_ebpf-${{ matrix.target }}.tar.gz proc_ebpf-${{ matrix.target }}
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: proc-${{ matrix.target }}
           path: proc-${{ matrix.target }}.${{ matrix.archive }}
+      - name: Upload proc_ebpf artifact (linux only)
+        if: steps.build_userspace_ebpf.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: proc_ebpf-${{ matrix.target }}
+          path: proc_ebpf-${{ matrix.target }}.tar.gz
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: proc-${{ matrix.target }}.${{ matrix.archive }}
+          files: |
+            proc-${{ matrix.target }}.${{ matrix.archive }}
+            ${{ steps.build_userspace_ebpf.outcome == 'success' && format('proc_ebpf-{0}.tar.gz', matrix.target) || '' }}
           generate_release_notes: true
           draft: true   # 草稿状态，给用户审核后手动 publish
 

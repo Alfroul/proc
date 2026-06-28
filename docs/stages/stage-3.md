@@ -7,8 +7,8 @@
 **前置依赖**：阶段 2 已完成。
 
 **依赖测试**（开工时跑这些测试的详情）：
-- `cargo test --release --tb=no -q`（全量回归 summary，应 ~641）
-- `cargo test --release test_env_mask test_self_mitigation test_record_protection test_restricted_spawn --tb=no -q`（阶段 2 新增安全测试详情）
+- `cargo test --release -q`（全量回归 summary，应 ~641）
+- `cargo test --release test_env_mask test_self_mitigation test_record_protection test_restricted_spawn -q`（阶段 2 新增安全测试详情）
 
 **预期代码量**：~780 行（含测试）
 
@@ -422,7 +422,7 @@ CONTEXT.md：在「当前术语」段补 `WorkerStats::health_badge` / `WorkerCr
 ### 验收命令
 
 ```bash
-cargo test --release --tb=no -q    # 阶段 2 完工后 ~641 → 阶段 3 新增 ~25 → ~666
+cargo test --release -q    # 阶段 2 完工后 ~641 → 阶段 3 新增 ~25 → ~666
 cargo clippy --release --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo build --release --no-default-features

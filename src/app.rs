@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 
 const SPARKLINE_LEN: usize = 30;
 const MAX_TRACKED: usize = 50;
@@ -18,7 +18,7 @@ pub use crate::app_panel::{AppGroupSortField, AppMode, KillRequest, MonitorAddSu
 pub use crate::replay::{ReplaySpeed, TimelineState};
 
 use crate::alert::AlertManager;
-use crate::app_panel::{KeyResult, Panel, PanelContext};
+use crate::app_panel::{Panel, PanelAction, PanelContext};
 use crate::classify;
 use crate::collect::{
     HEAVY_REFRESH_INTERVAL, ProcessInfo, ProcessViewMode, REFRESH_INTERVAL, SortField,
@@ -35,11 +35,35 @@ use crate::record::Player;
 use crate::replay::{ReplayAction, ReplayController};
 use crate::security::{BackgroundScorer, SecurityScore};
 use crate::tree::TreeNode;
+use crate::tui::command_palette::{CommandAction, CommandPalette, PaletteHandleResult};
 use crate::view_models::DockerPanel;
+use crate::view_models::DockerPanelController;
 use crate::view_models::MonitorPanel;
+use crate::view_models::MonitorPanelController;
 use crate::view_models::PortPanel;
+use crate::view_models::PortPanelController;
 use crate::view_models::ProcessPanel;
+use crate::view_models::ProcessPanelController;
 use crate::view_models::UsbPanel;
+use crate::view_models::UsbPanelController;
+
+/// v0.7.0 阶段 3：App 的按键分发层。
+///
+/// 决定一次按键优先派给「命令面板浮层 / 搜索框 / 当前面板」。Palette 激活时
+/// 拦截所有按键；Search 是从现有 panel 的 search 状态派生出来的「逻辑层」（兼容
+/// v0.6.0 测试，不破坏既有 `/` 进入搜索的行为）。
+///
+/// 详见 `docs/adr/0010-shell-completion-and-palette.md`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppLayer {
+    /// 默认层：按键派给当前面板（ProcessPanel / PortPanel / ...）。
+    #[default]
+    Normal,
+    /// 任一 panel 的 search 处于 active（`/` 进入）。逻辑层，无独立字段。
+    Search,
+    /// Ctrl+P 命令面板浮层激活，拦截所有按键。
+    Palette,
+}
 
 pub struct App {
     pub mode: AppMode,
@@ -51,11 +75,15 @@ pub struct App {
     pub pending_redraw: bool,
 
     // Panels
-    pub process_panel: ProcessPanel,
-    pub port_panel: PortPanel,
-    pub usb_panel: UsbPanel,
-    pub monitor_panel: MonitorPanel,
-    pub docker_panel: DockerPanel,
+    // v0.7.0 阶段 5：5 个 panel 字段类型从 `XxxPanel` 改为对应 controller。
+    // 字段名保留 `xxx_panel`（仅类型变），让 src/tui/* 的 `app.xxx_panel` 访问
+    // 路径不破坏 —— 调用方多一层 `.panel`（或 `.panel()`）取 inner。详见
+    // ADR-0012。
+    pub process_panel: ProcessPanelController,
+    pub port_panel: PortPanelController,
+    pub usb_panel: UsbPanelController,
+    pub monitor_panel: MonitorPanelController,
+    pub docker_panel: DockerPanelController,
 
     // v0.6.0 阶段 5：后台采集 worker（port / usb / net_flow / dns_log）统一由
     // `WorkerManager` 持有，详见 `src/workers/manager.rs`。Docker logs worker
@@ -65,6 +93,12 @@ pub struct App {
     // `self.workers.dns_log_worker`；这里只存数据。cap=1000 FIFO；仅内存缓冲，
     // 录屏（record/）路径不序列化任何 DNS 数据（隐私）。
     pub dns_log_recent: VecDeque<crate::dns_log::DnsQuery>,
+    // v0.7 阶段 8：eBPF flow graph（Linux + feature `ebpf`，ADR-0016）。
+    // ebpf worker 在 `self.workers.ebpf_worker`；这里存聚合后的 flows 快照 +
+    // FlowAggregator（累积 ring_buf 推上来的 FlowEvent，1s tick drain 一次）。
+    // 非 Linux / 无 feature / attach 失败 → worker 为 None，flows 保持空 Vec。
+    pub flows: Vec<crate::ebpf::flow::ProcessFlow>,
+    pub flow_aggregator: crate::ebpf::flow::FlowAggregator,
 
     // 阶段 9 E2：容器 exec 嵌入式 PTY。
     // container_exec = Some 仅在 AppMode::ContainerExec 时；其他模式必须为 None。
@@ -144,6 +178,13 @@ pub struct App {
     /// worker 崩溃后保留的最近 N 条 crash，TUI 在顶部渲染 banner。
     /// `tick()` 时 drain `crash_rx` 追加；用户按 `D` 在 `handle_key` 里清空。
     pub active_crashes: Vec<crate::metrics::crash::WorkerCrash>,
+
+    // v0.7.0 阶段 3：命令面板 Ctrl+P + AppLayer 状态机。
+    /// 当前显式激活的层。Normal / Search 是逻辑层（从 panel search 状态派生），
+    /// Palette 是显式覆盖（Ctrl+P 打开 / Esc 关闭）。
+    pub active_layer: AppLayer,
+    /// Ctrl+P 命令面板状态。常驻 App（避免每次打开重建 nucleo Matcher）。
+    pub command_palette: CommandPalette,
 }
 
 pub struct ProcHistory {
@@ -162,9 +203,11 @@ impl App {
 
         let mut process_panel = ProcessPanel::new(&processes[..]);
         process_panel.init_tree(&processes[..], mem_total);
+        let process_panel = ProcessPanelController::new(process_panel);
 
         let mut port_panel = PortPanel::new();
         port_panel.port_entries = port_entries;
+        let port_panel = PortPanelController::new(port_panel);
 
         let is_windows = cfg!(target_os = "windows");
         let status_message = if crate::ui_state::load_first_run() {
@@ -193,6 +236,7 @@ impl App {
         let workers = crate::workers::WorkerManager::new(Some(&crash_tx));
         let mut docker_panel = DockerPanel::new();
         docker_panel.crash_tx = Some(crash_tx);
+        let docker_panel = DockerPanelController::new(docker_panel);
 
         Ok(Self {
             mode: AppMode::ProcessList,
@@ -204,11 +248,13 @@ impl App {
             pending_redraw: true,
             process_panel,
             port_panel,
-            usb_panel: UsbPanel::new(),
-            monitor_panel: MonitorPanel::new(),
+            usb_panel: UsbPanelController::new(UsbPanel::new()),
+            monitor_panel: MonitorPanelController::new(MonitorPanel::new()),
             docker_panel,
             workers,
             dns_log_recent: VecDeque::new(),
+            flows: Vec::new(),
+            flow_aggregator: crate::ebpf::flow::FlowAggregator::new(),
             container_exec: None,
             container_exec_vt: None,
             pending_container_exec_target: None,
@@ -246,6 +292,8 @@ impl App {
             sidebar_expanded: crate::ui_state::load_sidebar_expanded(),
             crash_rx: Some(crash_rx),
             active_crashes: Vec::new(),
+            active_layer: AppLayer::Normal,
+            command_palette: CommandPalette::new(),
         })
     }
 
@@ -280,13 +328,9 @@ impl App {
     #[must_use]
     pub fn worker_metrics(&self) -> Vec<crate::metrics::NamedWorkerStats> {
         // v0.6.0 阶段 5：4 个直管 worker 的 metrics 走 WorkerManager 聚合。
+        // v0.7.0 阶段 1 TD-5：Docker snapshot + logs worker 由 DockerPanel::metrics 聚合。
         let mut out = self.workers.metrics_snapshot();
-        if let Some(w) = self.docker_panel.snapshot_worker.as_ref() {
-            out.push(crate::metrics::NamedWorkerStats {
-                name: "docker",
-                stats: w.metrics.snapshot(),
-            });
-        }
+        out.extend(self.docker_panel.panel.metrics());
         out
     }
 
@@ -383,11 +427,11 @@ impl App {
             }
             KeyCode::Char('2') => {
                 self.switch_mode(AppMode::ProcessList);
-                self.process_panel.process_view_mode = ProcessViewMode::Tree;
-                self.process_panel.cursor_index = 0;
-                self.process_panel.scroll_offset = 0;
-                self.process_panel.tree_cursor = 0;
-                self.process_panel.tree_scroll = 0;
+                self.process_panel.panel.process_view_mode = ProcessViewMode::Tree;
+                self.process_panel.panel.cursor_index = 0;
+                self.process_panel.panel.scroll_offset = 0;
+                self.process_panel.panel.tree_cursor = 0;
+                self.process_panel.panel.tree_scroll = 0;
                 self.status_message = Some("视图: 进程树".to_string());
                 true
             }
@@ -457,8 +501,13 @@ impl App {
             return;
         }
 
-        // v0.6.0 阶段 3：worker 崩溃 banner — 按 D 清空，优先级高于其他绑定。
-        if key.code == KeyCode::Char('D') && !self.active_crashes.is_empty() {
+        // v0.6.0 阶段 3：worker 崩溃 banner — 按 D 清空。
+        // v0.7.0 阶段 3：palette 激活时让位 —— 'D' 喂给 palette 输入框（fuzzy 搜
+        // "dismiss" 仍可触发 DismissCrashes action）。
+        if key.code == KeyCode::Char('D')
+            && !self.active_crashes.is_empty()
+            && self.active_layer != AppLayer::Palette
+        {
             self.dismiss_all_crashes();
             return;
         }
@@ -475,6 +524,29 @@ impl App {
             return;
         }
 
+        // v0.7.0 阶段 3：命令面板浮层 —— 拦截所有按键（除上方 modal 外）。
+        // Stay = 输入字符 / 上下选择；Close = Esc 取消；Execute = Enter 触发 action。
+        if self.active_layer == AppLayer::Palette {
+            let result = self.command_palette.handle_key(key);
+            match result {
+                PaletteHandleResult::Stay => {}
+                PaletteHandleResult::Close => self.active_layer = AppLayer::Normal,
+                PaletteHandleResult::Execute(action) => {
+                    self.active_layer = AppLayer::Normal;
+                    self.dispatch_command_action(action);
+                }
+            }
+            return;
+        }
+
+        // v0.7.0 阶段 3：Ctrl+P 打开命令面板。Replay / ContainerExec 内核被
+        // 内部模式捕获（容器 PTY / 回放时间轴），不拦截。
+        if is_ctrl_p(&key) && !self.keyboard_captured_by_inner_mode() {
+            self.active_layer = AppLayer::Palette;
+            self.command_palette.reset();
+            return;
+        }
+
         // Global recording toggle
         if key.code == KeyCode::Char('R') {
             self.toggle_recording();
@@ -482,14 +554,14 @@ impl App {
         }
 
         // Global tab switching (only when no search/submenu active)
-        let any_search = self.process_panel.search.is_active()
-            || self.process_panel.tree_search.is_active()
-            || self.process_panel.app_group_search.is_active()
-            || self.port_panel.port_search.is_active()
+        let any_search = self.process_panel.panel.search.is_active()
+            || self.process_panel.panel.tree_search.is_active()
+            || self.process_panel.panel.app_group_search.is_active()
+            || self.port_panel.panel.port_search.is_active()
             || self.inspector.inspection_search.is_active();
         if !any_search
             && !self.kill_confirm
-            && self.monitor_panel.add_submenu.is_none()
+            && self.monitor_panel.panel.add_submenu.is_none()
             && self.try_handle_tab_switch(key)
         {
             return;
@@ -557,18 +629,29 @@ impl App {
                     self.handle_replay_key(key);
                     return;
                 }
-                AppMode::Help => KeyResult::Ignored,
+                AppMode::Help => PanelAction::Noop,
             }
         };
 
-        // Handle KeyResult
+        // v0.7.0 阶段 5：dispatch PanelAction 副作用。controller 内部已通过 ctx
+        // mutable ref 处理了大部分状态变更；此处只翻译"出带"的 PanelAction
+        // 变体（Quit / SwitchMode / 状态消息 / kill / 剪贴板）。ToggleRecording
+        // 现无 controller emit，预留分支。
         match result {
-            KeyResult::Quit => self.should_quit = true,
-            KeyResult::SwitchMode(mode) => self.switch_mode(mode),
-            KeyResult::Consumed | KeyResult::Ignored | KeyResult::ToggleRecording => {}
+            PanelAction::Quit => self.should_quit = true,
+            PanelAction::SwitchMode(mode) => self.switch_mode(mode),
+            PanelAction::StatusMessage(s) => self.status_message = Some(s),
+            PanelAction::Kill(req) => {
+                self.pending_kill = Some(req);
+                self.kill_confirm = true;
+            }
+            PanelAction::Clipboard(s) => {
+                let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(s));
+            }
+            PanelAction::Noop | PanelAction::ToggleRecording => {}
         }
 
-        // If pending_kill was set by a panel, enable kill_confirm
+        // If pending_kill was set by a panel via ctx, enable kill_confirm
         if self.pending_kill.is_some() {
             self.kill_confirm = true;
         }
@@ -588,17 +671,20 @@ impl App {
             }
         }
         if mode == AppMode::ProcessList {
-            self.process_panel.process_view_mode = ProcessViewMode::List;
-            self.process_panel.cursor_index = 0;
-            self.process_panel.scroll_offset = 0;
+            self.process_panel.panel.process_view_mode = ProcessViewMode::List;
+            self.process_panel.panel.cursor_index = 0;
+            self.process_panel.panel.scroll_offset = 0;
         }
         if mode == AppMode::UsbAssistant && self.mode != AppMode::UsbAssistant {
-            self.usb_panel.scan_devices(&self.cached_processes[..]);
+            self.usb_panel
+                .panel
+                .scan_devices(&self.cached_processes[..]);
         }
         if mode == AppMode::DockerPanel && self.mode != AppMode::DockerPanel {
-            self.docker_panel.refresh();
-            if self.docker_panel.connected && self.docker_panel.event_receiver.is_none() {
-                self.docker_panel.start_watching();
+            self.docker_panel.panel.refresh();
+            if self.docker_panel.panel.connected && self.docker_panel.panel.event_receiver.is_none()
+            {
+                self.docker_panel.panel.start_watching();
             }
         }
         // 进入详情页时预加载 Inspector 数据：env/dlls/handles/memory 一次采集（同步）。
@@ -607,12 +693,12 @@ impl App {
         // 失败的子项会退化为空 Vec，TUI 层在 Tab 内显示「无数据」。
         if mode == AppMode::ProcessDetail {
             let ports_snapshot: Vec<crate::port_map::PortEntry> =
-                self.port_panel.port_entries.clone();
+                self.port_panel.panel.port_entries.clone();
             // v0.6.0 阶段 5：详情页初始化整体封装到 InspectorController::open。
             self.inspector.open(&ports_snapshot);
         }
         self.mode = mode;
-        self.process_panel.search.clear();
+        self.process_panel.panel.search.clear();
         self.status_message = None;
         self.data_dirty = true;
 
@@ -637,6 +723,7 @@ impl App {
         // 拿 image 用于 detect_default_shell（用户没显式传 cmd 时）。
         let image = self
             .docker_panel
+            .panel
             .containers
             .iter()
             .find(|c| c.name == target || c.id.starts_with(&target))
@@ -645,6 +732,7 @@ impl App {
         // 检查容器在运行状态（docker exec 需要容器 running）。
         let is_running = self
             .docker_panel
+            .panel
             .containers
             .iter()
             .find(|c| c.name == target || c.id.starts_with(&target))
@@ -731,7 +819,8 @@ impl App {
         // v0.6.0 阶段 5：键盘路由整体封装到 InspectorController::handle_key；
         // 副作用（status_message / kill / record_op / clipboard / monitor）通过
         // InspectorAction 派发回 App 处理。
-        let ports_snapshot: Vec<crate::port_map::PortEntry> = self.port_panel.port_entries.clone();
+        let ports_snapshot: Vec<crate::port_map::PortEntry> =
+            self.port_panel.panel.port_entries.clone();
         let action = self
             .inspector
             .handle_key(key, &ports_snapshot, self.recording_wanted);
@@ -741,7 +830,7 @@ impl App {
                 self.status_message = Some(msg);
             }
             InspectorAction::Close => {
-                self.process_panel.process_view_mode = ProcessViewMode::List;
+                self.process_panel.panel.process_view_mode = ProcessViewMode::List;
                 self.mode = AppMode::ProcessList;
             }
             InspectorAction::BumpPriority { pid, up } => {
@@ -779,12 +868,12 @@ impl App {
                 }
             }
             InspectorAction::AddMonitor(pid) => {
-                match self.monitor_panel.manager.add_monitor(
+                match self.monitor_panel.panel.manager.add_monitor(
                     crate::monitor::MonitorTarget::ByPid { pid },
                     crate::monitor::RestartPolicy::NotifyOnly,
                 ) {
                     Ok(monitor_id) => {
-                        self.monitor_panel.manager.add_notification(format!(
+                        self.monitor_panel.panel.manager.add_notification(format!(
                             "已添加 PID {} 监控 (ID: {})",
                             pid, monitor_id
                         ));
@@ -806,6 +895,32 @@ impl App {
                     Err(e) => {
                         tracing::warn!("剪贴板复制失败: {}", e);
                         self.status_message = Some(format!("复制失败: {}", e));
+                    }
+                }
+            }
+            InspectorAction::ToggleEcoQoS { pid, make_eco } => {
+                // v0.7 阶段 6：派发 EcoQoS 切换（ADR-0014）。非 Windows 平台
+                // set_throttle 返回错误，写入 status_message；不退出详情页。
+                match crate::throttle::set_throttle(pid, make_eco) {
+                    Ok(()) => {
+                        self.status_message = Some(format!(
+                            "PID {} EcoQoS 已切换为 {}",
+                            pid,
+                            if make_eco { "Eco (🍃)" } else { "Normal" }
+                        ));
+                        // 立即刷新 detail_process 的 throttled 字段，避免
+                        // 用户等下一个 heavy tick（~2s）才看到 UI 更新。
+                        if let Some(p) = self.inspector.detail_process.as_mut() {
+                            p.throttled = if make_eco {
+                                crate::throttle::EcoQoSState::Eco
+                            } else {
+                                crate::throttle::EcoQoSState::Normal
+                            };
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("EcoQoS 切换失败 (PID {}): {}", pid, e);
+                        self.status_message = Some(format!("EcoQoS 切换失败: {}", e));
                     }
                 }
             }
@@ -848,20 +963,22 @@ impl App {
 
     fn restore_replay_panel_data(&mut self, frame: &crate::record::frame::UiFrame) {
         self.cached_processes = Arc::new(frame.processes.iter().map(ProcessInfo::from).collect());
-        self.process_panel.tree_nodes = frame.tree_nodes.iter().map(TreeNode::from).collect();
-        self.port_panel.port_entries = frame.port_entries.iter().map(PortEntry::from).collect();
-        self.port_panel.port_view_mode = NetworkViewMode::from_frame_code(frame.port_view_mode);
-        self.usb_panel.devices = frame
+        self.process_panel.panel.tree_nodes = frame.tree_nodes.iter().map(TreeNode::from).collect();
+        self.port_panel.panel.port_entries =
+            frame.port_entries.iter().map(PortEntry::from).collect();
+        self.port_panel.panel.port_view_mode =
+            NetworkViewMode::from_frame_code(frame.port_view_mode);
+        self.usb_panel.panel.devices = frame
             .usb_devices
             .iter()
             .map(RemovableDevice::from)
             .collect();
-        self.usb_panel.locks = frame
+        self.usb_panel.panel.locks = frame
             .usb_locks
             .iter()
             .map(|l| (HandleLock::from(l), HandleRisk::from(l)))
             .collect();
-        self.docker_panel.containers = frame
+        self.docker_panel.panel.containers = frame
             .docker_containers
             .iter()
             .map(ContainerInfo::from)
@@ -886,38 +1003,38 @@ impl App {
     }
 
     fn restore_replay_view_mode(&mut self, frame: &crate::record::frame::UiFrame) {
-        self.process_panel.process_view_mode = match frame.process_view_mode {
+        self.process_panel.panel.process_view_mode = match frame.process_view_mode {
             1 => ProcessViewMode::Tree,
             2 => ProcessViewMode::AppGroup,
             _ => ProcessViewMode::List,
         };
 
-        if self.process_panel.process_view_mode == ProcessViewMode::AppGroup {
-            self.process_panel.app_groups = crate::app_group::compute_groups(
+        if self.process_panel.panel.process_view_mode == ProcessViewMode::AppGroup {
+            self.process_panel.panel.app_groups = crate::app_group::compute_groups(
                 &self.cached_processes[..],
-                &mut self.process_panel.version_info_cache,
+                &mut self.process_panel.panel.version_info_cache,
             );
-            self.process_panel.app_group_sort_groups();
+            self.process_panel.panel.app_group_sort_groups();
         }
     }
 
     fn restore_replay_nav(&mut self, nav: crate::record::frame::FrameNav) {
-        self.process_panel.cursor_index = nav.cursor;
-        self.process_panel.scroll_offset = nav.scroll;
-        self.process_panel.selected_pids = nav.selected.into_iter().collect();
-        self.process_panel.tree_cursor = nav.tree_cursor;
-        self.process_panel.tree_scroll = nav.tree_scroll;
-        self.process_panel.tree_selected_pids = nav.tree_selected.into_iter().collect();
-        self.port_panel.port_cursor = nav.port_cursor;
-        self.port_panel.port_scroll = nav.port_scroll;
-        self.port_panel.port_process_cursor = nav.port_process_cursor;
-        self.port_panel.port_process_scroll = nav.port_process_scroll;
-        self.port_panel.port_remote_cursor = nav.port_remote_cursor;
-        self.port_panel.port_remote_scroll = nav.port_remote_scroll;
-        self.usb_panel.device_cursor = nav.usb_device_cursor;
-        self.monitor_panel.cursor = nav.monitor_cursor;
-        self.docker_panel.cursor = nav.docker_cursor;
-        self.docker_panel.scroll = nav.docker_scroll;
+        self.process_panel.panel.cursor_index = nav.cursor;
+        self.process_panel.panel.scroll_offset = nav.scroll;
+        self.process_panel.panel.selected_pids = nav.selected.into_iter().collect();
+        self.process_panel.panel.tree_cursor = nav.tree_cursor;
+        self.process_panel.panel.tree_scroll = nav.tree_scroll;
+        self.process_panel.panel.tree_selected_pids = nav.tree_selected.into_iter().collect();
+        self.port_panel.panel.port_cursor = nav.port_cursor;
+        self.port_panel.panel.port_scroll = nav.port_scroll;
+        self.port_panel.panel.port_process_cursor = nav.port_process_cursor;
+        self.port_panel.panel.port_process_scroll = nav.port_process_scroll;
+        self.port_panel.panel.port_remote_cursor = nav.port_remote_cursor;
+        self.port_panel.panel.port_remote_scroll = nav.port_remote_scroll;
+        self.usb_panel.panel.device_cursor = nav.usb_device_cursor;
+        self.monitor_panel.panel.cursor = nav.monitor_cursor;
+        self.docker_panel.panel.cursor = nav.docker_cursor;
+        self.docker_panel.panel.scroll = nav.docker_scroll;
     }
 
     fn handle_kill_confirm(&mut self, key: KeyEvent) {
@@ -951,12 +1068,13 @@ impl App {
                     }
                     self.status_message = Some(results.join("; "));
                     self.record_op(results.join("; "));
-                    self.process_panel.selected_pids.clear();
-                    self.process_panel.tree_selected_pids.clear();
+                    self.process_panel.panel.selected_pids.clear();
+                    self.process_panel.panel.tree_selected_pids.clear();
                     if let Err(e) = self.snapshot.refresh() {
                         tracing::warn!("刷新进程列表失败: {}", e);
                     }
                     self.process_panel
+                        .panel
                         .refresh_tree(&self.cached_processes[..], self.snapshot.memory_usage().1);
                 }
                 self.kill_confirm = false;
@@ -1008,7 +1126,7 @@ impl App {
         }
 
         if self.mode != AppMode::ProcessList
-            || self.process_panel.process_view_mode != ProcessViewMode::List
+            || self.process_panel.panel.process_view_mode != ProcessViewMode::List
         {
             return;
         }
@@ -1022,19 +1140,19 @@ impl App {
         if data_row < 0 {
             return;
         }
-        let clicked_index = data_row as usize + self.process_panel.scroll_offset;
+        let clicked_index = data_row as usize + self.process_panel.panel.scroll_offset;
 
         use crossterm::event::{MouseButton, MouseEventKind};
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) if clicked_index < self.cached_sorted.len() => {
-                self.process_panel.cursor_index = clicked_index;
+                self.process_panel.panel.cursor_index = clicked_index;
                 // Toggle select
                 if let Some((idx, _)) = self.cached_sorted.get(clicked_index) {
                     let pid = self.cached_processes[*idx].pid;
-                    if self.process_panel.selected_pids.contains(&pid) {
-                        self.process_panel.selected_pids.remove(&pid);
+                    if self.process_panel.panel.selected_pids.contains(&pid) {
+                        self.process_panel.panel.selected_pids.remove(&pid);
                     } else {
-                        self.process_panel.selected_pids.insert(pid);
+                        self.process_panel.panel.selected_pids.insert(pid);
                     }
                 }
             }
@@ -1046,45 +1164,47 @@ impl App {
         self.pending_redraw = true;
         match self.mode {
             AppMode::ProcessList | AppMode::ProcessDetail => {
-                if self.process_panel.process_view_mode == ProcessViewMode::Tree {
-                    self.process_panel.tree_move_cursor(lines);
-                } else if self.process_panel.process_view_mode == ProcessViewMode::AppGroup {
-                    self.process_panel.app_group_move_cursor(lines);
+                if self.process_panel.panel.process_view_mode == ProcessViewMode::Tree {
+                    self.process_panel.panel.tree_move_cursor(lines);
+                } else if self.process_panel.panel.process_view_mode == ProcessViewMode::AppGroup {
+                    self.process_panel.panel.app_group_move_cursor(lines);
                 } else {
-                    self.process_panel.move_cursor(lines, &self.cached_sorted);
+                    self.process_panel
+                        .panel
+                        .move_cursor(lines, &self.cached_sorted);
                 }
             }
             AppMode::PortMap => {
-                let total = self.port_panel.visible_port_count();
+                let total = self.port_panel.panel.visible_port_count();
                 if total == 0 {
                     return;
                 }
-                let new = self.port_panel.port_cursor as i32 + lines;
-                self.port_panel.port_cursor = new.clamp(0, (total - 1) as i32) as usize;
+                let new = self.port_panel.panel.port_cursor as i32 + lines;
+                self.port_panel.panel.port_cursor = new.clamp(0, (total - 1) as i32) as usize;
             }
             AppMode::DockerPanel => {
-                let total = self.docker_panel.containers.len();
+                let total = self.docker_panel.panel.containers.len();
                 if total == 0 {
                     return;
                 }
-                let new = self.docker_panel.cursor as i32 + lines;
-                self.docker_panel.cursor = new.clamp(0, (total - 1) as i32) as usize;
+                let new = self.docker_panel.panel.cursor as i32 + lines;
+                self.docker_panel.panel.cursor = new.clamp(0, (total - 1) as i32) as usize;
             }
             AppMode::UsbAssistant => {
-                let total = self.usb_panel.devices.len();
+                let total = self.usb_panel.panel.devices.len();
                 if total == 0 {
                     return;
                 }
-                let new = self.usb_panel.device_cursor as i32 + lines;
-                self.usb_panel.device_cursor = new.clamp(0, (total - 1) as i32) as usize;
+                let new = self.usb_panel.panel.device_cursor as i32 + lines;
+                self.usb_panel.panel.device_cursor = new.clamp(0, (total - 1) as i32) as usize;
             }
             AppMode::MonitorPanel => {
-                let total = self.monitor_panel.manager.list_monitors().len();
+                let total = self.monitor_panel.panel.manager.list_monitors().len();
                 if total == 0 {
                     return;
                 }
-                let new = self.monitor_panel.cursor as i32 + lines;
-                self.monitor_panel.cursor = new.clamp(0, (total - 1) as i32) as usize;
+                let new = self.monitor_panel.panel.cursor as i32 + lines;
+                self.monitor_panel.panel.cursor = new.clamp(0, (total - 1) as i32) as usize;
             }
             _ => {}
         }
@@ -1107,7 +1227,7 @@ impl App {
     }
 
     pub fn get_selected_pids(&self) -> Vec<u32> {
-        self.process_panel.get_selected_pids()
+        self.process_panel.panel.get_selected_pids()
     }
 
     // --- Tick ---
@@ -1137,6 +1257,7 @@ impl App {
             self.tick_history_sample(had_heavy);
             self.tick_alert_evaluate();
             self.tick_dns_log();
+            self.tick_flows_ebpf();
             self.tick_panels();
             self.tick_usb_monitor_docker();
             self.tick_self_monitor();
@@ -1148,8 +1269,8 @@ impl App {
             needs_draw = true;
         }
 
-        if self.port_panel.port_filter_dirty {
-            self.port_panel.rebuild_port_filters();
+        if self.port_panel.panel.port_filter_dirty {
+            self.port_panel.panel.rebuild_port_filters();
             needs_draw = true;
         }
 
@@ -1181,6 +1302,7 @@ impl App {
                 Ok(true) => {
                     self.cached_processes = self.snapshot.cached_processes_arc();
                     self.update_disk_speeds();
+                    self.overlay_disk_speeds_etw();
                     self.update_net_rates();
 
                     let alive_pids: HashSet<u32> =
@@ -1197,8 +1319,9 @@ impl App {
 
                     if !self.scoring_pending {
                         let procs = Arc::clone(&self.cached_processes);
-                        let ports = std::sync::Arc::new(self.port_panel.port_entries.clone());
-                        self.background_scorer.request(procs, ports);
+                        let ports = std::sync::Arc::new(self.port_panel.panel.port_entries.clone());
+                        let flows = std::sync::Arc::new(self.flows.clone());
+                        self.background_scorer.request(procs, ports, flows);
                         self.scoring_pending = true;
                     }
                 }
@@ -1239,6 +1362,31 @@ impl App {
             .map(|p| ((p.pid, p.start_time), p.disk_usage))
             .collect();
         self.prev_process_disk_time = now;
+    }
+
+    /// v0.7 阶段 7：从 [`disk_io_etw_worker`] drain 最新一份 per-PID BPS，
+    /// **覆盖** `update_disk_speeds` 写入的 sysinfo delta（ETW 更准）。
+    ///
+    /// 设计：
+    /// - 先跑 `update_disk_speeds`（sysinfo delta 填充），再用 ETW 数据覆写匹配 PID
+    /// - ETW 缺失的 PID（thread_map 没刷到 / 未知 kernel thread）保留 sysinfo 值
+    /// - 无 worker（非 Windows / 非管理员 / session 占用）→ 整个方法 no-op
+    /// - drain 后 worker 内部 sync_channel(1) 空，下一次 tick 不会有「旧帧」污染
+    fn overlay_disk_speeds_etw(&mut self) {
+        let Some(worker) = &self.workers.disk_io_etw_worker else {
+            return;
+        };
+        let Some(map) = worker.try_recv_latest() else {
+            return;
+        };
+
+        let procs = Arc::make_mut(&mut self.cached_processes);
+        for proc in procs.iter_mut() {
+            if let Some(stats) = map.get(&proc.pid) {
+                proc.disk_read_speed = stats.read_bps;
+                proc.disk_write_speed = stats.write_bps;
+            }
+        }
     }
 
     /// 阶段 7 D1：从 [`net_flow_worker`] drain 最新一份 per-PID 速率，贴回
@@ -1300,6 +1448,35 @@ impl App {
                 self.dns_log_recent.pop_front();
             }
         }
+    }
+
+    /// v0.7 阶段 8：从 [`crate::ebpf`] drain FlowEvents（Linux + feature
+    /// `ebpf` only），ingest 到 `flow_aggregator` + DNS 关联，drain 出
+    /// ProcessFlow 快照贴到 `App::flows`。worker 不存在时跳过。
+    ///
+    /// 节奏：与 `tick_dns_log` / REFRESH_INTERVAL 同款（1s），主线程非阻塞。
+    /// 隐私：与 dns_log_recent 同源——`ProcessFlow.dns_name` 不持久化。
+    ///
+    /// **Part B 任务 9（exit-accounting）**：即使本 tick 无新事件，
+    /// 只要 aggregator 非空就跑一次 [`FlowAggregator::reaper_tick`]，把
+    /// 超过 [`GHOST_FLOW_TTL`] 的幽灵 flow 移除。否则进程退出后 ghost
+    /// 会一直挂在 `App::flows` 里。
+    fn tick_flows_ebpf(&mut self) {
+        let events = crate::ebpf::drain_events(self.workers.ebpf_worker.as_ref());
+        if events.is_empty() && self.flow_aggregator.is_empty() {
+            return;
+        }
+        let now = std::time::SystemTime::now();
+        if !events.is_empty() {
+            self.flow_aggregator
+                .ingest_events(events, &self.dns_log_recent, now);
+        }
+        // reaper_tick 必须每 tick 跑：无新事件时也要清过期 ghost。
+        let _reaped = self.flow_aggregator.reaper_tick(now);
+        self.flows = self.flow_aggregator.drain();
+        // flows 列表变化后 clamp 光标，避免端口面板 Flow 子视图越界。
+        let total = self.flows.len();
+        self.port_panel.panel.flow_clamp_cursor(total);
     }
 
     fn tick_throttle_check(&mut self) {
@@ -1468,12 +1645,12 @@ impl App {
             pending_container_exec: &mut self.pending_container_exec_target,
         };
         if self.mode == AppMode::ProcessList {
-            self.process_panel.tick(&mut ctx);
+            self.process_panel.panel.tick(&mut ctx);
         } else if self.mode == AppMode::PortMap {
             if let Some(sockets) = new_sockets {
-                self.port_panel.pending_sockets = Some(sockets);
+                self.port_panel.panel.pending_sockets = Some(sockets);
             }
-            self.port_panel.tick(&mut ctx);
+            self.port_panel.panel.tick(&mut ctx);
         }
     }
 
@@ -1484,36 +1661,64 @@ impl App {
         if self.mode == AppMode::UsbAssistant
             && let Some(snap) = self.workers.usb_worker.try_recv_latest()
         {
-            self.usb_panel.merge_devices(snap.devices);
+            self.usb_panel.panel.merge_devices(snap.devices);
         }
-        self.monitor_panel.poll_events();
+        self.monitor_panel.panel.poll_events();
         if self.mode == AppMode::DockerPanel {
-            self.docker_panel.poll_events();
+            self.docker_panel.panel.poll_events();
         }
     }
 
     fn clamp_cursors(&mut self) {
         let total = self.cached_sorted.len();
-        if self.process_panel.cursor_index >= total && total > 0 {
-            self.process_panel.cursor_index = total - 1;
+        if self.process_panel.panel.cursor_index >= total && total > 0 {
+            self.process_panel.panel.cursor_index = total - 1;
         }
     }
 
     fn rebuild_sorted_cache(&mut self) {
         let processes: &[ProcessInfo] = &self.cached_processes[..];
-        let search = &self.process_panel.search;
-        let query = search.query();
-        let filtered: Vec<&ProcessInfo> = if query.is_empty() {
-            processes.iter().collect()
-        } else {
-            // v0.6.0 阶段 4：搜索 query 一次性 lowercase（O(query.len())），
-            // 进程名匹配走 `ProcessInfo::name_lower` 预算字段，避免每进程每按键
-            // `to_lowercase` 分配。
-            let q_lower = search.query_lower();
-            processes
-                .iter()
-                .filter(|p| p.name_lower.contains(q_lower) || p.pid.to_string().contains(query))
-                .collect()
+        let search = &self.process_panel.panel.search;
+        // v0.7.0 阶段 4：按 QueryMode 分支。
+        // - Substring：v0.6 行为 100% 保留（name_lower.contains(q_lower) || pid.contains）。
+        // - FilterExpr：用 search.filter_expr（None 时无过滤；parse 失败时保留上一次成功 AST，
+        //   见 SearchState::reparse_filter）。security_score 从 self.security_scores 查，
+        //   ProcessInfo 本身不持分数。
+        let filtered: Vec<&ProcessInfo> = match search.mode {
+            crate::search::QueryMode::Substring => {
+                let query = search.query();
+                if query.is_empty() {
+                    processes.iter().collect()
+                } else {
+                    // v0.6.0 阶段 4：搜索 query 一次性 lowercase（O(query.len())），
+                    // 进程名匹配走 `ProcessInfo::name_lower` 预算字段，避免每进程每按键
+                    // `to_lowercase` 分配。
+                    let q_lower = search.query_lower();
+                    processes
+                        .iter()
+                        .filter(|p| {
+                            p.name_lower.contains(q_lower) || p.pid.to_string().contains(query)
+                        })
+                        .collect()
+                }
+            }
+            crate::search::QueryMode::FilterExpr => match &search.filter_expr {
+                Some(expr) => {
+                    let security_scores = &self.security_scores;
+                    processes
+                        .iter()
+                        .filter(|p| {
+                            let score = security_scores.get(&p.pid).map(|s| s.score);
+                            let ctx = crate::filter::EvalCtx {
+                                process: p,
+                                security_score: score,
+                            };
+                            expr.apply(&ctx)
+                        })
+                        .collect()
+                }
+                None => processes.iter().collect(),
+            },
         };
 
         // 一次性建索引，避免 N 次 O(N) position 查找 → O(N²)。
@@ -1529,7 +1734,7 @@ impl App {
             .map(|p| (classify::classify_process(p), p))
             .collect();
 
-        let sort_field = self.process_panel.sort_field;
+        let sort_field = self.process_panel.panel.sort_field;
         // P1.1/P1.2: tie-breaker 加 pid 防止同分进程顺序抖动；
         // Name 路径直接复用预计算的 name_lower，省掉 N 次 to_lowercase。
         if sort_field == SortField::Name {
@@ -1602,10 +1807,10 @@ impl App {
     }
 
     pub fn shutdown(&mut self) {
-        for handle in &self.monitor_panel.watchdog_handles {
+        for handle in &self.monitor_panel.panel.watchdog_handles {
             handle.stop();
         }
-        for handle in &self.monitor_panel.port_handles {
+        for handle in &self.monitor_panel.panel.port_handles {
             handle.stop();
         }
     }
@@ -1621,43 +1826,45 @@ impl App {
     }
 
     pub fn usb_scan_devices(&mut self) {
-        self.usb_panel.scan_devices(&self.cached_processes[..]);
+        self.usb_panel
+            .panel
+            .scan_devices(&self.cached_processes[..]);
     }
 
     pub fn docker_refresh(&mut self) {
-        self.docker_panel.refresh();
+        self.docker_panel.panel.refresh();
     }
 
     pub fn monitor_poll_events(&mut self) {
-        self.monitor_panel.poll_events();
+        self.monitor_panel.panel.poll_events();
     }
 
     pub fn docker_poll_events(&mut self) {
-        self.docker_panel.poll_events();
+        self.docker_panel.panel.poll_events();
     }
 
     pub fn filtered_ports(&self) -> &[PortEntry] {
-        self.port_panel.filtered_ports()
+        self.port_panel.panel.filtered_ports()
     }
 
     pub fn filtered_process_groups(&self) -> &[crate::port_map::ProcessNetGroup] {
-        self.port_panel.filtered_process_groups()
+        self.port_panel.panel.filtered_process_groups()
     }
 
     pub fn filtered_remote_groups(&self) -> &[crate::port_map::RemoteGroup] {
-        self.port_panel.filtered_remote_groups()
+        self.port_panel.panel.filtered_remote_groups()
     }
 
     pub fn anomaly_count(&self) -> usize {
-        self.port_panel.anomaly_count()
+        self.port_panel.panel.anomaly_count()
     }
 
     pub fn visible_anomalies(&self) -> Vec<&crate::anomaly::Anomaly> {
-        self.port_panel.visible_anomalies()
+        self.port_panel.panel.visible_anomalies()
     }
 
     pub fn dismiss_anomaly(&mut self, id: &str) {
-        self.port_panel.dismiss_anomaly(id);
+        self.port_panel.panel.dismiss_anomaly(id);
     }
 
     /// A4：进程优先级 +1 / -1 档（详情页 `+`/`-`、列表页 `+`/`-` 都走这里）。
@@ -1711,5 +1918,178 @@ impl App {
     /// A4：进程列表 `+`/`-` 公开入口 —— ProcessPanel 直接调，免去重复样板。
     pub fn bump_selected_priority(&mut self, pid: u32, up: bool) {
         self.bump_priority(pid, up);
+    }
+
+    // ---- v0.7.0 阶段 3：命令面板 ----
+
+    /// 当前生效的层（Normal / Search / Palette）。Search 是从 panel search 状态
+    /// 派生出来的逻辑层；Palette 由 `active_layer` 字段显式覆盖。
+    #[must_use]
+    pub fn current_layer(&self) -> AppLayer {
+        if self.active_layer == AppLayer::Palette {
+            AppLayer::Palette
+        } else if self.any_search_active() {
+            AppLayer::Search
+        } else {
+            AppLayer::Normal
+        }
+    }
+
+    /// 是否打开了命令面板浮层（语义上等价于 `active_layer == Palette`，但名字
+    /// 更直观，给测试 / 渲染层用）。
+    #[must_use]
+    pub fn is_palette_open(&self) -> bool {
+        self.active_layer == AppLayer::Palette
+    }
+
+    fn any_search_active(&self) -> bool {
+        self.process_panel.panel.search.is_active()
+            || self.process_panel.panel.tree_search.is_active()
+            || self.process_panel.panel.app_group_search.is_active()
+            || self.port_panel.panel.port_search.is_active()
+            || self.inspector.inspection_search.is_active()
+    }
+
+    /// Replay / ContainerExec 模式下，按键被内部时间轴 / PTY 完全捕获，命令面板
+    /// 不应该拦截。Help 模式同理（用户在读帮助，按 ?/Esc 退出）。
+    #[must_use]
+    fn keyboard_captured_by_inner_mode(&self) -> bool {
+        matches!(
+            self.mode,
+            AppMode::Replay | AppMode::ContainerExec | AppMode::Help
+        )
+    }
+
+    /// 命令面板执行选中项。各 CommandAction 映射到既有的副作用路径 ——
+    /// 简单状态切换直接改字段，复杂操作（kill / docker restart）调用既有 panel 方法。
+    fn dispatch_command_action(&mut self, action: CommandAction) {
+        match action {
+            CommandAction::Quit => self.should_quit = true,
+            CommandAction::SwitchPanel(mode) => self.switch_mode(mode),
+            CommandAction::SetProcessViewMode(view) => {
+                self.switch_mode(AppMode::ProcessList);
+                self.process_panel.panel.process_view_mode = view;
+                self.process_panel.panel.cursor_index = 0;
+                self.process_panel.panel.scroll_offset = 0;
+                self.status_message = Some(format!("视图: {}", view_mode_label(view)));
+            }
+            CommandAction::SortBy(field) => {
+                self.process_panel.panel.sort_field = field;
+                crate::ui_state::save_sort_field(field);
+                self.data_dirty = true;
+                self.status_message = Some(format!("排序: {}", sort_field_label(field)));
+            }
+            CommandAction::SwitchInspectionTab(tab) => {
+                if self.mode == AppMode::ProcessDetail {
+                    self.inspector.inspection_tab = tab;
+                    self.inspector.inspection_scroll = 0;
+                    self.status_message = Some(format!("详情 Tab: {}", tab.label()));
+                } else {
+                    self.status_message = Some("请先进入详情页（选中进程按 Enter）".to_string());
+                }
+            }
+            CommandAction::RefreshInspector => {
+                if self.mode == AppMode::ProcessDetail {
+                    let ports = self.port_panel.panel.port_entries.clone();
+                    self.inspector.open(&ports);
+                    self.status_message = Some("详情页已刷新".to_string());
+                }
+            }
+            CommandAction::EnterDetail => {
+                if self.mode == AppMode::ProcessList {
+                    self.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                }
+            }
+            CommandAction::KillCursor => {
+                if self.mode == AppMode::ProcessList {
+                    self.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+                }
+            }
+            CommandAction::ForceKillCursor => {
+                if self.mode == AppMode::ProcessList {
+                    self.handle_key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT));
+                }
+            }
+            CommandAction::SelectAllVisible => {
+                if self.mode == AppMode::ProcessList {
+                    self.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+                }
+            }
+            CommandAction::CycleTheme => {
+                crate::tui::theme::cycle_theme();
+                self.status_message = Some(format!("主题: {}", crate::tui::theme::theme_name()));
+            }
+            CommandAction::SetTheme(idx) => {
+                crate::tui::theme::set_theme_index(idx);
+                self.status_message = Some(format!("主题: {}", crate::tui::theme::theme_name()));
+            }
+            CommandAction::ToggleSidebar => {
+                self.sidebar_expanded = !self.sidebar_expanded;
+                crate::ui_state::save_sidebar_expanded(self.sidebar_expanded);
+                self.status_message = Some(if self.sidebar_expanded {
+                    "侧边栏：展开（per-core 频率/温度）".to_string()
+                } else {
+                    "侧边栏：折叠".to_string()
+                });
+            }
+            CommandAction::ToggleHelp => {
+                crate::ui_state::mark_first_run_done();
+                self.mode = AppMode::Help;
+                self.help_scroll = 0;
+            }
+            CommandAction::ToggleAlertPopup => {
+                self.alert_popup_open = !self.alert_popup_open;
+                self.alert_scroll = 0;
+            }
+            CommandAction::ToggleRecording => self.toggle_recording(),
+            CommandAction::DismissCrashes => self.dismiss_all_crashes(),
+            CommandAction::DockerStartEvents => {
+                if self.mode == AppMode::DockerPanel
+                    && self.docker_panel.panel.connected
+                    && self.docker_panel.panel.event_receiver.is_none()
+                {
+                    self.docker_panel.panel.start_watching();
+                }
+            }
+            CommandAction::DockerStopContainer => {
+                if self.mode == AppMode::DockerPanel {
+                    self.docker_panel.panel.palette_stop_selected();
+                }
+            }
+            CommandAction::DockerRestartContainer => {
+                if self.mode == AppMode::DockerPanel {
+                    self.docker_panel.panel.palette_restart_selected();
+                }
+            }
+        }
+    }
+}
+
+/// Ctrl+P 检测：crossterm 把 Ctrl+P 编码为 `Char('p')` + `Modifiers::CONTROL`
+/// （Shift 状态用大小写区分，所以也兼容 `Char('P')`）。
+fn is_ctrl_p(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
+}
+
+fn view_mode_label(m: ProcessViewMode) -> &'static str {
+    match m {
+        ProcessViewMode::List => "列表",
+        ProcessViewMode::Tree => "进程树",
+        ProcessViewMode::AppGroup => "应用分组",
+    }
+}
+
+fn sort_field_label(f: SortField) -> &'static str {
+    match f {
+        SortField::Cpu => "CPU",
+        SortField::Memory => "内存",
+        SortField::Pid => "PID",
+        SortField::Name => "名称",
+        SortField::Security => "安全分",
+        SortField::DiskRead => "磁盘读",
+        SortField::DiskWrite => "磁盘写",
+        SortField::NetSent => "上行",
+        SortField::NetRecv => "下行",
     }
 }

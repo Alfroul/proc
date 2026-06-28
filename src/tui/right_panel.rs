@@ -158,7 +158,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let value_w = (area.width as usize).saturating_sub(LABEL_W + 3);
 
     let proc_info = app
-        .get_sorted_process(app.process_panel.cursor_index)
+        .get_sorted_process(app.process_panel.panel.cursor_index)
         .cloned();
 
     let preview_lines = match &proc_info {

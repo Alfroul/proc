@@ -10,9 +10,9 @@ use crate::format::format_bytes;
 use crate::tui::theme;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
-    let items = app.process_panel.app_group_filtered_visual_items();
+    let items = app.process_panel.panel.app_group_filtered_visual_items();
     let rows_visible = area.height.saturating_sub(3) as usize;
-    let groups = &app.process_panel.app_groups;
+    let groups = &app.process_panel.panel.app_groups;
 
     let header = Row::new(vec![
         Cell::from(""),
@@ -26,12 +26,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
     let rows: Vec<Row> = items
         .iter()
-        .skip(app.process_panel.app_group_scroll)
+        .skip(app.process_panel.panel.app_group_scroll)
         .take(rows_visible)
         .enumerate()
         .map(|(i, item)| {
-            let global_i = i + app.process_panel.app_group_scroll;
-            let is_cursor = global_i == app.process_panel.app_group_cursor;
+            let global_i = i + app.process_panel.panel.app_group_scroll;
+            let is_cursor = global_i == app.process_panel.panel.app_group_cursor;
 
             let bg = if is_cursor {
                 Color::DarkGray
@@ -44,7 +44,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                     groups,
                     group_idx,
                     bg,
-                    app.process_panel.app_group_expanded == Some(group_idx),
+                    app.process_panel.panel.app_group_expanded == Some(group_idx),
                 ),
                 AppGroupItem::Child {
                     group_idx,
@@ -54,11 +54,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let sort_label = app.process_panel.app_group_sort.label();
-    let search_indicator = if app.process_panel.app_group_search.is_active()
-        || !app.process_panel.app_group_search.query().is_empty()
+    let sort_label = app.process_panel.panel.app_group_sort.label();
+    let search_indicator = if app.process_panel.panel.app_group_search.is_active()
+        || !app.process_panel.panel.app_group_search.query().is_empty()
     {
-        format!(" 搜索:{}", app.process_panel.app_group_search.query())
+        format!(" 搜索:{}", app.process_panel.panel.app_group_search.query())
     } else {
         String::new()
     };
@@ -88,8 +88,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let mut state = TableState::default();
     state.select(Some(
         app.process_panel
+            .panel
             .app_group_cursor
-            .saturating_sub(app.process_panel.app_group_scroll),
+            .saturating_sub(app.process_panel.panel.app_group_scroll),
     ));
     f.render_stateful_widget(table, area, &mut state);
 }

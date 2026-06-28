@@ -345,7 +345,8 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
     // 复用 port_panel 后台 worker 维护的 port_entries（每 ~3s 刷新一次），
     // 而不是每帧调 scan_ports()——后者走 netstat2 + sysinfo 全 PID 名表，
     // 详情页打开期间能直接造成卡帧。进程维度按 PID 过滤即可。
-    let net_summary = port_map::ProcessNetSummary::from_pid(proc.pid, &app.port_panel.port_entries);
+    let net_summary =
+        port_map::ProcessNetSummary::from_pid(proc.pid, &app.port_panel.panel.port_entries);
 
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
@@ -430,6 +431,16 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
     lines.push(Line::from(Span::styled(
         format!("  Affinity: {}", affinity_label),
         theme::style_muted(),
+    )));
+    // v0.7 阶段 6：EcoQoS / Efficiency Mode（ADR-0014）。
+    // 进程的 throttled 字段由 HeavyWorker 批量 query 填入；T 键切换。
+    lines.push(Line::from(Span::styled(
+        format!("  EcoQoS:   {}  (T 切换)", proc.throttled.label()),
+        if proc.throttled == crate::throttle::EcoQoSState::Eco {
+            theme::style_success()
+        } else {
+            theme::style_normal()
+        },
     )));
 
     if net_summary.tcp_connections > 0 || net_summary.udp_connections > 0 {

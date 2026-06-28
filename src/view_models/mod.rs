@@ -1,11 +1,21 @@
 pub mod docker_panel;
+pub mod docker_panel_controller;
 pub mod monitor_panel;
+pub mod monitor_panel_controller;
 pub mod port_panel;
+pub mod port_panel_controller;
 pub mod process_panel;
+pub mod process_panel_controller;
 pub mod usb_panel;
+pub mod usb_panel_controller;
 
 pub use docker_panel::DockerPanel;
+pub use docker_panel_controller::DockerPanelController;
 pub use monitor_panel::MonitorPanel;
+pub use monitor_panel_controller::MonitorPanelController;
 pub use port_panel::PortPanel;
+pub use port_panel_controller::PortPanelController;
 pub use process_panel::ProcessPanel;
+pub use process_panel_controller::ProcessPanelController;
 pub use usb_panel::UsbPanel;
+pub use usb_panel_controller::UsbPanelController;

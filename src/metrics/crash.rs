@@ -38,12 +38,18 @@ pub fn channel() -> (Sender<WorkerCrash>, Receiver<WorkerCrash>) {
 /// 时序：先 `init_tracing`（让 panic 也能写日志），再 `install_panic_hook`，
 /// 最后 `tui::setup_terminal`（它会 `take_hook` 把我们 chain 进去）。
 pub fn install_panic_hook() {
+    install_panic_hook_with_dir(default_crashes_dir());
+}
+
+/// v0.7.0 阶段 1 TD-14：与 [`install_panic_hook`] 等价但 crash report 写到指定
+/// 目录。集成测试用 tempdir 注入路径，避免污染用户 `~/.config/proc/crashes/`。
+pub fn install_panic_hook_with_dir(crashes_dir: PathBuf) {
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // 1. 写 crash report 到磁盘（best-effort，失败不阻塞 panic 路径）
         let backtrace = Backtrace::force_capture();
         let report = format_crash_report(info, &backtrace);
-        match write_crash_report(&report) {
+        match write_crash_report_to(&crashes_dir, &report) {
             Ok(path) => {
                 eprintln!(
                     "\n💥 proc crashed. Crash report saved to:\n  {}\n",

@@ -9,9 +9,9 @@
 **前置依赖**：阶段 4 已完成（ProcessInfo 字段已稳定，避免拆分时和字段变更冲突）。
 
 **依赖测试**（开工时跑这些测试的详情）：
-- `cargo test --release --tb=no -q`（全量回归 summary，应 ~681）
-- `cargo test --release test_process_info_arc test_search_perf test_search_correctness --tb=no -q`（阶段 4 新增性能测试详情）
-- `cargo test --release test_inspector --tb=no -q`（既有 inspector 测试，拆分后必须不破坏）
+- `cargo test --release -q`（全量回归 summary，应 ~681）
+- `cargo test --release test_process_info_arc test_search_perf test_search_correctness -q`（阶段 4 新增性能测试详情）
+- `cargo test --release test_inspector -q`（既有 inspector 测试，拆分后必须不破坏）
 
 **预期代码量**：~1400 行（搬迁为主，新代码主要是 Controller 的封装 boilerplate）
 
@@ -355,7 +355,7 @@ CONTEXT.md：「当前术语」段的 InspectorController / ReplayController / W
 ### 验收命令
 
 ```bash
-cargo test --release --tb=no -q    # 阶段 4 完工后 ~681 → 阶段 5 新增 ~10 → ~691
+cargo test --release -q    # 阶段 4 完工后 ~681 → 阶段 5 新增 ~10 → ~691
 cargo clippy --release --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo build --release --no-default-features

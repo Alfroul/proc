@@ -6,6 +6,19 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use crate::app::App;
 use crate::tui::theme;
 
+/// v0.7.0 阶段 1 TD-8：worker 名截到 10 列宽（超出加 `…`），
+/// 防止 `dns_log_worker`（14 字符）/ `docker_logs`（11 字符）撑爆 help_panel
+/// Workers 区段的列对齐。
+fn truncate_worker_name(name: &str) -> String {
+    const MAX: usize = 10;
+    if name.chars().count() <= MAX {
+        return name.to_string();
+    }
+    let mut s: String = name.chars().take(MAX - 1).collect();
+    s.push('…');
+    s
+}
+
 struct HelpSection {
     title: &'static str,
     rows: &'static [(&'static str, &'static str)],
@@ -24,6 +37,18 @@ const SECTIONS: &[HelpSection] = &[
             ("q", "退出 proc"),
             ("R", "切换 VT100 录制（开始/停止）"),
             ("A", "打开告警弹窗"),
+            // v0.7 阶段 3：命令面板 —— 替代记忆 N 个键位，fuzzy 搜「kill」/「port」直达。
+            ("Ctrl+P", "命令面板（fuzzy 搜命令，替代键位记忆）"),
+        ],
+    },
+    HelpSection {
+        title: "命令面板（Ctrl+P 触发）",
+        rows: &[
+            ("Esc", "关闭面板"),
+            ("↑↓", "选择匹配项"),
+            ("Enter", "执行选中命令"),
+            ("Ctrl+U", "清空输入"),
+            ("Backspace", "删除最后一个字符"),
         ],
     },
     HelpSection {
@@ -39,7 +64,8 @@ const SECTIONS: &[HelpSection] = &[
                 "切换排序字段（持久化：CPU/内存/PID/名称/安全/磁盘读写）",
             ),
             ("v", "切换视图（列表 / 树 / 应用分组）"),
-            ("/", "进入搜索"),
+            ("/", "进入搜索（子串匹配，v0.6 行为）"),
+            (":", "进入搜索（过滤表达式，v0.7 阶段 4 新增）"),
             ("S", "直达安全分排序（可疑进程排最前）"),
             ("y", "详情页: 复制进程信息到剪贴板（vim yank）"),
             ("F5", "详情页: 强制刷新 Inspector 数据"),
@@ -48,6 +74,29 @@ const SECTIONS: &[HelpSection] = &[
             ("o", "树视图: 选中孤儿进程"),
             ("z", "树视图: 选中僵尸/残存进程"),
             ("f", "树视图: 进入过滤搜索"),
+        ],
+    },
+    HelpSection {
+        title: "过滤表达式（按 : 进入，v0.7 阶段 4）",
+        rows: &[
+            (
+                "字段",
+                "cpu / mem / pid / name / user / cmd / disk_read / disk_write / net_sent / net_recv / security_score",
+            ),
+            ("操作符", "=  !=  >  <  >=  <=  =~（正则）"),
+            ("组合", "AND  OR  NOT  ( ) — 关键字大小写敏感"),
+            ("单位", "b/kb/mb/gb/tb（1024 进制字节）/ %（百分比）"),
+            ("正则", "/pattern/i — i 后缀大小写不敏感"),
+            ("示例1", "cpu > 5 AND name =~ /chrome/i"),
+            ("示例2", "mem > 500mb OR security_score < 80"),
+            (
+                "示例3",
+                "NOT (user = root) AND (cpu > 50 OR disk_read > 1mb)",
+            ),
+            (
+                "错误提示",
+                "parse 失败时 status_message 显示错误，保留上次成功 AST 继续过滤",
+            ),
         ],
     },
     HelpSection {
@@ -63,6 +112,8 @@ const SECTIONS: &[HelpSection] = &[
             ("s", "切换排序字段"),
             ("/", "搜索（端口 / IP / 进程名）"),
             ("k", "终止占用端口的进程"),
+            ("D", "DNS 查询日志子视图（仅内存）"),
+            ("F", "eBPF Flow 子视图（Linux + ebpf feature）"),
         ],
     },
     HelpSection {
@@ -165,7 +216,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             theme::style_danger()
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("   {:<10} ", entry.name), theme::style_info()),
+            Span::styled(
+                format!("   {:<10} ", truncate_worker_name(entry.name)),
+                theme::style_info(),
+            ),
             Span::styled(s.health_badge().to_string(), badge_style),
             Span::styled(
                 format!(
@@ -212,5 +266,26 @@ mod tests {
                 assert!(!d.is_empty(), "empty desc for {} in {}", k, s.title);
             }
         }
+    }
+
+    #[test]
+    fn truncate_worker_name_short_unchanged() {
+        assert_eq!(truncate_worker_name("port"), "port");
+        assert_eq!(truncate_worker_name("docker"), "docker");
+    }
+
+    #[test]
+    fn truncate_worker_name_exactly_10_unchanged() {
+        assert_eq!(truncate_worker_name("0123456789"), "0123456789");
+    }
+
+    #[test]
+    fn truncate_worker_name_long_truncates_with_ellipsis() {
+        // v0.7.0 阶段 1 TD-8：worker 名 14 字符（如 dns_log_worker）必须
+        // 截到 10 列宽，否则撑爆 Workers 区段的列对齐。
+        assert_eq!(truncate_worker_name("dns_log_worker"), "dns_log_w…");
+        assert_eq!(truncate_worker_name("docker_logs"), "docker_lo…");
+        // 截完宽度恰好 10（9 字符 + …）。
+        assert_eq!(truncate_worker_name("dns_log_worker").chars().count(), 10);
     }
 }

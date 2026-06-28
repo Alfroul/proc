@@ -87,6 +87,7 @@ pub fn find_volume_lockers_with_processes(
             start_time: 0,
             run_time: 0,
             name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
+            throttled: crate::throttle::EcoQoSState::default(),
         };
         let process_class = crate::classify::classify_process(&proc_info);
 

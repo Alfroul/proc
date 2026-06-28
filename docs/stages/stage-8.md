@@ -13,7 +13,7 @@
 ### 任务 1：开工前回归验证
 
 ```bash
-cargo test --release --tb=no -q                       # 应 ~741 passed
+cargo test --release -q                       # 应 ~741 passed
 cargo clippy --release --all-targets -- -D warnings   # 0 warnings
 cargo fmt --all -- --check
 cargo build --release --no-default-features
@@ -42,7 +42,7 @@ cargo build --release --no-default-features
 ### 任务 4：全量回归
 
 ```bash
-cargo test --release --tb=no -q                       # 应 P0/P1 修复后全绿
+cargo test --release -q                       # 应 P0/P1 修复后全绿
 cargo clippy --release --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo build --release --no-default-features
@@ -210,7 +210,7 @@ git status   # 确认 .gitignore 工作正常
 ### 验收命令
 
 ```bash
-cargo test --release --tb=no -q
+cargo test --release -q
 cargo clippy --release --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo build --release --no-default-features

@@ -1,4 +1,4 @@
-//! Stage-8 一次性性能回归基线。运行后可删除。
+//! v0.6.0 阶段 4 性能基线（ProcessInfo 字段对齐）。
 //!
 //! 验证：
 //! - rebuild_sorted_cache O(N) 索引构造 + O(N log N) 排序 < 5ms（500 进程）
@@ -35,6 +35,7 @@ fn fake_processes(n: u32) -> Vec<ProcessInfo> {
                 start_time: 0,
                 run_time: 0,
                 name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
+                throttled: proc::throttle::EcoQoSState::default(),
             }
         })
         .collect()

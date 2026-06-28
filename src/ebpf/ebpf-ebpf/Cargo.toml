@@ -1,0 +1,37 @@
+# v0.7 阶段 8：eBPF 内核态 sub-project（ADR-0016）。
+#
+# 这是**独立**的 cargo sub-project，不属于 userspace `proc` 包：
+# - 编译 target：`bpfel-unknown-none`（eBPF 字节码），需要 nightly + bpf-linker
+# - 不进 default-members：`cargo build`（无 -p）不会触碰此目录
+# - 显式编译：
+#     cd src/ebpf/ebpf-ebpf
+#     cargo +nightly build --target bpfel-unknown-none
+#
+# 编译产物（ELF object）由 userspace `src/ebpf/mod.rs` 通过
+# `include_bytes!` 嵌入后用 `aya::Ebpf::load` 加载。
+#
+# **当前状态（Part A）**：骨架占位，main.rs 是 tracepoint + ring_buf 模板。
+# Linux 环境验证 + 完整 attach 逻辑在 Part B / Linux 会话补完。
+
+[package]
+name = "proc-ebpf"
+version = "0.7.0"
+edition = "2021"
+description = "eBPF kernel-side programs for proc flow graph (loaded by userspace via aya)"
+publish = false
+
+# BPF target 默认为 bpfel-unknown-none（小端 eBPF）；ARM 等大端场景需自行扩展。
+# 在 userspace build（误进此 dir 时不带 target）时，cargo 会报错 "can't find crate for core"——
+# 这是预期行为：内核态必须用 nightly + bpfel-unknown-none target。
+
+[[bin]]
+name = "proc-ebpf"
+path = "src/main.rs"
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+
+# profile.dev / profile.release 必须在 workspace 根 Cargo.toml 配置；
+# 子项目里写会被 cargo 警告并忽略。内核态需要 `panic = "abort"` +
+# `opt-level = 2`，由 build.rs / .cargo/config.toml 在 Linux 会话补完。

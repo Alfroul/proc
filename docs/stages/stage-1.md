@@ -270,7 +270,7 @@ scoop install proc
 
 ```bash
 # 1. 全量回归（不破坏既有功能）
-cargo test --release --tb=no -q                                  # 应 611 passed
+cargo test --release -q                                  # 应 611 passed
 cargo clippy --release --all-targets -- -D warnings             # 应 0 warnings
 cargo fmt --all -- --check                                       # 应干净
 cargo build --release --no-default-features                      # 应编译通过

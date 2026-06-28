@@ -7,8 +7,8 @@
 **前置依赖**：阶段 3 已完成。
 
 **依赖测试**（开工时跑这些测试的详情）：
-- `cargo test --release --tb=no -q`（全量回归 summary，应 ~666）
-- `cargo test --release test_log_rotate test_crash_report test_worker_metrics --tb=no -q`（阶段 3 新增可观测性测试详情）
+- `cargo test --release -q`（全量回归 summary，应 ~666）
+- `cargo test --release test_log_rotate test_crash_report test_worker_metrics -q`（阶段 3 新增可观测性测试详情）
 
 **预期代码量**：~600 行（含测试）
 
@@ -307,7 +307,7 @@ CONTEXT.md：术语演进历史段已经预填 ProcessStatus / name_lower / quer
 ### 验收命令
 
 ```bash
-cargo test --release --tb=no -q    # 阶段 3 完工后 ~666 → 阶段 4 新增 ~15 → ~681
+cargo test --release -q    # 阶段 3 完工后 ~666 → 阶段 4 新增 ~15 → ~681
 cargo clippy --release --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo build --release --no-default-features

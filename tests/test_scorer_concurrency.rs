@@ -10,11 +10,22 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use proc::collect::ProcessInfo;
+use proc::ebpf::flow::ProcessFlow;
 use proc::port_map::PortEntry;
 use proc::security::BackgroundScorer;
 
-fn empty_request() -> (Arc<Vec<ProcessInfo>>, Arc<Vec<PortEntry>>) {
-    (Arc::new(Vec::new()), Arc::new(Vec::new()))
+type ScorerRequest = (
+    Arc<Vec<ProcessInfo>>,
+    Arc<Vec<PortEntry>>,
+    Arc<Vec<ProcessFlow>>,
+);
+
+fn empty_request() -> ScorerRequest {
+    (
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+        Arc::new(Vec::new()),
+    )
 }
 
 /// When the worker is still busy with a previous request, the second request
@@ -25,11 +36,11 @@ fn test_scorer_request_drops_when_busy() {
     let scorer = BackgroundScorer::new();
 
     // Prime the channel with one request so it's full.
-    let (procs, ports) = big_request();
-    scorer.request(procs.clone(), ports.clone());
+    let (procs, ports, flows) = big_request();
+    scorer.request(procs.clone(), ports.clone(), flows.clone());
     // Second request immediately — channel is full, must drop without blocking.
     let start = std::time::Instant::now();
-    scorer.request(procs, ports);
+    scorer.request(procs, ports, flows);
     let elapsed = start.elapsed();
     assert!(
         elapsed < Duration::from_millis(50),
@@ -79,10 +90,12 @@ fn test_scorer_round_trip() {
         start_time: 0,
         run_time: 0,
         name_lower: std::sync::Arc::from("test.exe"),
+        throttled: proc::throttle::EcoQoSState::default(),
     }]);
     let ports = Arc::new(Vec::<PortEntry>::new());
+    let flows = Arc::new(Vec::<ProcessFlow>::new());
 
-    scorer.request(procs, ports);
+    scorer.request(procs, ports, flows);
 
     // Poll for up to 2 seconds — the scorer thread should produce a result.
     let mut scores = None;
@@ -112,9 +125,9 @@ fn test_scorer_concurrent_requests() {
             let scorer = scorer.clone();
             std::thread::spawn(move || {
                 for _ in 0..10 {
-                    let (procs, ports) = empty_request();
+                    let (procs, ports, flows) = empty_request();
                     let s = scorer.lock().expect("scorer mutex poisoned");
-                    s.request(procs, ports);
+                    s.request(procs, ports, flows);
                 }
             })
         })
@@ -133,8 +146,8 @@ fn test_scorer_concurrent_requests() {
 fn test_scorer_shutdown() {
     for _ in 0..3 {
         let scorer = BackgroundScorer::new();
-        let (procs, ports) = empty_request();
-        scorer.request(procs, ports);
+        let (procs, ports, flows) = empty_request();
+        scorer.request(procs, ports, flows);
         // Drain once to make sure the worker is responsive before drop.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while std::time::Instant::now() < deadline {
@@ -149,7 +162,7 @@ fn test_scorer_shutdown() {
 
 // Helper: a "big" request that keeps the worker busy long enough for the
 // second request to be dropped in `test_scorer_request_drops_when_busy`.
-fn big_request() -> (Arc<Vec<ProcessInfo>>, Arc<Vec<PortEntry>>) {
+fn big_request() -> ScorerRequest {
     let procs: Vec<ProcessInfo> = (0..200)
         .map(|i| {
             let name = format!("proc_{i}.exe");
@@ -176,8 +189,9 @@ fn big_request() -> (Arc<Vec<ProcessInfo>>, Arc<Vec<PortEntry>>) {
                 start_time: 0,
                 run_time: 0,
                 name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
+                throttled: proc::throttle::EcoQoSState::default(),
             }
         })
         .collect();
-    (Arc::new(procs), Arc::new(Vec::new()))
+    (Arc::new(procs), Arc::new(Vec::new()), Arc::new(Vec::new()))
 }

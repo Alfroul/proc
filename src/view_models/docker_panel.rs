@@ -159,6 +159,29 @@ impl DockerPanel {
         }
     }
 
+    /// v0.7.0 阶段 1 TD-5：聚合 DockerPanel 自管的 worker metrics。
+    ///
+    /// 返回 `docker`（snapshot worker，连上 daemon 后必有）+ `docker_logs`
+    /// （logs worker，仅在日志模式激活时存在）。`App::worker_metrics` 追加到
+    /// `WorkerManager::metrics_snapshot` 的输出后供 `proc diag` / `?` 帮助页消费。
+    #[must_use]
+    pub fn metrics(&self) -> Vec<crate::metrics::NamedWorkerStats> {
+        let mut out = Vec::new();
+        if let Some(w) = self.snapshot_worker.as_ref() {
+            out.push(crate::metrics::NamedWorkerStats {
+                name: "docker",
+                stats: w.metrics.snapshot(),
+            });
+        }
+        if let Some(w) = self.logs_worker.as_ref() {
+            out.push(crate::metrics::NamedWorkerStats {
+                name: "docker_logs",
+                stats: w.metrics.snapshot(),
+            });
+        }
+        out
+    }
+
     /// 同步刷新:首次连接时初始化 `Arc<Mutex<DockerMonitor>>` 并 spawn 后台
     /// snapshot worker;无论何时都立即同步拉一次容器列表(用户按 Shift+R 触发,
     /// 期望立即响应)。后续周期性更新由 worker 异步推送,经 `poll_events`
@@ -262,6 +285,16 @@ impl DockerPanel {
                 }
             }
         }
+    }
+
+    /// v0.7 阶段 3：暴露给 App::dispatch_command_action（命令面板 Docker 重启）。
+    pub fn palette_restart_selected(&mut self) {
+        self.restart_selected();
+    }
+
+    /// v0.7 阶段 3：暴露给 App::dispatch_command_action（命令面板 Docker 停止）。
+    pub fn palette_stop_selected(&mut self) {
+        self.stop_selected();
     }
 
     fn stop_selected(&mut self) {
@@ -865,5 +898,14 @@ mod tests {
         assert!(p.images.is_empty());
         assert!(p.volumes.is_empty());
         assert!(p.delete_pending.is_none());
+    }
+
+    #[test]
+    fn metrics_empty_when_no_workers() {
+        // v0.7.0 阶段 1 TD-5：未连接 daemon 时 snapshot/logs worker 都是 None，
+        // metrics() 应返回空 vec。连接后由 docker daemon 决定，集成测试覆盖。
+        let p = DockerPanel::new();
+        let m = p.metrics();
+        assert!(m.is_empty(), "fresh panel should expose no worker metrics");
     }
 }

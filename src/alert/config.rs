@@ -117,5 +117,52 @@ fn default_rules() -> Vec<ThresholdRule> {
             severity: AlertSeverity::Warning,
             description: "CPU throttle > 30%".into(),
         },
+        // v0.7 阶段 6：Linux PSI 规则（ADR-0013）。avg10 滑动平均百分比。
+        // 这些规则在非 Linux 平台 metric.extract 返回空 Vec，自然不触发。
+        ThresholdRule {
+            id: "psi-cpu-some-50".into(),
+            metric: MetricName::CpuPressureSome,
+            op: ComparisonOp::GT,
+            threshold: 50.0,
+            consecutive_hits: 3,
+            severity: AlertSeverity::Critical,
+            description: "CPU pressure (some) avg10 > 50%".into(),
+        },
+        ThresholdRule {
+            id: "psi-mem-some-20".into(),
+            metric: MetricName::MemPressureSome,
+            op: ComparisonOp::GT,
+            threshold: 20.0,
+            consecutive_hits: 3,
+            severity: AlertSeverity::Warning,
+            description: "Memory pressure (some) avg10 > 20%".into(),
+        },
+        ThresholdRule {
+            id: "psi-mem-full-20".into(),
+            metric: MetricName::MemPressureFull,
+            op: ComparisonOp::GT,
+            threshold: 20.0,
+            consecutive_hits: 3,
+            severity: AlertSeverity::Critical,
+            description: "Memory pressure (full) avg10 > 20%".into(),
+        },
+        ThresholdRule {
+            id: "psi-io-some-50".into(),
+            metric: MetricName::IoPressureSome,
+            op: ComparisonOp::GT,
+            threshold: 50.0,
+            consecutive_hits: 3,
+            severity: AlertSeverity::Warning,
+            description: "IO pressure (some) avg10 > 50%".into(),
+        },
+        ThresholdRule {
+            id: "psi-io-full-20".into(),
+            metric: MetricName::IoPressureFull,
+            op: ComparisonOp::GT,
+            threshold: 20.0,
+            consecutive_hits: 3,
+            severity: AlertSeverity::Critical,
+            description: "IO pressure (full) avg10 > 20%".into(),
+        },
     ]
 }

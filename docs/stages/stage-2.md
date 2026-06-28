@@ -9,7 +9,7 @@
 **前置依赖**：阶段 1 已完成（ADR-0008 Status: Proposed 已入仓）。
 
 **依赖测试**（开工时跑这些测试的详情）：
-- `cargo test --release --tb=no -q`（全量回归 summary，应 611 passed）
+- `cargo test --release -q`（全量回归 summary，应 611 passed）
 - 阶段 1 是文档/CI Spike，无 Rust 测试新增；只需保证全量回归绿
 
 **预期代码量**：~830 行（含测试）
@@ -577,7 +577,7 @@ CONTEXT.md：术语演进历史段追加（实际新增的字段 / 模块）。
 ### 验收命令
 
 ```bash
-cargo test --release --tb=no -q                       # 611 + 阶段 2 新增（预计 +30）= ~641
+cargo test --release -q                       # 611 + 阶段 2 新增（预计 +30）= ~641
 cargo clippy --release --all-targets -- -D warnings  # 0 warnings
 cargo fmt --all -- --check
 cargo build --release --no-default-features

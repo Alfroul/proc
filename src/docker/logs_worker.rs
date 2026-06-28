@@ -8,11 +8,13 @@
 //! 用户切换容器 / 退出日志模式时 panel 把 [`LogsWorker`] drop → Drop 触发
 //! worker 退出（`shutdown_tx` drop → 主线程检测到 → 通过 `runtime` abort 停止）。
 
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::docker::logs::{self, LogLine};
+use crate::metrics::WorkerMetrics;
 
 /// 单条 chunk 推送的最大行数。太大会延迟显示，太小频繁唤醒主线程。
 const CHUNK_MAX_LINES: usize = 16;
@@ -34,6 +36,8 @@ pub struct LogsWorker {
     shutdown_tx: Option<mpsc::Sender<()>>,
     pub chunk_rx: Receiver<LogChunk>,
     thread: Option<JoinHandle<()>>,
+    /// v0.7.0 阶段 1 TD-5：暴露给 `DockerPanel::metrics` → `proc diag`。
+    pub metrics: Arc<WorkerMetrics>,
 }
 
 impl LogsWorker {
@@ -70,11 +74,13 @@ impl Drop for LogsWorker {
 pub fn spawn(docker: bollard::Docker, name: String, tail: Option<String>) -> LogsWorker {
     let (chunk_tx, chunk_rx) = mpsc::sync_channel(LOGS_CHANNEL_CAPACITY);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
+    let metrics = Arc::new(WorkerMetrics::new());
+    let worker_metrics = Arc::clone(&metrics);
 
     let handle = thread::Builder::new()
         .name(format!("docker-logs-worker-{name}"))
         .spawn(move || {
-            worker_body(docker, name, tail, chunk_tx, shutdown_rx);
+            worker_body(docker, name, tail, chunk_tx, shutdown_rx, worker_metrics);
         })
         .expect("spawn docker-logs-worker");
 
@@ -82,6 +88,7 @@ pub fn spawn(docker: bollard::Docker, name: String, tail: Option<String>) -> Log
         shutdown_tx: Some(shutdown_tx),
         chunk_rx,
         thread: Some(handle),
+        metrics,
     }
 }
 
@@ -91,6 +98,7 @@ fn worker_body(
     tail: Option<String>,
     chunk_tx: SyncSender<LogChunk>,
     shutdown_rx: Receiver<()>,
+    metrics: Arc<WorkerMetrics>,
 ) {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -113,6 +121,7 @@ fn worker_body(
         let mut buf_chars: usize = 0;
 
         loop {
+            let iter_start = Instant::now();
             if is_shutdown(&shutdown_rx) {
                 break;
             }
@@ -121,7 +130,7 @@ fn worker_body(
                 item = stream.next() => {
                     match item {
                         Some(Ok(log)) => {
-                            push_log_line(&log, &mut buf, &mut buf_chars, &chunk_tx);
+                            push_log_line(&log, &mut buf, &mut buf_chars, &chunk_tx, &metrics);
                         }
                         Some(Err(e)) => {
                             tracing::warn!("docker-logs-worker ({name}) stream err: {e:?}");
@@ -137,8 +146,9 @@ fn worker_body(
                     // timeout 回到循环顶部检查 shutdown。
                 }
             }
+            metrics.record_poll(iter_start.elapsed());
         }
-        flush(&mut buf, &mut buf_chars, &chunk_tx);
+        flush(&mut buf, &mut buf_chars, &chunk_tx, &metrics);
     });
 }
 
@@ -156,6 +166,7 @@ fn push_log_line(
     buf: &mut Vec<LogLine>,
     buf_chars: &mut usize,
     chunk_tx: &SyncSender<LogChunk>,
+    metrics: &WorkerMetrics,
 ) {
     use bollard::container::LogOutput;
 
@@ -174,12 +185,17 @@ fn push_log_line(
         });
         *buf_chars += piece.len();
         if buf.len() >= CHUNK_MAX_LINES || *buf_chars >= CHUNK_MAX_CHARS {
-            flush(buf, buf_chars, chunk_tx);
+            flush(buf, buf_chars, chunk_tx, metrics);
         }
     }
 }
 
-fn flush(buf: &mut Vec<LogLine>, buf_chars: &mut usize, chunk_tx: &SyncSender<LogChunk>) {
+fn flush(
+    buf: &mut Vec<LogLine>,
+    buf_chars: &mut usize,
+    chunk_tx: &SyncSender<LogChunk>,
+    metrics: &WorkerMetrics,
+) {
     if buf.is_empty() {
         return;
     }
@@ -190,6 +206,7 @@ fn flush(buf: &mut Vec<LogLine>, buf_chars: &mut usize, chunk_tx: &SyncSender<Lo
     match chunk_tx.try_send(chunk) {
         Ok(()) => {}
         Err(TrySendError::Full(_)) => {
+            metrics.record_channel_full();
             tracing::warn!(
                 "docker-logs-worker chunk channel 已满（{}），丢新 chunk",
                 LOGS_CHANNEL_CAPACITY
@@ -222,7 +239,8 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel::<LogChunk>(4);
         let mut buf = Vec::new();
         let mut chars = 0;
-        flush(&mut buf, &mut chars, &tx);
+        let metrics = WorkerMetrics::new();
+        flush(&mut buf, &mut chars, &tx, &metrics);
         assert!(rx.try_recv().is_err());
     }
 
@@ -235,12 +253,41 @@ mod tests {
             is_stderr: false,
         }];
         let mut chars = 2;
-        flush(&mut buf, &mut chars, &tx);
+        let metrics = WorkerMetrics::new();
+        flush(&mut buf, &mut chars, &tx, &metrics);
         let chunk = rx.try_recv().expect("should have received");
         assert_eq!(chunk.lines.len(), 1);
         assert_eq!(chunk.lines[0].message, "hi");
         assert!(buf.is_empty());
         assert_eq!(chars, 0);
+    }
+
+    #[test]
+    fn flush_records_channel_full_on_full() {
+        let (tx, rx) = mpsc::sync_channel::<LogChunk>(1);
+        let metrics = WorkerMetrics::new();
+        // 先填满 channel（容量 1）。
+        let mut buf = vec![LogLine {
+            timestamp: None,
+            message: "first".to_string(),
+            is_stderr: false,
+        }];
+        let mut chars = 5;
+        flush(&mut buf, &mut chars, &tx, &metrics);
+        let _held = rx.try_recv().expect("first sent");
+        // 再填一次让 channel 满后再调 flush 应该触发 record_channel_full。
+        let (tx2, _rx2) = mpsc::sync_channel::<LogChunk>(1);
+        // 填 tx2 满。
+        tx2.try_send(LogChunk::default()).expect("fill tx2");
+        let mut buf2 = vec![LogLine {
+            timestamp: None,
+            message: "second".to_string(),
+            is_stderr: false,
+        }];
+        let mut chars2 = 6;
+        flush(&mut buf2, &mut chars2, &tx2, &metrics);
+        let snap = metrics.snapshot();
+        assert!(snap.channel_full > 0, "channel_full should be recorded");
     }
 
     #[test]

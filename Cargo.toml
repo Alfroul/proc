@@ -1,6 +1,6 @@
 [package]
 name = "proc"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.85"
 description = "交互式 TUI 系统进程管理器，集成进程/网络/USB/Docker/安全评分/录屏"
@@ -33,13 +33,20 @@ colored = "2"
 comfy-table = "7"
 netstat2 = "0.11"
 bollard = { version = "0.18", features = ["http"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time", "io-std", "io-util"] }
 futures-util = "0.3"
 arboard = "3"
 dns-lookup = "2"
 encoding_rs = "0.8"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+# v0.7 阶段 2：MCP server（proc mcp serve）依赖
+# - rmcp：MCP 官方 Rust SDK，server + transport-io 启用 stdio。
+#   默认 feature 含 `macros` + `server`，自动启用 `dep:schemars`（v1.x）。
+#   我们直接复用 `rmcp::schemars::JsonSchema`，不另引直接依赖避免版本分裂。
+# - async-trait：rmcp handler trait 异步接口所需
+rmcp = { version = "0.11", features = ["server", "transport-io"] }
+async-trait = "0.1"
 bincode = "1"
 toml = "0.8"
 sha2 = "0.10"
@@ -50,6 +57,19 @@ unicode-width = "0.2"
 # vt100 解析 docker exec 输出字节流，提供 Screen 状态用于 ratatui 渲染。
 portable-pty = "0.9"
 vt100 = "0.15"
+# v0.7 阶段 3：Shell completion + 命令面板 Ctrl+P
+# - clap_complete：clap 官方配套，`proc completions --shell <SHELL>` 在线生成
+#   bash/zsh/fish/powershell/elvish 5 种 shell 补全脚本。
+# - nucleo：Helix 编辑器 fuzzy 匹配库（性能极佳），用于命令面板 Ctrl+P。
+# 输入框逻辑简单（String + cursor），手写避免 tui-input 与 ratatui 0.29
+# 在 unicode-width (=0.2.0 vs ^0.2.2) 上的版本冲突。
+clap_complete = "4"
+nucleo = "0.5"
+# v0.7 阶段 4：过滤表达式 FilterExpr（ADR-0011）。
+# - nom：轻量 parser combinator，递归下降解析 `cpu > 5 AND name =~ /chrome/i`。
+# - regex：FilterExpr 的 `=~` 操作符 + 单位后缀校验。底部/btop 同款思路。
+nom = "7"
+regex = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.57", features = [
@@ -75,6 +95,7 @@ windows = { version = "0.57", features = [
     "Win32_System_Pipes",
     "Win32_System_Console",
     "Wdk_System_Threading",
+    "Win32_System_Diagnostics_Etw",
 ] }
 filelocksmith = "2"
 
@@ -85,6 +106,14 @@ optional = true
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 libc = "0.2"
 
+# v0.7 阶段 8：eBPF flow graph（ADR-0016）。
+# aya / aya-log 是纯 Rust eBPF 库，仅 Linux 编译；其它平台走 cfg-gate stub。
+# feature flag `ebpf` 默认关闭：`cargo build` 不带这俩依赖；用户显式
+# `cargo build --release --features ebpf` 启用（Linux only）。
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { version = "0.13", optional = true }
+aya-log = { version = "0.2", optional = true }
+
 [features]
 default = ["nvidia", "nvtop", "nethogs"]
 nvidia = ["nvml-wrapper"]
@@ -93,6 +122,22 @@ nvtop = []
 # nethogs 走子进程（无新 native 依赖）；feature 关闭时 NethogsCollector 不编译。
 # 仅 Linux 平台生效；Windows / macOS 上 detect_collector 直接返回 None。
 nethogs = []
+# v0.7 阶段 8：eBPF flow graph（Linux only）。
+# 启用 aya / aya-log userspace 加载器 + EbisuBpfWorker 实装；其它平台 /
+# 不启用时走 stub（`try_spawn` 返回 None，UI 显示降级提示）。
+# 内核态 ELF（src/ebpf/ebpf-ebpf）是独立 sub-project，由 bpf-linker 单独
+# 编译后 include_bytes! 嵌入；详见该子项目 Cargo.toml。
+ebpf = ["dep:aya", "dep:aya-log"]
+
+# v0.7 阶段 8：eBPF 内核态 sub-project（ADR-0016）。
+# - members：把 src/ebpf/ebpf-ebpf 纳入 workspace，方便 `cargo metadata`
+#   统一索引；但 default-members 只含根包，`cargo build`（无 -p）不会
+#   尝试编译内核态（其 no_std + bpfel-unknown-none target 需要 nightly +
+#   bpf-linker，Windows / 默认 toolchain 不具备）。
+# - 显式编译内核态：`cargo build -p proc-ebpf --target bpfel-unknown-none`。
+[workspace]
+members = ["src/ebpf/ebpf-ebpf"]
+default-members = ["."]
 
 [dev-dependencies]
 tempfile = "3"

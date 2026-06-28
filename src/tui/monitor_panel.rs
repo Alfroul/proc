@@ -17,13 +17,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     draw_monitor_list(f, chunks[0], app);
     draw_notifications(f, chunks[1], app);
 
-    if let Some(ref submenu) = app.monitor_panel.add_submenu {
+    if let Some(ref submenu) = app.monitor_panel.panel.add_submenu {
         draw_add_submenu(f, area, submenu);
     }
 }
 
 fn draw_monitor_list(f: &mut Frame, area: Rect, app: &App) {
-    let monitors = app.monitor_panel.manager.list_monitors();
+    let monitors = app.monitor_panel.panel.manager.list_monitors();
 
     let items: Vec<ListItem> = if monitors.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
@@ -35,7 +35,7 @@ fn draw_monitor_list(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                let selected = i == app.monitor_panel.cursor;
+                let selected = i == app.monitor_panel.panel.cursor;
                 let bg = if selected {
                     theme::accent()
                 } else {
@@ -111,13 +111,13 @@ fn draw_monitor_list(f: &mut Frame, area: Rect, app: &App) {
 
     let mut state = ListState::default();
     if !monitors.is_empty() {
-        state.select(Some(app.monitor_panel.cursor.min(monitors.len() - 1)));
+        state.select(Some(app.monitor_panel.panel.cursor.min(monitors.len() - 1)));
     }
     f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_notifications(f: &mut Frame, area: Rect, app: &App) {
-    let notifications = app.monitor_panel.manager.notifications();
+    let notifications = app.monitor_panel.panel.manager.notifications();
 
     let items: Vec<ListItem> = if notifications.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
