@@ -112,10 +112,15 @@ fn parse_whitelist(content: &str) -> HashSet<String> {
 ///
 /// `flows` 应为已按 `(pid, start_time)` 过滤后的「同一进程」flows（调用方
 /// [`super::score::SecurityScorer::score`] 完成）。`whitelist` 为 `None`
-/// 时条件 1 整体跳过；`Some(空)` 时所有 dns_name 都视为不在白名单。
+/// 时条件 1 整体跳过；`Some(空)` 时所有 dns_name / sni 都视为不在白名单。
 ///
 /// `now` 显式传入便于测试。返回的 `RiskFactor` 携带命中的具体描述，便于
 /// UI / MCP 消费者展示。
+///
+/// **v0.10 阶段 3 跨平台激活**：条件 1 同时检查 `dns_name`（Linux eBPF DNS
+/// 关联路径）和 `sni`（Windows Schannel ETW 路径 / Linux eBPF uprobe 路径，
+/// 后者留 v0.9 复活时实现）。两条路径任一命中即扣分；同一 flow 同时有
+/// `dns_name` + `sni` 时优先检查 `sni`（更可靠的 TLS 层明文）。
 #[must_use]
 pub fn check_flow_risk(
     flows: &[&ProcessFlow],
@@ -123,9 +128,14 @@ pub fn check_flow_risk(
     now: SystemTime,
 ) -> Option<RiskFactor> {
     // Condition 1：SNI 不在白名单（仅当白名单存在时启用）。
+    // v0.10 阶段 3：sni + dns_name 两个来源都喂白名单（跨平台对齐）。
     if let Some(wl) = whitelist {
         for f in flows {
-            let Some(name) = f.dns_name.as_deref() else {
+            // SNI 优先（更可靠的 TLS 层明文）。Windows Schannel 路径 source = Schannel
+            // 时 dns_name 永远 None，只走这条；Linux eBPF 路径 sni 当前也 None
+            // （留 v0.9 uprobe 复活时填），只走 dns_name fallback。
+            let candidate = f.sni.as_deref().or(f.dns_name.as_deref());
+            let Some(name) = candidate else {
                 continue;
             };
             if !wl.contains(name) {
@@ -140,6 +150,9 @@ pub fn check_flow_risk(
     }
 
     // Condition 2：10s 内 ≥ R15_PORT_SCAN_THRESHOLD 个不同 remote_addr。
+    // v0.10 阶段 3：Schannel 路径 remote_addr 留空，自然不参与 distinct 统计
+    // （HashSet 忽略空字符串以外的唯一性逻辑：空串计入但通常 Schannel-only
+    // 环境 distinct.len() ≤ 1 远不及阈值，安全）。
     let Some(cutoff) = now.checked_sub(R15_PORT_SCAN_WINDOW) else {
         // now 早于窗口（系统时间回退）→ 跳过 condition 2，避免 false positive。
         return None;
@@ -187,6 +200,8 @@ mod tests {
             bytes_out: 0,
             bytes_in: 0,
             dns_name: dns_name.map(str::to_string),
+            sni: None,
+            source: crate::ebpf::flow::FlowSource::Ebpf,
             first_seen: last_seen,
             last_seen,
             exit_time: None,

@@ -512,6 +512,8 @@ fn test_r15_port_scan_integration() {
             bytes_out: 0,
             bytes_in: 0,
             dns_name: None,
+            sni: None,
+            source: proc::ebpf::flow::FlowSource::Ebpf,
             first_seen: now,
             last_seen: now,
             exit_time: None,

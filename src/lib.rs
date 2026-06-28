@@ -29,6 +29,7 @@ pub mod process_control;
 pub mod psi;
 pub mod record;
 pub mod replay;
+pub mod schannel_etw;
 pub mod search;
 pub mod security;
 pub mod shutdown;

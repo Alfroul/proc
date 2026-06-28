@@ -13,11 +13,11 @@
 //! **MVP 范围（Part A）**：只处理 Connect + Exit；bytes_out / bytes_in
 //! 留 0（要 hook tcp_sendmsg / tcp_recvmsg 才能拿，留 Part B）。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, SystemTime};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::dns_log::{DnsQuery, DnsResult};
 
@@ -30,6 +30,29 @@ const DNS_JOIN_WINDOW: Duration = Duration::from_secs(5);
 /// ADR-0016 §9：30s 让用户能看到刚结束的连接；超时后 [`FlowAggregator::reaper_tick`]
 /// 把它从内部 map 移除，App::flows 下一次 drain 自然消失。
 pub const GHOST_FLOW_TTL: Duration = Duration::from_secs(30);
+
+/// v0.10 阶段 3：ProcessFlow 数据来源（区分 Linux eBPF 路径与 Windows Schannel 路径）。
+///
+/// 与 `ProcessStatus` 同款 Copy 枚举风格（不持 String，零分配）。`#[derive(Default)]`
+/// 加 `#[default]` 标 `Ebpf` 变体；serde 字段配 `#[serde(default)]` 让旧录屏（`.prec`）
+/// 反序列化时 source = Ebpf 不改变行为（v0.10 阶段 3 之前所有 flow 都来自 eBPF
+/// 路径，与 `Ebpf` 默认值一致）。
+///
+/// - [`FlowSource::Ebpf`]：Linux + `ebpf` feature 路径，由 `FlowAggregator`
+///   从 ring_buf FlowEvent 聚合而来（含完整字段：local_addr / remote_addr /
+///   remote_port / dns_name / bytes_out / bytes_in，sni / ja4 留 v0.9 eBPF
+///   uprobe 路径实现时再填）。
+/// - [`FlowSource::Schannel`]：Windows Schannel ETW event 1793 路径，由
+///   [`crate::app::App::overlay_flow_sni_schannel`] 从 [`crate::schannel_etw`]
+///   worker drain 的 `SniRecord` 直接构造（含 sni，但 remote_addr / remote_port
+///   / bytes 留空——Schannel event 不给 socket 元数据）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FlowSource {
+    #[default]
+    Ebpf,
+    Schannel,
+}
 
 /// 端到端流：进程 (pid, start_time) → 远端 (addr, port) 的双向流量记录。
 ///
@@ -56,6 +79,19 @@ pub struct ProcessFlow {
     pub bytes_in: u64,
     /// 关联到的 DNS 查询名（去掉 trailing dot；None = 未关联到，不代表可疑）。
     pub dns_name: Option<String>,
+    /// **v0.10 阶段 1 新增（v0.9 推迟）**。TLS ClientHello 直接抓到的 SNI 明文。
+    /// 与 `dns_name` 区别：`dns_name` 来自 DNS 查询事件（HTTPS 命中 DNS cache
+    /// 时关联不到）；`sni` 来自 TLS 层 ClientHello（HTTPS 流量必经路径，不依赖
+    /// DNS 解析路径）。Linux 由 eBPF uprobe on `SSL_write` 抓（留 v0.9 复活时
+    /// 实现），Windows 由 Schannel ETW event 196 抓（v0.10 阶段 2 落地）。
+    /// 阶段 1 仅扩字段；默认 `None`，阶段 2/3 开始填。
+    #[serde(default)]
+    pub sni: Option<String>,
+    /// **v0.10 阶段 3 新增**。数据来源：Linux eBPF 路径 = [`FlowSource::Ebpf`]，
+    /// Windows Schannel 路径 = [`FlowSource::Schannel`]。`#[serde(default)]` 保旧
+    /// 录屏（v0.10 阶段 3 之前的 `.prec`）反序列化时 source = Ebpf 与历史行为一致。
+    #[serde(default)]
+    pub source: FlowSource,
     /// 第一次见到该 flow 的时间（来自内核 ts_ns 转 SystemTime）。
     pub first_seen: SystemTime,
     /// 最后一次见到该 flow 的时间。
@@ -247,6 +283,8 @@ impl FlowAggregator {
                     bytes_out: 0,
                     bytes_in: 0,
                     dns_name: None,
+                    sni: None,
+                    source: FlowSource::Ebpf,
                     first_seen: ts,
                     last_seen: ts,
                     exit_time: None,
@@ -323,6 +361,52 @@ impl FlowAggregator {
             .collect();
         reaped
     }
+}
+
+/// v0.10 阶段 4（REVIEW-11 P1-1）：标记 source = Schannel 且 pid 不在 alive_pids
+/// 的 flow 的 exit_time。
+///
+/// Schannel event 自带 PID 但无进程退出事件——Schannel-only flow 永远不会被
+/// `FlowAggregator::reaper_tick` 触及（它们直接在 `App::flows` 里，不在聚合器
+/// 内）。调用方（`App::tick_light_refresh`）在 heavy refresh 拿到 alive_pids
+/// 时调本函数给 dead flow 打 exit_time，后续 [`reap_expired_schannel_flows`]
+/// 按 `GHOST_FLOW_TTL` 移除。
+///
+/// ebpf 路径 flow 不动——它们由 `FlowAggregator::reaper_tick` + Exit 事件管理。
+pub fn mark_dead_schannel_flows(
+    flows: &mut [ProcessFlow],
+    alive_pids: &HashSet<u32>,
+    now: SystemTime,
+) {
+    for flow in flows.iter_mut() {
+        if flow.source == FlowSource::Schannel
+            && flow.exit_time.is_none()
+            && !alive_pids.contains(&flow.pid)
+        {
+            flow.exit_time.get_or_insert(now);
+        }
+    }
+}
+
+/// v0.10 阶段 4（REVIEW-11 P1-1）：移除 source = Schannel 且
+/// `exit_time + GHOST_FLOW_TTL < now` 的 flow。
+///
+/// 与 `FlowAggregator::reaper_tick` 同款 30s 保留窗口逻辑，但作用在 `App::flows`
+/// 整个 Vec 上（聚合器外的 Schannel-only flow 归这里管）。ebpf 路径 flow 不动——
+/// 调用方负责先跑 `FlowAggregator::reaper_tick` 再 drain 替换 `App::flows`。
+pub fn reap_expired_schannel_flows(flows: &mut Vec<ProcessFlow>, now: SystemTime) {
+    flows.retain(|f| {
+        if f.source != FlowSource::Schannel {
+            return true;
+        }
+        let Some(exit) = f.exit_time else {
+            return true;
+        };
+        let Some(deadline) = exit.checked_add(GHOST_FLOW_TTL) else {
+            return true;
+        };
+        deadline > now
+    });
 }
 
 /// 在 dns_recent 里向前查找 5s 内、同 pid、resolved_ips 含 remote 的查询名。
@@ -739,6 +823,8 @@ mod tests {
             bytes_out: 0,
             bytes_in: 0,
             dns_name: None,
+            sni: None,
+            source: FlowSource::Ebpf,
             first_seen: SystemTime::UNIX_EPOCH,
             last_seen: SystemTime::UNIX_EPOCH,
             exit_time: None,
@@ -811,5 +897,141 @@ mod tests {
         let reaped = agg.reaper_tick(now);
         assert!(reaped.is_empty(), "live flow 不应被 reap");
         assert_eq!(agg.len(), 1);
+    }
+
+    // ----- v0.10 阶段 4（REVIEW-11 P1-1）：Schannel-only flow exit-accounting -----
+
+    fn mk_schannel_flow(pid: u32, sni: &str, ts: SystemTime) -> ProcessFlow {
+        ProcessFlow {
+            pid,
+            start_time: 0,
+            comm: String::new(),
+            local_addr: String::new(),
+            remote_addr: String::new(),
+            remote_port: 0,
+            bytes_out: 0,
+            bytes_in: 0,
+            dns_name: None,
+            sni: Some(sni.into()),
+            source: FlowSource::Schannel,
+            first_seen: ts,
+            last_seen: ts,
+            exit_time: None,
+        }
+    }
+
+    /// mark_dead_schannel_flows：pid 不在 alive_pids 时打 exit_time。
+    /// 已有 exit_time 的 flow 不被重复打（get_or_insert 语义）。
+    #[test]
+    fn mark_dead_schannel_flows_marks_dead_pids() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let mut flows = vec![
+            mk_schannel_flow(100, "alive.com", now),
+            mk_schannel_flow(200, "dead.com", now),
+            mk_schannel_flow(300, "ghost.com", now),
+        ];
+        // pid=300 已有 exit_time（被前一次 mark 过）
+        flows[2].exit_time = Some(now - Duration::from_secs(60));
+
+        let alive: HashSet<u32> = [100].into_iter().collect();
+        mark_dead_schannel_flows(&mut flows, &alive, now);
+
+        assert!(flows[0].exit_time.is_none(), "alive pid 不应被 mark");
+        assert_eq!(flows[1].exit_time, Some(now), "dead pid 应被打上当前 now");
+        assert_eq!(
+            flows[2].exit_time,
+            Some(now - Duration::from_secs(60)),
+            "已有 exit_time 不应被覆盖"
+        );
+    }
+
+    /// mark_dead_schannel_flows：ebpf 路径 flow（source = Ebpf）不动——
+    /// 它们由 FlowAggregator::reaper_tick 管。
+    #[test]
+    fn mark_dead_schannel_flows_skips_ebpf_flows() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let mut flows = vec![ProcessFlow {
+            pid: 999,
+            start_time: 0,
+            comm: String::new(),
+            local_addr: String::new(),
+            remote_addr: "1.1.1.1".into(),
+            remote_port: 80,
+            bytes_out: 0,
+            bytes_in: 0,
+            dns_name: None,
+            sni: None,
+            source: FlowSource::Ebpf,
+            first_seen: now,
+            last_seen: now,
+            exit_time: None,
+        }];
+        let alive: HashSet<u32> = HashSet::new(); // 空：所有 pid 都算 dead
+        mark_dead_schannel_flows(&mut flows, &alive, now);
+        assert!(
+            flows[0].exit_time.is_none(),
+            "ebpf flow 不应被 Schannel reaper mark"
+        );
+    }
+
+    /// reap_expired_schannel_flows：exit_time + 30s < now 的 Schannel flow 被移除。
+    /// exit_time + 30s > now 的 Schannel flow 保留。live Schannel flow 保留。
+    /// ebpf flow 不动（无论 exit_time）。
+    #[test]
+    fn reap_expired_schannel_flows_removes_only_expired() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let mut flows = vec![
+            // 0: live Schannel flow → 保留
+            mk_schannel_flow(100, "live.com", t0),
+            // 1: ghost Schannel flow，exit + 29s（仍在窗口内）→ 保留
+            mk_schannel_flow(200, "ghost-recent.com", t0),
+            // 2: ghost Schannel flow，exit + 31s（已超窗口）→ 移除
+            mk_schannel_flow(300, "ghost-expired.com", t0),
+            // 3: ebpf flow（无 exit_time）→ 保留（不归这里管）
+            ProcessFlow {
+                pid: 400,
+                start_time: 0,
+                comm: String::new(),
+                local_addr: String::new(),
+                remote_addr: "8.8.8.8".into(),
+                remote_port: 53,
+                bytes_out: 0,
+                bytes_in: 0,
+                dns_name: None,
+                sni: None,
+                source: FlowSource::Ebpf,
+                first_seen: t0,
+                last_seen: t0,
+                exit_time: None,
+            },
+        ];
+        flows[1].exit_time = Some(t0 - Duration::from_secs(29));
+        flows[2].exit_time = Some(t0 - Duration::from_secs(31));
+
+        // now = t0：flow[2] exit + 31s 在 t0 之前（已超 30s 窗口）→ reap
+        reap_expired_schannel_flows(&mut flows, t0);
+
+        assert_eq!(flows.len(), 3, "应保留 3 条（live + recent ghost + ebpf）");
+        let pids: Vec<u32> = flows.iter().map(|f| f.pid).collect();
+        assert!(pids.contains(&100), "live Schannel 保留");
+        assert!(pids.contains(&200), "recent ghost Schannel 保留");
+        assert!(pids.contains(&400), "ebpf flow 不动");
+        assert!(!pids.contains(&300), "expired ghost Schannel 应被 reap");
+    }
+
+    /// reap_expired_schannel_flows：空 Vec / 全 live 不 panic。
+    #[test]
+    fn reap_expired_schannel_flows_empty_or_all_live_no_panic() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+        let mut empty: Vec<ProcessFlow> = Vec::new();
+        reap_expired_schannel_flows(&mut empty, now);
+        assert!(empty.is_empty());
+
+        let mut all_live = vec![
+            mk_schannel_flow(1, "a.com", now),
+            mk_schannel_flow(2, "b.com", now),
+        ];
+        reap_expired_schannel_flows(&mut all_live, now);
+        assert_eq!(all_live.len(), 2, "全 live 不应被 reap");
     }
 }

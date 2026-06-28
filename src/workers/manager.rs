@@ -35,6 +35,11 @@ pub struct WorkerManager {
     /// （`App::flows` 保持空，UI 显示「需要 Linux + ebpf feature」提示）。
     /// 详见 ADR-0016 + `src/ebpf/mod.rs`。
     pub ebpf_worker: Option<crate::ebpf::EbisuBpfWorker>,
+    /// v0.10 阶段 2：Schannel ETW SNI worker（Windows 管理员 + x64 only）。
+    /// 其它场景为 None。worker drain 出 `Vec<SniRecord>`，阶段 3 接
+    /// `App::overlay_flow_sni_schannel` merge 到 `ProcessFlow.sni`；阶段 2
+    /// 只接 worker + diag 行，UI 不动。详见 ADR-0018。
+    pub schannel_etw_worker: Option<crate::schannel_etw::SchannelEtwWorker>,
 }
 
 impl WorkerManager {
@@ -50,6 +55,7 @@ impl WorkerManager {
             .map(|c| crate::dns_log::worker::spawn(c, crash_tx.cloned()));
         let disk_io_etw_worker = crate::disk_io_etw::try_spawn(crash_tx.cloned());
         let ebpf_worker = crate::ebpf::try_spawn(crash_tx.cloned());
+        let schannel_etw_worker = crate::schannel_etw::try_spawn(crash_tx.cloned());
         Self {
             port_worker,
             usb_worker,
@@ -57,6 +63,7 @@ impl WorkerManager {
             dns_log_worker,
             disk_io_etw_worker,
             ebpf_worker,
+            schannel_etw_worker,
         }
     }
 
@@ -88,6 +95,12 @@ impl WorkerManager {
         if let Some(w) = &self.disk_io_etw_worker {
             out.push(NamedWorkerStats {
                 name: "disk_io_etw",
+                stats: w.metrics.snapshot(),
+            });
+        }
+        if let Some(w) = &self.schannel_etw_worker {
+            out.push(NamedWorkerStats {
+                name: "schannel_etw",
                 stats: w.metrics.snapshot(),
             });
         }

@@ -305,18 +305,23 @@ fn format_system_time(t: std::time::SystemTime) -> String {
 }
 
 /// v0.7 阶段 8：Flow 子视图（ADR-0016）。列出 `App::flows`（最近一份
-/// FlowAggregator drain 出的快照）。列：PID / comm / 远端 / 端口 / 域名 / 时间。
+/// FlowAggregator drain 出的快照 + v0.10 阶段 3 Schannel SNI overlay）。
+/// 列：PID / comm / 远端 / 端口 / 域名 / 时间。
 ///
-/// - ebpf feature 关闭 / 非 Linux 平台：显示「需要 Linux + ebpf feature」提示。
-/// - flows 为空但 worker 已启用：显示「尚无 flow（等 connect 事件）」。
+/// - Linux + ebpf feature：source = Ebpf 路径（connect + DNS 关联，完整字段）。
+/// - Windows admin：source = Schannel 路径（SNI 明文，远端/端口空 + JA4 空）。
+/// - ebpf + schannel 都不在线：显示降级提示。
+/// - flows 为空但 worker 已启用：显示「尚无 flow」。
 /// - `bytes_out / bytes_in` MVP 留 0（Part B 接 tcp_sendmsg/recvmsg），不渲染。
 fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
     let pp = &app.port_panel.panel;
     let flows = &app.flows;
 
     let ebpf_enabled = crate::ebpf::EBPF_ENABLED;
+    let schannel_on = app.workers.schannel_etw_worker.is_some();
 
-    // 标题栏：worker 状态 + 条数 + 操作提示
+    // 标题栏：worker 状态 + 条数 + 操作提示。v0.10 阶段 3：跨平台对齐
+    // （ebpf / schannel 都有 → 显示数据来源 mix；单一来源 → 显示对应路径）。
     let ghost_count = flows.iter().filter(|f| f.is_ghost()).count();
     let header_line = if ebpf_enabled && app.workers.ebpf_worker.is_some() {
         if ghost_count > 0 {
@@ -331,10 +336,16 @@ fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
                 flows.len()
             )
         }
+    } else if schannel_on {
+        // v0.10 阶段 3：Windows admin 走 Schannel 路径（source = Schannel）。
+        format!(
+            " Schannel Flow graph（{} 条 · SNI 明文 · TLS handshake）  F/Esc 退出 · ↑↓滚动",
+            flows.len()
+        )
     } else if ebpf_enabled {
         " eBPF Flow graph：worker 启动失败（无权限？内核 < 5.10？），详见日志".to_string()
     } else {
-        " eBPF Flow graph：需要 Linux + ebpf feature（`cargo build --features ebpf`）".to_string()
+        " Flow graph：需要 Linux + ebpf feature 或 Windows 管理员（Schannel ETW）".to_string()
     };
 
     let chunks = Layout::default()
@@ -350,7 +361,7 @@ fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
         Cell::from("进程名"),
         Cell::from("远端"),
         Cell::from("端口"),
-        Cell::from("域名"),
+        Cell::from("SNI/域名"),
         Cell::from("首次见到"),
     ])
     .style(theme::style_header());
@@ -363,7 +374,13 @@ fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
     let rows: Vec<Row> = window
         .iter()
         .map(|flow| {
-            let dns_str = flow.dns_name.clone().unwrap_or_else(|| "—".into());
+            // v0.10 阶段 3：SNI 优先（Schannel 路径 / ebpf 路径 sni 填上时），
+            // 回退到 dns_name（ebpf 路径 DNS 关联命中），都没有显示 —。
+            let name_str = flow
+                .sni
+                .clone()
+                .or_else(|| flow.dns_name.clone())
+                .unwrap_or_else(|| "—".into());
             let comm = if flow.comm.is_empty() {
                 "?".to_string()
             } else {
@@ -382,12 +399,24 @@ fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::default()
             };
+            // v0.10 阶段 3：Schannel 路径 remote_addr 留空（Schannel event 不给
+            // socket 元数据），显示 — 保持表格视觉对齐；remote_port = 0 时也显示 —。
+            let remote_addr_cell = if flow.remote_addr.is_empty() {
+                "—".to_string()
+            } else {
+                flow.remote_addr.clone()
+            };
+            let remote_port_cell = if flow.remote_port == 0 {
+                "—".to_string()
+            } else {
+                flow.remote_port.to_string()
+            };
             Row::new(vec![
                 Cell::from(pid_str),
                 Cell::from(comm),
-                Cell::from(flow.remote_addr.clone()),
-                Cell::from(flow.remote_port.to_string()),
-                Cell::from(dns_str),
+                Cell::from(remote_addr_cell),
+                Cell::from(remote_port_cell),
+                Cell::from(name_str),
                 Cell::from(format_system_time(flow.first_seen)),
             ])
             .style(row_style)
@@ -409,7 +438,7 @@ fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("ProcessFlow（connect + DNS 关联 · 隐私不持久化）"),
+            .title("ProcessFlow（SNI/域名 · 隐私不持久化）"),
     );
     f.render_widget(table, chunks[1]);
 }

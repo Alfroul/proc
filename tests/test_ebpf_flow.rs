@@ -220,6 +220,8 @@ fn process_flow_serde_round_trip() {
         bytes_out: 0,
         bytes_in: 0,
         dns_name: Some("example.com".into()),
+        sni: Some("example.com".into()),
+        source: proc::ebpf::flow::FlowSource::Ebpf,
         first_seen: SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
         last_seen: SystemTime::UNIX_EPOCH + Duration::from_secs(1005),
         exit_time: None,

@@ -1,24 +1,19 @@
 //! `proc flows [--limit N] [--json]` — v0.7 阶段 8：列出 ProcessFlow（ADR-0016）。
 //!
-//! Linux + `ebpf` feature 才有真实数据。其它平台 / 未启用 feature 时给降级提示。
+//! v0.10 阶段 3：跨平台对齐——Linux + `ebpf` feature 走 eBPF 路径
+//! （`source = Ebpf`），Windows 管理员走 Schannel ETW 路径（`source = Schannel`）。
+//! 其它平台 / 非管理员 / 未启用 feature 时给降级提示。
 
 use colored::Colorize;
 
 use crate::ebpf::EBPF_ENABLED;
+use crate::ebpf::flow::FlowSource;
 
-/// 默认等待 ebpf worker attach + 收集首批事件的时间。
-/// 2s 与 `proc diag` 同款兜底；典型 connect 事件 < 1s 出现。
+/// 默认等待 worker attach + 收集首批事件的时间。
+/// 2s 与 `proc diag` 同款兜底；典型 connect / TLS handshake < 1s 出现。
 const WARM_UP_SECS: u64 = 2;
 
 pub fn run_flows(limit: Option<usize>, json: bool) {
-    if !EBPF_ENABLED {
-        eprintln!(
-            "{}",
-            "eBPF flow graph 需要 Linux + `ebpf` feature（`cargo build --features ebpf`）".yellow()
-        );
-        return;
-    }
-
     let mut app = match crate::app::App::new() {
         Ok(a) => a,
         Err(e) => {
@@ -27,7 +22,16 @@ pub fn run_flows(limit: Option<usize>, json: bool) {
         }
     };
 
-    if app.workers.ebpf_worker.is_none() {
+    // v0.10 阶段 3：两条路径都未启用时降级。EBPF_ENABLED = false（非 Linux /
+    // 无 feature）且 Schannel worker 未起来（非 Windows / 非管理员）→ 退到提示。
+    if !EBPF_ENABLED && app.workers.schannel_etw_worker.is_none() {
+        eprintln!(
+            "{}",
+            "Flow graph 需要 Linux + `ebpf` feature（`cargo build --features ebpf`）或 Windows 管理员（Schannel ETW）".yellow()
+        );
+        return;
+    }
+    if EBPF_ENABLED && app.workers.ebpf_worker.is_none() {
         eprintln!(
             "{}",
             "eBPF worker 启动失败：需要 root 或 CAP_BPF，内核 ≥ 5.10。详见日志。".yellow()
@@ -35,7 +39,7 @@ pub fn run_flows(limit: Option<usize>, json: bool) {
         return;
     }
 
-    // 让 ebpf worker 收集首批事件 + DNS 关联。
+    // 让 worker 收集首批事件 + DNS / SNI 关联。
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(WARM_UP_SECS);
     while std::time::Instant::now() < deadline {
         app.tick();
@@ -49,8 +53,7 @@ pub fn run_flows(limit: Option<usize>, json: bool) {
 
     if json {
         // 序列化前转 owned（serde_json 处理 Vec<&T> 麻烦，直接 clone）。
-        let owned: Vec<&crate::ebpf::flow::ProcessFlow> = flows;
-        let snapshot: Vec<crate::ebpf::flow::ProcessFlow> = owned.into_iter().cloned().collect();
+        let snapshot: Vec<crate::ebpf::flow::ProcessFlow> = flows.into_iter().cloned().collect();
         match serde_json::to_string_pretty(&snapshot) {
             Ok(s) => println!("{s}"),
             Err(e) => eprintln!("{} 序列化失败: {}", "错误:".red(), e),
@@ -61,21 +64,32 @@ pub fn run_flows(limit: Option<usize>, json: bool) {
     if flows.is_empty() {
         println!(
             "{}",
-            "当前暂无活跃 flow（启动浏览器或 curl 触发 connect）".yellow()
+            "当前暂无活跃 flow（启动浏览器或 curl 触发 connect / TLS handshake）".yellow()
         );
         return;
     }
 
+    let ebpf_n = flows
+        .iter()
+        .filter(|f| f.source == FlowSource::Ebpf)
+        .count();
+    let schannel_n = flows.len() - ebpf_n;
+    let summary = match (ebpf_n, schannel_n) {
+        (e, 0) => format!("ProcessFlow（{e} 条 · eBPF connect + DNS 关联）"),
+        (0, s) => format!("ProcessFlow（{s} 条 · Schannel TLS handshake SNI）"),
+        (e, s) => format!("ProcessFlow（{e} ebpf + {s} schannel · {e}+{s} 条）"),
+    };
+    println!("{}", summary.cyan());
     println!(
-        "{}",
-        format!("ProcessFlow（{} 条 · connect + DNS 关联）", flows.len()).cyan()
-    );
-    println!(
-        "  {:<7} {:<16} {:<16} {:<6} {:<24} {:<10}",
-        "PID", "进程名", "远端", "端口", "域名", "首次见到"
+        "  {:<7} {:<16} {:<16} {:<6} {:<8} {:<24} {:<10}",
+        "PID", "进程名", "远端", "端口", "来源", "SNI/域名", "首次见到"
     );
     for f in flows {
-        let dns = f.dns_name.clone().unwrap_or_else(|| "—".into());
+        let name = f
+            .sni
+            .clone()
+            .or_else(|| f.dns_name.clone())
+            .unwrap_or_else(|| "—".into());
         let comm = if f.comm.is_empty() {
             "?".to_string()
         } else {
@@ -86,10 +100,24 @@ pub fn run_flows(limit: Option<usize>, json: bool) {
         } else {
             f.pid.to_string()
         };
+        let source_str = match f.source {
+            FlowSource::Ebpf => "ebpf",
+            FlowSource::Schannel => "schannel",
+        };
+        let remote_addr = if f.remote_addr.is_empty() {
+            "—".to_string()
+        } else {
+            f.remote_addr.clone()
+        };
+        let remote_port = if f.remote_port == 0 {
+            "—".to_string()
+        } else {
+            f.remote_port.to_string()
+        };
         let ts = format_system_time(f.first_seen);
         println!(
-            "  {:<7} {:<16} {:<16} {:<6} {:<24} {:<10}",
-            pid_str, comm, f.remote_addr, f.remote_port, dns, ts
+            "  {:<7} {:<16} {:<16} {:<6} {:<8} {:<24} {:<10}",
+            pid_str, comm, remote_addr, remote_port, source_str, name, ts
         );
     }
 }
