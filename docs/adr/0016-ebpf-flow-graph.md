@@ -168,7 +168,7 @@ DNS 查询 → 进程查询 example.com → 解析结果含 <remote_ip>
 - **root 或 CAP_BPF**：普通用户运行不生效（降级提示）
 - **DNS 关联启发式不 100% 准**：命中 cache 的查询关联不到，需用户理解
 - **aya-rs 0.13 API 可能变**：v0.8+ aya 升级阻力
-- **Linux 真实编译验证缺失**：worker.rs / ebpf-ebpf/src/main.rs 在 Windows 会话落地，未在 Linux + root + 内核 5.10+ 环境验证（详见 TD-19）
+- **Linux 真实编译验证缺失**：worker.rs / ebpf-ebpf/src/main.rs 在 Windows 会话落地，未在 Linux + root + 内核 5.10+ 环境验证（详见 TD-19）。**v0.8.0 cycle 推进**：用户主要用 Windows 开发，stage 1（WSL2 真实验证）主动推迟到 v0.9.0 cycle 启动前再评估；v0.8.0 release CI 的 `proc_ebpf` 后缀二进制构建因 `continue-on-error=true` 设计，Linux 真实编译失败不阻断主 release。
 
 ### 实测数据（v0.7.0 阶段 8 Part B 完工时）
 

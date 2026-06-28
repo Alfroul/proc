@@ -2,6 +2,10 @@
 
 Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中。Windows 主开发平台，Linux/macOS 可降级运行。
 
+> **v0.8.0（2026-06-28）** 小修一波清 + FilterExpr 扩展：**FilterExpr 全 view 支持**（Tree / AppGroup 视图按 `:` 也能用 `cpu > 5 AND name =~ /chrome/` 过滤）/ **错误信息中文化**（不再直出 nom 内部 `TakeWhile1`，改友好提示「缺少字段名/值」）/ **Linux CI 加固**（全量 `cargo test --release` + 测试 bin 数 ≥ 30 校验防 cfg-gate 静默 skip）/ **Linux stub 测试覆盖**（env/dlls/handles/memory 降级路径有早期告警）。全量回归 930 tests passed / 0 failed。详见 [CHANGELOG](CHANGELOG.md)。
+>
+> **已知限制**：Linux ebpf 编译路径未在本机验证（stage 1 主动推迟到 v0.9.0 cycle）；release CI 用 `continue-on-error=true` 让 ebpf 构建失败不阻断主 release。详见 [tech-debt TD-19](docs/tech-debt.md)。
+
 > **v0.7.0（2026-06-28）** 新增三大主题：**生态卡位**（`proc mcp serve` LLM agent 接入 / shell 补全 / Ctrl+P 命令面板 / FilterExpr 表达式搜索 `cpu > 5 AND name =~ /chrome/`）/ **平台深度**（Linux PSI 监控 / Win11 EcoQoS 切换 / Win ETW per-process 磁盘 IO / Linux eBPF flow graph）/ **架构债清理**（App 拆 5 个 panel controller）。全量回归 910 tests passed / 0 failed。详见 [CHANGELOG](CHANGELOG.md)。
 
 ## 功能

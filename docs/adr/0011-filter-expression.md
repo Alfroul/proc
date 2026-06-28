@@ -154,6 +154,19 @@ nom 默认错误信息直出内部 `ErrorKind` 枚举名（`TakeWhile1` / `Tag` 
 
 代价：parser 测试需要锁死中文映射对外的字面量（`tests/test_filter_expr.rs::err_chinese_*`），映射表改名时需要同步更新。
 
+### v0.8.0 阶段 3 增量：FilterExpr 扩 Tree / AppGroup view（TD-15）
+
+v0.7 阶段 4 FilterExpr 只接入 List view；Tree / AppGroup 视图保留 substring。v0.8 阶段 3 把两个视图同款接入：
+
+- **Tree view**：`get_filtered_tree_visible(&self, cached_processes: &[ProcessInfo])` 加 `cached_processes` 参数。FilterExpr 分支建 `pid → &ProcessInfo` HashMap，按 visible TreeNode 的 pid 取原始 ProcessInfo 再 `FilterExpr::apply`。Substring 分支保留 v0.6 name.lower().contains 行为。
+- **AppGroup view**：`app_group_filtered_visual_items(&self, cached_processes: &[ProcessInfo])` 同款扩参。FilterExpr 分支两套 apply 语义：
+  - **Header 项（聚合）**：用 group 的 `total_cpu` / `total_memory` + `display_name` 构造合成 ProcessInfo，apply 时 `cpu > 50` 表示「该 .exe 总 cpu > 50」。Header 命中 → 整组保留。
+  - **Child 项（单进程）**：Header 不命中时按 pid 查 cached_processes 取原始 ProcessInfo，命中的 child 保留并自动展开该组。
+
+设计取舍：选「传 cached_processes 参数」（不动 TreeNode / AppGroupProcess 结构），保持 v0.7 阶段 5 拆分边界（ADR-0012）。AppGroup Header 用合成 ProcessInfo（`..ProcessInfo::default()`）而非新增字段，避免 AppGroupProcess 持 `Arc<ProcessInfo>` 引发构造点 + 序列化连锁修改。
+
+代价：内部 helper（`tree_move_cursor` / `tree_toggle_select` / `tree_initiate_kill` / `tree_select_orphans` / `tree_select_stale` / `app_group_move_cursor` / `app_group_toggle_expand` / `app_group_toggle_select` / `app_group_initiate_kill`）签名都加 `cached_processes: &[ProcessInfo]`；外部调用点（`src/app.rs::handle_scroll` / `src/tui/process_tree.rs::draw` / `src/tui/app_group_view.rs::draw`）传 `&app.cached_processes[..]`。
+
 ## Implementation Notes
 
 - 入口：`src/filter/mod.rs::FilterExpr::apply(&ProcessInfo) -> bool`

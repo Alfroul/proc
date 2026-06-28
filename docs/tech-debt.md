@@ -177,13 +177,14 @@
 **修复**（v0.8 候选）：在 `src/disk_io_etw/provider.rs` 同款手写 windows-rs ETW 框架基础上，新开 Schannel session 抓 event 196，关联 (pid, sni, ts) → 与 DNS 日志互补。
 **验证**：Windows 上 curl https://example.com → 端口面板 / `proc flows` 显示 SNI。
 
-### TD-19：eBPF Linux 真实编译验证缺失 — v0.7.0 阶段 8 遗留
+### TD-19：eBPF Linux 真实编译验证缺失 — v0.7.0 阶段 8 遗留 ⏸ v0.8.0 cycle 主动推迟
 
 **位置**：`src/ebpf/{worker.rs,elf_loader.rs}` + `src/ebpf/ebpf-ebpf/src/main.rs`
 **现状**：Part A + Part B 都在 Windows 会话落地，未在真实 Linux + root + 内核 5.10+ 环境验证：aya `TracePoint::attach` 真实签名、`RingBuf::try_from` API、tracepoint arg offset（`sys_enter_connect` 偏移 16 / `sched_process_exit` 偏移 24 在不同内核可能不同）、`include_bytes!` ELF 路径硬编码、内核态 `bpf_current_task_start_time` 占位 0（需 aya-tool BTF binding 补完）。
 **影响**：Linux 用户首次 `cargo build --features ebpf` 可能失败；attach 失败时 App::flows 为空，UI 显示降级提示（不崩，但功能不可用）。
 **修复**（v0.7 收尾或 v0.8）：Linux 会话跑 `cargo +nightly build --target bpfel-unknown-none -p proc-ebpf` + `cargo build --release --features ebpf` + `sudo cargo test --release --features ebpf --test test_ebpf_flow -- --ignored`，按报错修。
 **验证**：Linux 真实环境 `proc flows` 显示活跃 flow；端口面板按 F 切换 Flow 子视图有数据。
+**v0.8.0 cycle 推进**：用户主要用 Windows 开发，stage 1（WSL2 / Linux 真机验证）主动推迟到 **v0.9.0 cycle 启动前再评估**。stage 4 review（REVIEW-9）已确认此条不属 v0.8.0 cycle 范围；release CI `proc_ebpf` 后缀二进制构建步骤的 `continue-on-error=true` 设计让 Linux 编译失败不阻断主 release（5 target 主二进制优先发货）。README banner + CHANGELOG 显式标注此 known limitation。
 
 ---
 

@@ -5,6 +5,52 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.8.0] - 2026-06-28
+
+v0.8.0 cycle 围绕 **小修一波清**（TD-12 Linux stub 测试 + TD-13 Linux CI 校验 + TD-16 FilterExpr 错误中文化）+ **FilterExpr 扩展**（TD-15 Tree / AppGroup view 接入）+ **收尾交付**（REVIEW-9 全局 Review + tag）三条线，分 4 阶段推进（stage 1 主动推迟 / stage 2+3 实现 / stage 4 review + 收尾）。**全量回归 930 passed / 0 failed / 3 ignored**（v0.7.0 基线 910 → +20 新测试 case）；0 个新依赖进默认依赖图。
+
+**已知限制（必须在 release notes 显式标注）**：
+- **Linux ebpf 编译路径未在本机验证**（TD-19 延续）：v0.8.0 cycle stage 1（WSL2 / Linux 真机验证）由用户主动推迟到 v0.9.0 cycle 启动前再评估。理由：用户主要用 Windows 开发，stage 1 环境准备成本高（clang/llvm/libelf + nightly + bpf-linker），且 stage 2/3/4 不依赖 stage 1。release CI 的 `proc_ebpf` 后缀二进制构建步骤用 `continue-on-error=true`，Linux 编译失败不阻断主 release（5 target 主二进制优先发货）。详见 [ADR-0016 Consequences](docs/adr/0016-ebpf-flow-graph.md#负面) + [tech-debt TD-19](docs/tech-debt.md)。
+- v0.7.0 cycle 已记录的 known limitations（eBPF SNI / JA4 留 TD-17 / Windows Schannel 留 TD-18）继续保留，本 cycle 未触及。
+
+### 阶段 4 — Review + 修 P0/P1 + 定稿 + tag v0.8.0（本次发布）
+
+> 本次发布 commit：Cargo.toml 0.7.0 → 0.8.0；CHANGELOG / README / CONTEXT 同步 v0.8.0；4 个 stage doc 头部加发布标记；ADR-0011 加 v0.8 阶段 3 增量段 / ADR-0016 加 cycle 推迟说明；tech-debt TD-19 加 v0.8.0 cycle 推进段；REVIEW-9 P0/P1/P2 状态闭环。详见本次 commit diff。
+
+- Docs: **`docs/reviews/REVIEW-9.md`**（新）— v0.8.0 cycle 全局 review 报告。审查覆盖 stage 1-3 全部产出（代码质量 / 架构 / 安全性 / 跨平台一致性 / ADR 一致性 5 子项），分级 **P0 0 / P1 1 / P2 4**。结论：无阻断问题（baseline 930 passed + fmt/clippy/no-default-features build 全通过）；P1-1 stale comment 已修；P2 文档一致性问题归档到 ADR / tech-debt / stage docs。
+- Fix: **REVIEW-9 P1-1** — `src/view_models/process_panel.rs:679-680` 注释 stale（"仅 List view 接入；Tree / AppGroup 视图暂保持 substring"），与 v0.8 阶段 3（TD-15）实际接入矛盾。改成「v0.8 阶段 3：Tree / AppGroup 视图同款接入（TD-15），三视图均支持」。
+- Docs: ADR-0011（FilterExpr）加「v0.8.0 阶段 3 增量：FilterExpr 扩 Tree / AppGroup view（TD-15）」段（REVIEW-9 P2-1）；ADR-0016（eBPF）Consequences 段补 v0.8.0 cycle stage 1 推迟说明（P2-2）；tech-debt TD-19 加 ⏸ 标记 + 「v0.8.0 cycle 推进」段（P2-3）；4 个 v0.8 stage doc 头部加 ✅ 已发布 / ⏸ 推迟 标记（P2-4）。
+- Docs: README banner 加 v0.8.0 段（FilterExpr 全 view / Linux CI 加固 / ebpf 编译路径未本机验证）；CONTEXT.md「术语演进历史」段已含 v0.8.0 落地变更（stage 2/3 行，stage 4 不引入新术语）。
+- Release: `git tag -a v0.8.0 -m "v0.8.0：FilterExpr 全 view + Linux CI 加固 + REVIEW-9 收尾"` 已打（等用户确认后 push）。
+
+### 阶段 2 — TD-12 + TD-13 + TD-16 小修一波清
+
+> 3 项小 tech-debt 一波清掉。每项都是局部 surgical 修改，不引依赖、不改架构。
+
+- Fix: **TD-12 Linux stub 测试覆盖增强** — `tests/test_linux_stubs.rs`（新文件，Linux-only via `#![cfg(target_os = "linux")]`）6 case：env/dlls/handles/memory 对 bogus pid 返回 Err（`ProcError::PermissionDenied`，不是 panic / 空 Vec）+ self pid 走 Ok 路径（至少 1 个变量 / 1 个内存区域）。`tests/test_platform_compat.rs` 加 5 个跨平台 inspect::* 契约 case（Windows/Linux/macOS 都跑，bogus pid 一律 Err + inspect 顶层返回空 InspectionData 不 panic）。
+- Fix: **TD-13 CI Linux job 校验 cfg-gate 实际执行** — `.github/workflows/ci.yml` `check-linux` job 改成跑全量 `cargo test --release` + bash step 校验测试 bin 数 ≥ 30。v0.7 之前只跑 6 个手挑的 `--test xxx`，cfg(target_os="linux") 写错会静默 skip；现在阈值 30 是 v0.7.0 实际 ~50 个测试 bin 留余地的下限，防止未来新增测试 bin 静默消失。
+- Fix: **TD-16 FilterExpr 错误信息中文化** — `src/filter/parser.rs` 加 `error_kind_to_chinese(&ErrorKind) -> &'static str`（TakeWhile1 → 「缺少字段名/值」、Tag → 「缺少关键字/操作符」、AlphaNumeric → 「未知字段名」、Verify → 「正则编译失败」、Digit/Float → 「数字格式错误」等 9 变体 + 兜底「语法错误」）+ `char_to_chinese(char)`（括号 / 引号 / 斜杠给出语义化提示）。`paren_expr` 闭合用 `cut(char(')'))` 让 alt 不回退到 leaf，`(cpu > 5` 缺 `)` 时最内层错误真正指向 Char(')') 而非被 leaf 的 TakeWhile1 覆盖。`tests/test_filter_expr.rs` 加 5 个中文契约 case 锁死映射表对外字面量。
+- Test: 全量 920 → 925 passed（TD-12 +6 Linux-only + TD-16 +3 跨平台 + TD-16 +5 错误信息契约）。
+
+### 阶段 3 — TD-15 FilterExpr 扩 Tree / AppGroup view
+
+> 把 v0.7.0 阶段 4 只接入 List view 的 FilterExpr 扩展到 Tree view 和 AppGroup view。用户在这两个视图按 `:` 也能切到 FilterExpr 模式，输入 `cpu > 5 AND name =~ /chrome/` 能正确过滤。
+
+- Added: **Tree view FilterExpr 接入** — `src/view_models/process_panel.rs::get_filtered_tree_visible(&self, cached_processes: &[ProcessInfo])` 加 `cached_processes` 参数。FilterExpr 分支建 `pid → &ProcessInfo` HashMap，按 visible TreeNode 的 pid 取原始 ProcessInfo 再 `FilterExpr::apply`（TreeNode 是 ProcessInfo 派生的精简结构，原 cmd/exe/user 等字段需要从 cached_processes 查回）。Substring 分支保留 v0.6 name.lower().contains 行为。`handle_tree_key` 在 `'/'` 旁边加 `':'` 激活 FilterExpr 模式，复用 `SearchState::activate_filter_expr()`。
+- Added: **AppGroup view FilterExpr 接入** — `app_group_filtered_visual_items(&self, cached_processes: &[ProcessInfo])` 同款扩参。FilterExpr 分支两套 apply 语义：
+  - **Header 项（聚合）**：用 group 的 `total_cpu` / `total_memory` + `display_name` 构造合成 ProcessInfo（`..ProcessInfo::default()`），apply 时 `cpu > 50` 表示「该 .exe 总 cpu > 50」（与 stage 3 doc 设计一致）。Header 命中 → 整组保留。
+  - **Child 项（单进程）**：Header 不命中时按 pid 查 cached_processes 取原始 ProcessInfo，命中的 child 保留并自动展开该组。
+- Changed: 内部 helper 签名连锁修改 — `tree_move_cursor` / `tree_toggle_select` / `tree_initiate_kill` / `tree_select_orphans` / `tree_select_stale` / `app_group_move_cursor` / `app_group_toggle_expand` / `app_group_toggle_select` / `app_group_initiate_kill` 都加 `cached_processes: &[ProcessInfo]` 参数。外部调用点（`src/app.rs::handle_scroll` / `src/tui/process_tree.rs::draw` / `src/tui/app_group_view.rs::draw`）传 `&app.cached_processes[..]`。**panel controller 边界保持**（ADR-0012）：调用方走 `app.process_panel.panel.<method>(&app.cached_processes[..])` 通过 `.panel` 访问器。
+- Added: `tests/test_filter_expr.rs` 加 10 个新 case（Tree × 5：cpu_gt / pid_equality / keeps_prev_ast_on_bad_input / substring_mode_unchanged / empty_query_returns_all；AppGroup × 5：aggregate_cpu_header_match / child_partial_match / memory_aggregate / app_group_keeps_prev_ast / app_group_substring_mode_unchanged）。
+- Test: 全量 925 → 930 passed。
+- Docs: tech-debt TD-15 标 ✅ Fixed in v0.8.0 阶段 3；CONTEXT.md 加 `AppGroupFilterState` 新术语（Tree / AppGroup 各持独立 FilterExpr mode，与 List 解耦）。
+
+### 阶段 1 — TD-19 ebpf Linux 真实编译验证 ⏸ 主动推迟
+
+> ⏸ **v0.8.0 cycle 主动推迟到 v0.9.0 cycle 启动前再评估**。理由：用户主要用 Windows 开发，WSL2 / Linux 真机环境准备成本高（clang/llvm/libelf + nightly + bpf-linker ~30 min），且 stage 2/3/4 不依赖 stage 1。
+>
+> stage 4 review（REVIEW-9）已确认此推迟不影响 v0.8.0 cycle 收尾；Linux 验收标准（`cargo +nightly build -p proc-ebpf --target bpfel-unknown-none --release` / `cargo build --release --features ebpf`）跟随 stage 1 跳过；release CI `proc_ebpf` 后缀二进制构建用 `continue-on-error=true` 让 Linux 编译失败不阻断主 release。详见 [ADR-0016](docs/adr/0016-ebpf-flow-graph.md) + [tech-debt TD-19](docs/tech-debt.md)。
+
 ## [0.7.0] - 2026-06-28
 
 v0.7.0 围绕 **生态卡位**（MCP server + shell 补全 + 命令面板 Ctrl+P）/ **平台深度**（Linux PSI / Win11 EcoQoS / Win ETW per-process 磁盘 IO / Linux eBPF flow graph）/ **架构债清理**（App 拆 5 panel controller + FilterExpr 表达式）三条主线，分 10 阶段推进（实现 1-8 + Review 9 + 收尾 10）。**全量回归 910 passed / 0 failed**（v0.6.0 基线 701 → +149 新测试 +5 个新模块 +10 个新术语 +8 个新 ADR）；0 个新依赖进默认依赖图（rmcp / nucleo / clap_complete / nom 全部 cfg-gate 或 feature flag；aya 仅 Linux + `ebpf` feature）。
