@@ -1165,9 +1165,13 @@ impl App {
         match self.mode {
             AppMode::ProcessList | AppMode::ProcessDetail => {
                 if self.process_panel.panel.process_view_mode == ProcessViewMode::Tree {
-                    self.process_panel.panel.tree_move_cursor(lines);
+                    self.process_panel
+                        .panel
+                        .tree_move_cursor(lines, &self.cached_processes[..]);
                 } else if self.process_panel.panel.process_view_mode == ProcessViewMode::AppGroup {
-                    self.process_panel.panel.app_group_move_cursor(lines);
+                    self.process_panel
+                        .panel
+                        .app_group_move_cursor(lines, &self.cached_processes[..]);
                 } else {
                     self.process_panel
                         .panel

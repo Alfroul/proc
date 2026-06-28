@@ -174,3 +174,66 @@ mod non_windows_stubs {
         );
     }
 }
+
+// ===========================================================================
+// v0.8.0 阶段 2 — TD-12：inspect::* 跨平台契约（所有平台编译运行）
+// ===========================================================================
+//
+// bogus pid 在 Windows / Linux / macOS 上都应让 4 个 inspect 函数返回 Err：
+// - Windows：OpenProcess 失败（pid 不存在）→ Err(PermissionDenied)
+// - Linux：/proc/<bogus>/* 读失败 → Err(PermissionDenied)
+// - macOS：cfg-gate stub 直接 Err
+//
+// 这条跨平台 case 锁住「失败路径不 panic」的契约，配合 test_linux_stubs.rs
+// 的 Linux-only case，覆盖 stub 行为的两面。
+
+#[test]
+fn inspect_env_bogus_pid_returns_err_cross_platform() {
+    use proc::inspect::env;
+    let res = env::collect_env(u32::MAX);
+    assert!(res.is_err(), "expected Err for bogus pid, got {:?}", res);
+}
+
+#[test]
+fn inspect_dlls_bogus_pid_returns_err_cross_platform() {
+    use proc::inspect::dlls;
+    let res = dlls::collect_dlls(u32::MAX);
+    assert!(res.is_err(), "expected Err for bogus pid, got {:?}", res);
+}
+
+#[test]
+fn inspect_handles_bogus_pid_returns_err_cross_platform() {
+    use proc::inspect::handles;
+    let res = handles::collect_handles(u32::MAX);
+    assert!(res.is_err(), "expected Err for bogus pid, got {:?}", res);
+}
+
+#[test]
+fn inspect_memory_bogus_pid_returns_err_cross_platform() {
+    use proc::inspect::memory;
+    let res = memory::collect_memory(u32::MAX);
+    assert!(res.is_err(), "expected Err for bogus pid, got {:?}", res);
+}
+
+#[test]
+fn inspect_top_level_bogus_pid_returns_empty_data_cross_platform() {
+    // inspect(pid) 顶层函数对任一子模块失败用 unwrap_or_default() 兜底，
+    // bogus pid 在所有平台都应返回空 InspectionData（不 panic）。
+    // 这是 UI 详情页的降级契约：失败 = 空数据，不是 crash。
+    let data = proc::inspect::inspect(u32::MAX);
+    assert!(
+        data.env.is_empty(),
+        "expected empty env, got {} vars",
+        data.env.len()
+    );
+    assert!(
+        data.dlls.is_empty(),
+        "expected empty dlls, got {} items",
+        data.dlls.len()
+    );
+    assert!(
+        data.net.is_empty(),
+        "expected empty net, got {} entries",
+        data.net.len()
+    );
+}

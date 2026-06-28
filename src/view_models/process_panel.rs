@@ -85,43 +85,129 @@ impl ProcessPanel {
 
     // --- AppGroup helpers ---
 
+    /// 计算 AppGroup 视图的扁平可视 item 列表。
+    ///
+    /// v0.8.0 阶段 3（TD-15）：加 `cached_processes` 参数支持 FilterExpr 模式。
+    /// - Substring 模式：保留 v0.7 的「group.display_name / process.name / pid」模糊匹配。
+    /// - FilterExpr 模式：
+    ///   - **Header 项（聚合）**：用 group 的 `total_cpu` / `total_memory` 构造合成
+    ///     ProcessInfo 再 apply。`cpu > 50` 表示「该 .exe 总 cpu > 50」。
+    ///   - **Child 项（单进程）**：按 pid 查 cached_processes 拿原始 ProcessInfo 再 apply。
+    ///   - Header 命中 → 整组保留（即使某些 child 不满足）；Header 不命中但 Child 命中
+    ///     → 仅显示命中的 child（自动展开该组）。
     #[must_use]
-    pub fn app_group_filtered_visual_items(&self) -> Vec<AppGroupItem> {
-        if self.app_group_search.query().is_empty() {
-            return build_visual_items(&self.app_groups, self.app_group_expanded);
-        }
-        let query = self.app_group_search.query().to_lowercase();
-        let filtered_groups: Vec<AppGroup> = self
-            .app_groups
-            .iter()
-            .filter(|g| {
-                g.display_name.to_lowercase().contains(&query)
-                    || g.processes.iter().any(|p| {
-                        p.name.to_lowercase().contains(&query)
-                            || p.pid.to_string().contains(self.app_group_search.query())
-                    })
-            })
-            .cloned()
-            .collect();
-        let mut expanded = None;
-        if let Some(exp_idx) = self.app_group_expanded {
-            let mut count = 0;
-            for (i, g) in self.app_groups.iter().enumerate() {
-                if g.display_name.to_lowercase().contains(&query)
-                    || g.processes.iter().any(|p| {
-                        p.name.to_lowercase().contains(&query)
-                            || p.pid.to_string().contains(self.app_group_search.query())
-                    })
-                {
-                    if i == exp_idx {
-                        expanded = Some(count);
-                        break;
-                    }
-                    count += 1;
+    pub fn app_group_filtered_visual_items(
+        &self,
+        cached_processes: &[ProcessInfo],
+    ) -> Vec<AppGroupItem> {
+        match self.app_group_search.mode {
+            crate::search::QueryMode::Substring => {
+                if self.app_group_search.query().is_empty() {
+                    return build_visual_items(&self.app_groups, self.app_group_expanded);
                 }
+                let query = self.app_group_search.query().to_lowercase();
+                let filtered_groups: Vec<AppGroup> = self
+                    .app_groups
+                    .iter()
+                    .filter(|g| {
+                        g.display_name.to_lowercase().contains(&query)
+                            || g.processes.iter().any(|p| {
+                                p.name.to_lowercase().contains(&query)
+                                    || p.pid.to_string().contains(self.app_group_search.query())
+                            })
+                    })
+                    .cloned()
+                    .collect();
+                let mut expanded = None;
+                if let Some(exp_idx) = self.app_group_expanded {
+                    let mut count = 0;
+                    for (i, g) in self.app_groups.iter().enumerate() {
+                        if g.display_name.to_lowercase().contains(&query)
+                            || g.processes.iter().any(|p| {
+                                p.name.to_lowercase().contains(&query)
+                                    || p.pid.to_string().contains(self.app_group_search.query())
+                            })
+                        {
+                            if i == exp_idx {
+                                expanded = Some(count);
+                                break;
+                            }
+                            count += 1;
+                        }
+                    }
+                }
+                build_visual_items(&filtered_groups, expanded)
+            }
+            crate::search::QueryMode::FilterExpr => {
+                let Some(expr) = self.app_group_search.filter_expr.as_ref() else {
+                    return build_visual_items(&self.app_groups, self.app_group_expanded);
+                };
+                let pid_map: std::collections::HashMap<u32, &ProcessInfo> =
+                    cached_processes.iter().map(|p| (p.pid, p)).collect();
+                let mut items = Vec::new();
+                for (gi, group) in self.app_groups.iter().enumerate() {
+                    // Header：构造合成 ProcessInfo（聚合值）。
+                    let synth = ProcessInfo {
+                        name: std::sync::Arc::from(group.display_name.as_str()),
+                        name_lower: std::sync::Arc::from(group.display_name.to_lowercase()),
+                        cpu_usage: group.total_cpu,
+                        memory: group.total_memory,
+                        ..ProcessInfo::default()
+                    };
+                    let header_ctx = crate::filter::EvalCtx {
+                        process: &synth,
+                        security_score: None,
+                    };
+                    let header_match = expr.apply(&header_ctx);
+
+                    if header_match {
+                        // 整组保留：header + 当前 expanded 状态下的 children。
+                        items.push(AppGroupItem::Header { group_idx: gi });
+                        if self.app_group_expanded == Some(gi) {
+                            for ci in 0..group.processes.len() {
+                                items.push(AppGroupItem::Child {
+                                    group_idx: gi,
+                                    child_idx: ci,
+                                });
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Header 不命中：逐 child 判断，命中的 child 保留并自动展开该组。
+                    let matched_children: Vec<usize> = group
+                        .processes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(ci, p)| {
+                            pid_map
+                                .get(&p.pid)
+                                .is_some_and(|proc| {
+                                    let ctx = crate::filter::EvalCtx {
+                                        process: proc,
+                                        security_score: None,
+                                    };
+                                    expr.apply(&ctx)
+                                })
+                                .then_some(ci)
+                        })
+                        .collect();
+
+                    if matched_children.is_empty() {
+                        continue;
+                    }
+
+                    items.push(AppGroupItem::Header { group_idx: gi });
+                    for ci in matched_children {
+                        items.push(AppGroupItem::Child {
+                            group_idx: gi,
+                            child_idx: ci,
+                        });
+                    }
+                }
+                items
             }
         }
-        build_visual_items(&filtered_groups, expanded)
     }
 
     pub fn app_group_sort_groups(&mut self) {
@@ -234,27 +320,60 @@ impl ProcessPanel {
 
     // --- Tree view actions ---
 
+    /// 计算当前 tree view 的可见节点列表。
+    ///
+    /// v0.8.0 阶段 3（TD-15）：加 `cached_processes` 参数支持 FilterExpr 模式。
+    /// - Substring 模式：复用 v0.6 的 `name.to_lowercase().contains(query)` 逻辑。
+    /// - FilterExpr 模式：用 pid 查 cached_processes 拿原始 ProcessInfo，再走
+    ///   `FilterExpr::apply`。`security_score: None`（Tree 视图无 App::security_scores
+    ///   访问路径；用户需安全分过滤时切 List 视图）。
     #[must_use]
-    pub fn get_filtered_tree_visible(&self) -> Vec<TreeNode> {
+    pub fn get_filtered_tree_visible(&self, cached_processes: &[ProcessInfo]) -> Vec<TreeNode> {
         let filtered = tree::filter_tree(&self.tree_nodes, self.tree_filter);
         let visible = tree::flatten_visible(&filtered);
-        if self.tree_search.query().is_empty() {
-            visible.into_iter().cloned().collect()
-        } else {
-            let query_lower = self.tree_search.query().to_lowercase();
-            visible
-                .into_iter()
-                .filter(|n| {
-                    n.name.to_lowercase().contains(&query_lower)
-                        || n.pid.to_string().contains(self.tree_search.query())
-                })
-                .cloned()
-                .collect()
+        match self.tree_search.mode {
+            crate::search::QueryMode::Substring => {
+                if self.tree_search.query().is_empty() {
+                    visible.into_iter().cloned().collect()
+                } else {
+                    let query_lower = self.tree_search.query().to_lowercase();
+                    visible
+                        .into_iter()
+                        .filter(|n| {
+                            n.name.to_lowercase().contains(&query_lower)
+                                || n.pid.to_string().contains(self.tree_search.query())
+                        })
+                        .cloned()
+                        .collect()
+                }
+            }
+            crate::search::QueryMode::FilterExpr => {
+                let Some(expr) = self.tree_search.filter_expr.as_ref() else {
+                    // query 为空或 parse 失败且无先前 AST → 不过滤，与 substring 空 query 一致。
+                    return visible.into_iter().cloned().collect();
+                };
+                // pid → &ProcessInfo 索引（一次构造 N 次查询）。
+                let pid_map: std::collections::HashMap<u32, &ProcessInfo> =
+                    cached_processes.iter().map(|p| (p.pid, p)).collect();
+                visible
+                    .into_iter()
+                    .filter(|n| {
+                        pid_map.get(&n.pid).is_some_and(|p| {
+                            let ctx = crate::filter::EvalCtx {
+                                process: p,
+                                security_score: None,
+                            };
+                            expr.apply(&ctx)
+                        })
+                    })
+                    .cloned()
+                    .collect()
+            }
         }
     }
 
-    pub fn tree_move_cursor(&mut self, delta: i32) {
-        let visible = self.get_filtered_tree_visible();
+    pub fn tree_move_cursor(&mut self, delta: i32, cached_processes: &[ProcessInfo]) {
+        let visible = self.get_filtered_tree_visible(cached_processes);
         let total = visible.len();
         if total == 0 {
             return;
@@ -281,8 +400,8 @@ impl ProcessPanel {
         }
     }
 
-    fn tree_toggle_select(&mut self) {
-        let visible = self.get_filtered_tree_visible();
+    fn tree_toggle_select(&mut self, cached_processes: &[ProcessInfo]) {
+        let visible = self.get_filtered_tree_visible(cached_processes);
         if let Some(node) = visible.get(self.tree_cursor) {
             let pid = node.pid;
             if self.tree_selected_pids.contains(&pid) {
@@ -293,8 +412,8 @@ impl ProcessPanel {
         }
     }
 
-    fn tree_select_all(&mut self) {
-        let visible = self.get_filtered_tree_visible();
+    fn tree_select_all(&mut self, cached_processes: &[ProcessInfo]) {
+        let visible = self.get_filtered_tree_visible(cached_processes);
         for node in &visible {
             self.tree_selected_pids.insert(node.pid);
         }
@@ -304,9 +423,13 @@ impl ProcessPanel {
         self.tree_selected_pids.clear();
     }
 
-    fn tree_initiate_kill(&mut self, force: bool) -> Option<KillRequest> {
+    fn tree_initiate_kill(
+        &mut self,
+        force: bool,
+        cached_processes: &[ProcessInfo],
+    ) -> Option<KillRequest> {
         let pids: Vec<u32> = if self.tree_selected_pids.is_empty() {
-            self.get_filtered_tree_visible()
+            self.get_filtered_tree_visible(cached_processes)
                 .get(self.tree_cursor)
                 .map(|n| n.pid)
                 .into_iter()
@@ -320,8 +443,8 @@ impl ProcessPanel {
         Some(KillRequest { pids, force })
     }
 
-    fn tree_select_orphans(&mut self) -> Option<String> {
-        let visible = self.get_filtered_tree_visible();
+    fn tree_select_orphans(&mut self, cached_processes: &[ProcessInfo]) -> Option<String> {
+        let visible = self.get_filtered_tree_visible(cached_processes);
         let orphan_pids: Vec<u32> = visible
             .iter()
             .filter(|n| n.is_orphan)
@@ -350,8 +473,8 @@ impl ProcessPanel {
         ))
     }
 
-    fn tree_select_stale(&mut self) -> Option<String> {
-        let visible = self.get_filtered_tree_visible();
+    fn tree_select_stale(&mut self, cached_processes: &[ProcessInfo]) -> Option<String> {
+        let visible = self.get_filtered_tree_visible(cached_processes);
         let stale_pids: Vec<u32> = visible
             .iter()
             .filter(|n| n.is_zombie || n.is_stale)
@@ -402,8 +525,8 @@ impl ProcessPanel {
 
     // --- AppGroup view actions ---
 
-    pub fn app_group_move_cursor(&mut self, delta: i32) {
-        let items = self.app_group_filtered_visual_items();
+    pub fn app_group_move_cursor(&mut self, delta: i32, cached_processes: &[ProcessInfo]) {
+        let items = self.app_group_filtered_visual_items(cached_processes);
         let total = items.len();
         if total == 0 {
             return;
@@ -419,8 +542,8 @@ impl ProcessPanel {
         self.app_group_clamp_scroll(PAGE_SIZE);
     }
 
-    fn app_group_toggle_expand(&mut self) {
-        let items = self.app_group_filtered_visual_items();
+    fn app_group_toggle_expand(&mut self, cached_processes: &[ProcessInfo]) {
+        let items = self.app_group_filtered_visual_items(cached_processes);
         if let Some(item) = items.get(self.app_group_cursor) {
             match *item {
                 AppGroupItem::Header { group_idx } | AppGroupItem::Child { group_idx, .. } => {
@@ -434,8 +557,8 @@ impl ProcessPanel {
         }
     }
 
-    fn app_group_toggle_select(&mut self) {
-        let items = self.app_group_filtered_visual_items();
+    fn app_group_toggle_select(&mut self, cached_processes: &[ProcessInfo]) {
+        let items = self.app_group_filtered_visual_items(cached_processes);
         if let Some(item) = items.get(self.app_group_cursor) {
             let pid = match *item {
                 AppGroupItem::Header { .. } => return,
@@ -458,8 +581,12 @@ impl ProcessPanel {
         }
     }
 
-    fn app_group_initiate_kill(&mut self, force: bool) -> Option<KillRequest> {
-        let items = self.app_group_filtered_visual_items();
+    fn app_group_initiate_kill(
+        &mut self,
+        force: bool,
+        cached_processes: &[ProcessInfo],
+    ) -> Option<KillRequest> {
+        let items = self.app_group_filtered_visual_items(cached_processes);
         let mut pids: Vec<u32> = Vec::new();
         if !self.selected_pids.is_empty() {
             for group in &self.app_groups {
@@ -550,7 +677,7 @@ impl ProcessPanel {
                 self.search.active = true;
             }
             // v0.7 阶段 4：':' 激活 FilterExpr 模式（ADR-0011）。
-            // 仅 List view 接入；Tree / AppGroup 视图暂保持 substring（详见 tech-debt）。
+            // v0.8 阶段 3：Tree / AppGroup 视图同款接入（TD-15），三视图均支持。
             KeyCode::Char(':') => {
                 self.search.activate_filter_expr();
             }
@@ -613,8 +740,8 @@ impl ProcessPanel {
     fn handle_tree_key(&mut self, key: KeyEvent, ctx: &mut PanelContext) -> KeyResult {
         match key.code {
             KeyCode::Char('q') => return KeyResult::Quit,
-            KeyCode::Up => self.tree_move_cursor(-1),
-            KeyCode::Down => self.tree_move_cursor(1),
+            KeyCode::Up => self.tree_move_cursor(-1, ctx.cached_processes),
+            KeyCode::Down => self.tree_move_cursor(1, ctx.cached_processes),
             KeyCode::Enter => self.tree_toggle_expand(),
             KeyCode::Left => {
                 self.tree_sort_field = self.tree_sort_field.prev();
@@ -629,28 +756,32 @@ impl ProcessPanel {
             KeyCode::Char('/') => {
                 self.tree_search.active = true;
             }
-            KeyCode::Char(' ') => self.tree_toggle_select(),
-            KeyCode::Char('a') => self.tree_select_all(),
+            // v0.8 阶段 3（TD-15）：':' 激活 FilterExpr 模式。
+            KeyCode::Char(':') => {
+                self.tree_search.activate_filter_expr();
+            }
+            KeyCode::Char(' ') => self.tree_toggle_select(ctx.cached_processes),
+            KeyCode::Char('a') => self.tree_select_all(ctx.cached_processes),
             KeyCode::Char('A') => self.tree_deselect_all(),
             KeyCode::Char('k') => {
-                if let Some(req) = self.tree_initiate_kill(false) {
+                if let Some(req) = self.tree_initiate_kill(false, ctx.cached_processes) {
                     *ctx.pending_kill = Some(req);
                     return KeyResult::Consumed;
                 }
             }
             KeyCode::Char('K') => {
-                if let Some(req) = self.tree_initiate_kill(true) {
+                if let Some(req) = self.tree_initiate_kill(true, ctx.cached_processes) {
                     *ctx.pending_kill = Some(req);
                     return KeyResult::Consumed;
                 }
             }
             KeyCode::Char('o') => {
-                if let Some(msg) = self.tree_select_orphans() {
+                if let Some(msg) = self.tree_select_orphans(ctx.cached_processes) {
                     *ctx.status_message = Some(msg);
                 }
             }
             KeyCode::Char('z') => {
-                if let Some(msg) = self.tree_select_stale() {
+                if let Some(msg) = self.tree_select_stale(ctx.cached_processes) {
                     *ctx.status_message = Some(msg);
                 }
             }
@@ -668,7 +799,7 @@ impl ProcessPanel {
                 self.tree_clamp_scroll(PAGE_SIZE);
             }
             KeyCode::PageDown => {
-                let visible = self.get_filtered_tree_visible();
+                let visible = self.get_filtered_tree_visible(ctx.cached_processes);
                 let total = visible.len();
                 self.tree_cursor = (self.tree_cursor + PAGE_SIZE).min(total.saturating_sub(1));
                 self.tree_clamp_scroll(PAGE_SIZE);
@@ -681,21 +812,25 @@ impl ProcessPanel {
     fn handle_app_group_key(&mut self, key: KeyEvent, ctx: &mut PanelContext) -> KeyResult {
         match key.code {
             KeyCode::Char('q') => return KeyResult::Quit,
-            KeyCode::Up => self.app_group_move_cursor(-1),
-            KeyCode::Down => self.app_group_move_cursor(1),
-            KeyCode::Enter => self.app_group_toggle_expand(),
-            KeyCode::Char(' ') => self.app_group_toggle_select(),
+            KeyCode::Up => self.app_group_move_cursor(-1, ctx.cached_processes),
+            KeyCode::Down => self.app_group_move_cursor(1, ctx.cached_processes),
+            KeyCode::Enter => self.app_group_toggle_expand(ctx.cached_processes),
+            KeyCode::Char(' ') => self.app_group_toggle_select(ctx.cached_processes),
             KeyCode::Char('/') => {
                 self.app_group_search.active = true;
             }
+            // v0.8 阶段 3（TD-15）：':' 激活 FilterExpr 模式。
+            KeyCode::Char(':') => {
+                self.app_group_search.activate_filter_expr();
+            }
             KeyCode::Char('k') => {
-                if let Some(req) = self.app_group_initiate_kill(false) {
+                if let Some(req) = self.app_group_initiate_kill(false, ctx.cached_processes) {
                     *ctx.pending_kill = Some(req);
                     return KeyResult::Consumed;
                 }
             }
             KeyCode::Char('K') => {
-                if let Some(req) = self.app_group_initiate_kill(true) {
+                if let Some(req) = self.app_group_initiate_kill(true, ctx.cached_processes) {
                     *ctx.pending_kill = Some(req);
                     return KeyResult::Consumed;
                 }
@@ -714,7 +849,7 @@ impl ProcessPanel {
                 self.app_group_clamp_scroll(PAGE_SIZE);
             }
             KeyCode::PageDown => {
-                let items = self.app_group_filtered_visual_items();
+                let items = self.app_group_filtered_visual_items(ctx.cached_processes);
                 let total = items.len();
                 self.app_group_cursor =
                     (self.app_group_cursor + PAGE_SIZE).min(total.saturating_sub(1));
@@ -882,7 +1017,7 @@ impl Panel for ProcessPanel {
                 }
             }
             ProcessViewMode::Tree => {
-                let total = self.get_filtered_tree_visible().len();
+                let total = self.get_filtered_tree_visible(ctx.cached_processes).len();
                 if total == 0 {
                     self.tree_cursor = 0;
                 } else if self.tree_cursor >= total {

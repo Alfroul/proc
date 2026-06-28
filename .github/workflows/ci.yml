@@ -35,7 +35,10 @@ jobs:
         run: cargo test --release
 
   check-linux:
-    # Linux 平台仅要求 cargo check 通过。功能性测试不在 Linux 上执行。
+    # Linux 平台跑全量 cargo test --release + cfg-gate 校验（TD-13）。
+    # v0.7 之前只跑 6 个手挑的 --test xxx，cfg(target_os="linux") 写错会静默 skip。
+    # 现在跑全量 + 校验测试 bin 数 ≥ 30，让 stub 测试（test_linux_stubs.rs）
+    # 和 inspect::* 的 Linux 路径真正在 CI 上执行。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,15 +59,20 @@ jobs:
       - name: check (no default features)
         run: cargo check --no-default-features --all-targets
 
-      - name: test (platform-agnostic)
+      - name: test (full suite + cfg-gate verification)
         run: |
-          cargo test --release \
-            --test test_tree \
-            --test test_throttle \
-            --test test_record_color \
-            --test test_platform_compat \
-            --test test_alert \
-            --test test_search
+          set -euo pipefail
+          # 跑全量测试：lib unit tests + 所有 integration tests + cfg(target_os=linux) 部分。
+          output=$(cargo test --release 2>&1)
+          echo "$output"
+          # 每个测试 bin 输出一行 "test result:"。v0.7.0 有 ~50 个测试 bin。
+          # 要求 ≥ 30 留余地防新增测试 bin 静默消失（cfg-gate 写错会让整文件不编译）。
+          count=$(echo "$output" | grep -c "test result:" || true)
+          if [ "$count" -lt 30 ]; then
+            echo "::error::Only $count test bins ran on Linux (expected ≥30). Possible cfg-gate silent skip."
+            exit 1
+          fi
+          # 任何测试失败也会让 cargo test 非 0 退出，set -e 已捕获。
 
   check-macos:
     # macOS 仅 cargo check + clippy（与 Linux 同样的 cfg-gated 降级）。

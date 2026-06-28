@@ -143,6 +143,17 @@ bottom（同类 Rust TUI）支持 `cpu > 0.5 AND mem% < 10` / `read >= 1 mb` / `
 - AST 是简单枚举，没有递归下降的隐藏复杂度
 - parser 单元测试 20+ case 覆盖合法/非法/边界
 
+### v0.8.0 阶段 2 增量：错误信息中文化（TD-16）
+
+nom 默认错误信息直出内部 `ErrorKind` 枚举名（`TakeWhile1` / `Tag` / `AlphaNumeric` 等），中文用户看不懂。v0.8.0 阶段 2 加两层中文映射：
+
+- `error_kind_to_chinese(&ErrorKind) -> &'static str`：覆盖 parser 实际会触达的 9 个 ErrorKind 变体，未匹配兜底「语法错误」。
+- `char_to_chinese(char) -> &'static str`：括号 / 引号 / 斜杠给出语义化提示（「缺少括号」/「缺少引号」/「缺少斜杠」），其他字符回退「缺少字符」。
+
+同时把 `paren_expr` 的闭合 `)` 改成 `cut(char(')'))` —— 括号闭合失败转 `Err::Failure`，alt 不再回退到 leaf。否则 `(cpu > 5` 缺 `)` 时 alt 会 fallback，最内层错误从 `Char(')')` 退化为 leaf 的 `TakeWhile1`，丢失「括号没闭合」这条真正有用的提示。
+
+代价：parser 测试需要锁死中文映射对外的字面量（`tests/test_filter_expr.rs::err_chinese_*`），映射表改名时需要同步更新。
+
 ## Implementation Notes
 
 - 入口：`src/filter/mod.rs::FilterExpr::apply(&ProcessInfo) -> bool`

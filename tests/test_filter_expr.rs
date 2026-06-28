@@ -210,12 +210,24 @@ fn err_double_operator() {
 
 #[test]
 fn err_missing_value() {
-    assert!(parse("cpu >").is_err());
+    let e = parse("cpu >").unwrap_err();
+    // TD-16：错误信息中文化，不再直出 nom 的 `TakeWhile1`。
+    assert!(
+        !e.msg.contains("TakeWhile1"),
+        "msg should not leak nom ErrorKind: {}",
+        e.msg
+    );
 }
 
 #[test]
 fn err_unbalanced_open_paren() {
-    assert!(parse("(cpu > 5").is_err());
+    let e = parse("(cpu > 5").unwrap_err();
+    // 缺 `)` → Char 错误 → 中文「缺少字符（括号/引号/斜杠）」。
+    assert!(
+        e.msg.contains("括号") || e.msg.contains("字符"),
+        "expected 括号/字符 hint, got: {}",
+        e.msg
+    );
 }
 
 #[test]
@@ -233,6 +245,82 @@ fn err_unknown_field() {
 #[test]
 fn err_unterminated_regex() {
     assert!(parse("name =~ /chrome").is_err());
+}
+
+// ===== TD-16：错误信息中文化契约 =====
+//
+// 用户在 TUI / CLI 看到 `filter parse error at offset N: <msg>`，msg 必须是
+// 中文友好提示，不得直出 nom 内部 ErrorKind（`TakeWhile1` / `Tag` / ...）。
+// 这些 case 锁死映射表的对外契约。
+
+#[test]
+fn err_chinese_missing_value_after_cmp() {
+    // `cpu >` → take_while1 在 value 位置匹配 0 字符 → 「缺少字段名/值」。
+    let e = parse("cpu >").unwrap_err();
+    assert!(
+        e.msg.contains("缺少"),
+        "expected 含「缺少」的提示, got: {}",
+        e.msg
+    );
+    assert!(
+        !e.msg.contains("TakeWhile1"),
+        "must not leak nom ErrorKind: {}",
+        e.msg
+    );
+}
+
+#[test]
+fn err_chinese_missing_value_after_eq() {
+    // `name =` 同上：等号后无 value。
+    let e = parse("name =").unwrap_err();
+    assert!(
+        e.msg.contains("缺少"),
+        "expected 含「缺少」的提示, got: {}",
+        e.msg
+    );
+}
+
+#[test]
+fn err_chinese_unbalanced_paren_hint() {
+    // `(cpu > 5` → 缺 `)` → Char 错误映射到「缺少字符（括号/引号/斜杠）」。
+    let e = parse("(cpu > 5").unwrap_err();
+    assert!(
+        e.msg.contains("括号"),
+        "expected 含「括号」的提示, got: {}",
+        e.msg
+    );
+}
+
+#[test]
+fn err_chinese_unknown_field_hint() {
+    // `foo > 5` → parse_field 走 AlphaNumeric 错误分支 → 「未知字段名」。
+    let e = parse("foo > 5").unwrap_err();
+    assert!(
+        e.msg.contains("未知") || e.msg.contains("字段"),
+        "expected 含「未知/字段」的提示, got: {}",
+        e.msg
+    );
+    assert!(
+        !e.msg.contains("AlphaNumeric"),
+        "must not leak nom ErrorKind: {}",
+        e.msg
+    );
+}
+
+#[test]
+fn err_chinese_trailing_input_hint() {
+    // `cpu > 5 extra` → parse() 入口检测到 trimmed 非空 → 「输入末尾出现多余内容」。
+    let e = parse("cpu > 5 extra").unwrap_err();
+    assert!(
+        e.msg.contains("多余") || e.msg.contains("末尾"),
+        "expected 含「多余/末尾」的提示, got: {}",
+        e.msg
+    );
+    assert!(
+        !e.msg.contains("trailing"),
+        "must not leak English msg: {}",
+        e.msg
+    );
 }
 
 #[test]
@@ -387,4 +475,259 @@ fn whitespace_in_expressions_is_flexible() {
     assert!(parse("cpu>5").is_ok());
     assert!(parse("cpu   >   5").is_ok());
     assert!(parse("cpu > 5 AND  mem > 100").is_ok());
+}
+
+// ===== v0.8 阶段 3（TD-15）：Tree / AppGroup FilterExpr 集成 =====
+//
+// 这组测试覆盖 List 之外的两个视图接入 FilterExpr：
+// - Tree view：`get_filtered_tree_visible(cached_processes)` 在 FilterExpr 模式下
+//   用 pid→ProcessInfo 索引 apply AST。
+// - AppGroup view：`app_group_filtered_visual_items(cached_processes)` 在 FilterExpr 模式下
+//   Header 项按聚合值判断，Child 项按单进程判断。
+// 同时覆盖 `:` 激活后非法输入保留上一次成功 AST 的契约（List 已有，验证 Tree/AppGroup 同款）。
+
+use proc::app_group::{self, AppGroupItem};
+use proc::collect::ProcessViewMode;
+use proc::view_models::ProcessPanel;
+
+/// 带 exe 路径的构造：compute_groups 按 exe_dir 分组，没 exe 会全部归到同组。
+fn make_proc_with_exe(name: &str, cpu: f32, mem_bytes: u64, pid: u32, exe: &str) -> ProcessInfo {
+    let mut p = make_proc(name, cpu, mem_bytes, pid);
+    p.exe = Some(std::sync::Arc::from(exe));
+    p
+}
+
+fn panel_with_procs(processes: &[ProcessInfo]) -> ProcessPanel {
+    let mut panel = ProcessPanel::new(processes);
+    // total_mem 给 0：FilterExpr 不依赖 mem_pct，仅做 size 占位。
+    panel.init_tree(processes, 0);
+    panel.rebuild_app_groups(processes);
+    panel
+}
+
+fn activate_and_type(panel: &mut ProcessPanel, view: ProcessViewMode, text: &str) {
+    let search = match view {
+        ProcessViewMode::List => &mut panel.search,
+        ProcessViewMode::Tree => &mut panel.tree_search,
+        ProcessViewMode::AppGroup => &mut panel.app_group_search,
+    };
+    search.activate_filter_expr();
+    for c in text.chars() {
+        search.handle_input(key(KeyCode::Char(c)));
+    }
+}
+
+#[test]
+fn tree_filter_expr_cpu_gt_filters_low_cpu() {
+    let procs = vec![
+        make_proc("hot", 10.0, 0, 1),
+        make_proc("cold", 1.0, 0, 2),
+        make_proc("warm", 6.0, 0, 3),
+    ];
+    let mut panel = panel_with_procs(&procs);
+    activate_and_type(&mut panel, ProcessViewMode::Tree, "cpu > 5");
+    assert!(panel.tree_search.filter_expr.is_some());
+
+    let visible = panel.get_filtered_tree_visible(&procs);
+    let names: Vec<&str> = visible.iter().map(|n| n.name.as_str()).collect();
+    assert!(names.contains(&"hot"), "hot should pass: {:?}", names);
+    assert!(names.contains(&"warm"), "warm should pass: {:?}", names);
+    assert!(
+        !names.iter().any(|n| n == &"cold"),
+        "cold should be filtered out: {:?}",
+        names
+    );
+}
+
+#[test]
+fn tree_filter_expr_pid_equality_lookup() {
+    // 验证 FilterExpr 通过 pid→ProcessInfo 索引能命中（不只是 TreeNode 自带的 cpu/memory）。
+    let procs = vec![
+        make_proc("alpha", 0.0, 0, 1234),
+        make_proc("beta", 0.0, 0, 5678),
+    ];
+    let mut panel = panel_with_procs(&procs);
+    activate_and_type(&mut panel, ProcessViewMode::Tree, "pid = 1234");
+    let visible = panel.get_filtered_tree_visible(&procs);
+    let pids: Vec<u32> = visible.iter().map(|n| n.pid).collect();
+    assert_eq!(pids, vec![1234]);
+}
+
+#[test]
+fn tree_filter_expr_keeps_prev_ast_on_bad_input() {
+    let procs = vec![make_proc("hot", 10.0, 0, 1), make_proc("cold", 1.0, 0, 2)];
+    let mut panel = panel_with_procs(&procs);
+    activate_and_type(&mut panel, ProcessViewMode::Tree, "cpu > 5");
+    // 故意打一个破坏 parse 的字符：`cpu > 5)` → 右括号多余 → parse 失败。
+    panel.tree_search.handle_input(key(KeyCode::Char(')')));
+    assert!(panel.tree_search.filter_error.is_some());
+    // 保留上一次成功 AST，cold 仍被过滤掉。
+    let visible = panel.get_filtered_tree_visible(&procs);
+    let names: Vec<&str> = visible.iter().map(|n| n.name.as_str()).collect();
+    assert!(
+        !names.iter().any(|n| n == &"cold"),
+        "prev AST should still filter cold: {:?}",
+        names
+    );
+}
+
+#[test]
+fn tree_substring_mode_unchanged_in_tree_view() {
+    // 回归保护：Substring 模式 v0.6 行为不破坏。
+    let procs = vec![
+        make_proc("chrome.exe", 0.0, 0, 1),
+        make_proc("firefox.exe", 0.0, 0, 2),
+    ];
+    let mut panel = panel_with_procs(&procs);
+    panel.tree_search.activate_substring();
+    for c in "chrom".chars() {
+        panel.tree_search.handle_input(key(KeyCode::Char(c)));
+    }
+    let visible = panel.get_filtered_tree_visible(&procs);
+    let names: Vec<&str> = visible.iter().map(|n| n.name.as_str()).collect();
+    assert!(names.contains(&"chrome.exe"));
+    assert!(!names.iter().any(|n| n == &"firefox.exe"));
+}
+
+#[test]
+fn tree_empty_filter_expr_returns_all_visible() {
+    // ':' 激活后空 query → 不过滤（同 substring 空 query）。
+    let procs = vec![make_proc("a", 0.0, 0, 1), make_proc("b", 0.0, 0, 2)];
+    let mut panel = panel_with_procs(&procs);
+    panel.tree_search.activate_filter_expr();
+    let visible = panel.get_filtered_tree_visible(&procs);
+    assert_eq!(visible.len(), 2);
+}
+
+fn item_stats(items: &[AppGroupItem]) -> (usize, usize) {
+    let headers = items
+        .iter()
+        .filter(|i| matches!(i, AppGroupItem::Header { .. }))
+        .count();
+    let children = items
+        .iter()
+        .filter(|i| matches!(i, AppGroupItem::Child { .. }))
+        .count();
+    (headers, children)
+}
+
+#[test]
+fn app_group_filter_expr_aggregate_cpu_header_match() {
+    // 构造 3 个 chrome.exe 进程，每个 cpu=30，聚合 cpu=90。
+    // Header 在 `cpu > 50` 下命中（聚合 90 > 50），整组保留。
+    let procs = vec![
+        make_proc_with_exe(
+            "chrome.exe",
+            30.0,
+            100 * 1024 * 1024,
+            100,
+            "C:/chr/chrome.exe",
+        ),
+        make_proc_with_exe(
+            "chrome.exe",
+            30.0,
+            100 * 1024 * 1024,
+            101,
+            "C:/chr/chrome.exe",
+        ),
+        make_proc_with_exe(
+            "chrome.exe",
+            30.0,
+            100 * 1024 * 1024,
+            102,
+            "C:/chr/chrome.exe",
+        ),
+        make_proc_with_exe("idle.exe", 1.0, 10 * 1024 * 1024, 200, "D:/idle/idle.exe"),
+    ];
+    let mut panel = panel_with_procs(&procs);
+    activate_and_type(&mut panel, ProcessViewMode::AppGroup, "cpu > 50");
+    let items = panel.app_group_filtered_visual_items(&procs);
+    let (headers, children) = item_stats(&items);
+    // chrome 组聚合 cpu=90 命中（Header），未 expanded → 0 children。
+    // idle.exe 单组聚合 cpu=1，被过滤掉。
+    assert_eq!(headers, 1, "only chrome group Header should match");
+    assert_eq!(children, 0);
+}
+
+#[test]
+fn app_group_filter_expr_child_partial_match() {
+    // Header 不命中，但组内某 child 命中 → Header + 命中的 Child（自动展开）。
+    // 用 `pid = 11`：合成 Header 的 pid=0 不命中；child pid=11 命中。
+    let procs = vec![
+        make_proc_with_exe("mixed.exe", 1.0, 0, 10, "C:/m/mixed.exe"),
+        make_proc_with_exe("mixed.exe", 80.0, 0, 11, "C:/m/mixed.exe"),
+        make_proc_with_exe("mixed.exe", 1.0, 0, 12, "C:/m/mixed.exe"),
+    ];
+    let mut panel = panel_with_procs(&procs);
+    activate_and_type(&mut panel, ProcessViewMode::AppGroup, "pid = 11");
+    let items = panel.app_group_filtered_visual_items(&procs);
+    let (headers, children) = item_stats(&items);
+    // 合成 Header pid=0 不命中；child pid=11 命中，pid=10/12 不命中。
+    assert_eq!(headers, 1, "Header forced visible by child match");
+    assert_eq!(children, 1, "only pid=11 child matches");
+    // 验证命中的 child 确实是 pid=11。
+    for item in &items {
+        if let AppGroupItem::Child {
+            group_idx,
+            child_idx,
+        } = item
+        {
+            let pid = panel.app_groups[*group_idx].processes[*child_idx].pid;
+            assert_eq!(pid, 11);
+        }
+    }
+}
+
+#[test]
+fn app_group_filter_expr_memory_aggregate() {
+    // 验证 mem 字段在 Header 走聚合：3 × 50MB = 150MB，`mem > 100mb` 命中。
+    let procs = vec![
+        make_proc_with_exe("svc.exe", 0.0, 50 * 1024 * 1024, 1, "C:/s/svc.exe"),
+        make_proc_with_exe("svc.exe", 0.0, 50 * 1024 * 1024, 2, "C:/s/svc.exe"),
+        make_proc_with_exe("svc.exe", 0.0, 50 * 1024 * 1024, 3, "C:/s/svc.exe"),
+        make_proc_with_exe("tiny.exe", 0.0, 1024, 4, "D:/t/tiny.exe"),
+    ];
+    let mut panel = panel_with_procs(&procs);
+    activate_and_type(&mut panel, ProcessViewMode::AppGroup, "mem > 100mb");
+    let items = panel.app_group_filtered_visual_items(&procs);
+    let (headers, _) = item_stats(&items);
+    assert_eq!(headers, 1, "svc group aggregate 150MB should match");
+}
+
+#[test]
+fn app_group_filter_expr_keeps_prev_ast_on_bad_input() {
+    let procs = vec![
+        make_proc_with_exe("hot.exe", 80.0, 0, 1, "C:/h/hot.exe"),
+        make_proc_with_exe("cold.exe", 1.0, 0, 2, "D:/c/cold.exe"),
+    ];
+    let mut panel = panel_with_procs(&procs);
+    activate_and_type(&mut panel, ProcessViewMode::AppGroup, "cpu > 50");
+    panel.app_group_search.handle_input(key(KeyCode::Char(')')));
+    assert!(panel.app_group_search.filter_error.is_some());
+    // 保留上一次成功 AST，cold.exe 仍被过滤掉。
+    let items = panel.app_group_filtered_visual_items(&procs);
+    let (headers, _) = item_stats(&items);
+    assert_eq!(headers, 1, "only hot.exe group matches");
+}
+
+#[test]
+fn app_group_substring_mode_unchanged() {
+    // 回归保护：Substring 模式 v0.7 行为不破坏。
+    let procs = vec![
+        make_proc_with_exe("chrome.exe", 0.0, 0, 1, "C:/chr/chrome.exe"),
+        make_proc_with_exe("firefox.exe", 0.0, 0, 2, "D:/ff/firefox.exe"),
+    ];
+    let mut panel = panel_with_procs(&procs);
+    panel.app_group_search.activate_substring();
+    for c in "chrom".chars() {
+        panel.app_group_search.handle_input(key(KeyCode::Char(c)));
+    }
+    let items = panel.app_group_filtered_visual_items(&procs);
+    let (headers, _) = item_stats(&items);
+    assert_eq!(headers, 1, "chrome group matches");
+}
+
+#[allow(dead_code)]
+fn _silence_unused() {
+    let _ = app_group::build_visual_items;
 }

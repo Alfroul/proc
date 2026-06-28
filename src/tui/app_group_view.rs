@@ -10,7 +10,10 @@ use crate::format::format_bytes;
 use crate::tui::theme;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
-    let items = app.process_panel.panel.app_group_filtered_visual_items();
+    let items = app
+        .process_panel
+        .panel
+        .app_group_filtered_visual_items(&app.cached_processes[..]);
     let rows_visible = area.height.saturating_sub(3) as usize;
     let groups = &app.process_panel.panel.app_groups;
 

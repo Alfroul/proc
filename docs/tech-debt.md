@@ -109,21 +109,21 @@
 
 ## v0.8.0+ 候选（6 项）
 
-### TD-12（P2-12）：Linux stub 测试覆盖增强
+### TD-12（P2-12）：Linux stub 测试覆盖增强 ✅ Fixed in v0.8.0 阶段 2
 
 **位置**：`tests/` 下仅 `test_inspector.rs` / `test_platform_compat.rs` 2 个文件用 cfg-gate
-**现状**：Linux 平台支持的退化（如 env/dlls/handles/memory stub）只 2 个测试文件覆盖。
-**影响**：Linux 平台支持退化无早期告警。
-**修复**：v0.7.0+ 加 Linux 等价 stub 测试：env stub（返回空 Vec）/ dlls stub / handles stub / memory stub 各加 cfg-gate 测试。
-**验证**：`cargo test --release` 在 Linux CI runner 上能跑通所有 cfg(target_os = "linux") 测试。
+**现状（已修复）**：新增 `tests/test_linux_stubs.rs`（Linux-only，6 case：env/dlls/handles/memory 对 bogus pid 返回 Err + self pid 走 Ok 路径），并在 `tests/test_platform_compat.rs` 加 4 个跨平台 inspect 契约 case（Windows/Linux/macOS 都跑，bogus pid 一律 Err）。
+**影响**：Linux 平台支持的退化（如 env/dlls/handles/memory stub）有早期告警。
+**修复（已落地）**：从外部 public API 视角验证 stub 行为的「失败契约」+「成功契约」双向。源码内 `#[cfg(test)] mod tests` 已有同类单元测试，集成测试层再加一层防 lib API 演化时 silently 破损。
+**验证**：Linux 上 `cargo test --release --test test_linux_stubs` 跑 6 case；Windows 上文件被 `#![cfg(target_os = "linux")]` 整体 cfg-gate 掉，`running 0 tests`。
 
-### TD-13（P2-13）：CI Linux job 验证 cfg-gate 测试实际运行
+### TD-13（P2-13）：CI Linux job 验证 cfg-gate 测试实际运行 ✅ Fixed in v0.8.0 阶段 2
 
-**位置**：`.github/workflows/ci.yml`（未读）
-**现状**：未知 CI 是否在 Linux job 上跑 `cargo test`，cfg-gate 写错（cfg 笔误）会让测试静默跳过。
-**影响**：cfg-gate 错误静默通过 CI。
-**修复**：阶段 8 验证 GitHub Actions Linux job 实际跑了 `test_inspector.rs` / `test_platform_compat.rs` 的 Linux 部分；若没跑，加 `cargo test --release` 到 Linux CI step。
-**验证**：CI Linux job log 显示测试数 > 0（不是"0 tests run"）。
+**位置**：`.github/workflows/ci.yml` `check-linux` job
+**现状（已修复）**：v0.7 之前 Linux job 只跑 6 个手挑的 `--test xxx`（test_tree / test_throttle / test_record_color / test_platform_compat / test_alert / test_search），cfg(target_os="linux") 写错会静默 skip。v0.8.0 改成跑全量 `cargo test --release` + 测试 bin 数 ≥ 30 校验。
+**影响**：cfg-gate 错误静默通过 CI 的风险消除；test_linux_stubs.rs / test_inspector.rs 的 Linux 部分 / 所有 inspect::* Linux 路径在 CI 上真正执行。
+**修复（已落地）**：bash step 跑 `cargo test --release`，统计输出中 `test result:` 行数（每测试 bin 一行），< 30 直接 `exit 1` 并打 `::error::` annotation。阈值 30 是 v0.7.0 实际 ~50 个测试 bin 留余地的下限。
+**验证**：下次 CI log 的 check-linux job 会显示 `test result: ok. N passed; ...` 多行（≥ 30 行），不再只是 6 行。
 
 ### TD-14（P2-14）：panic hook chain 时序验证 ✅ Fixed in v0.7.0 阶段 1
 
@@ -133,26 +133,28 @@
 **修复**：阶段 8 在 TUI 模式手动触发 panic（如临时加 `panic!("test")` 到 tick），验证：终端正常恢复 + `crashes/` 下出现文件 + stderr 有崩溃提示。
 **验证**：手动触发 panic 后终端正常 + crash report 生成。
 
-### TD-15：FilterExpr 仅接入 List view（Tree / AppGroup 视图保留 substring）— v0.7.0 阶段 4 遗留
+### TD-15：FilterExpr 仅接入 List view（Tree / AppGroup 视图保留 substring）— v0.7.0 阶段 4 遗留 ✅ Fixed in v0.8.0 阶段 3
 
-**位置**：`src/view_models/process_panel.rs::handle_tree_key` / `handle_app_group_key` / `app_group_filtered_visual_items`
-**现状**：v0.7.0 阶段 4 把 FilterExpr 接入了 List view（`:` 激活 + cached_sorted 缓存按 mode 分支）。Tree / AppGroup 视图按 ADR-0011 task #7 计划接入，但实际数据模型不匹配：
-- Tree view 的 `tree::TreeNode` 是 `ProcessInfo` 派生的精简结构，但 filter 通过 `get_filtered_tree_visible()` 走 substring，没接 FilterExpr 入口。
-- AppGroup view 的 `AppGroupProcess` 只有 `pid/name/cpu_usage/memory/role_hint` 4 字段，不持 `&ProcessInfo`，FilterExpr::apply 接 `EvalCtx{process: &ProcessInfo, ...}` 直接调不到。要接需改 `app_group_filtered_visual_items` 签名传 cached_processes 进来，或改 AppGroup 结构持 Arc<ProcessInfo>。
-**影响**：用户在 Tree / AppGroup 视图按 `:` 没反应（不切 FilterExpr 模式），只能用 `/` substring。文档已显式标注限制。
-**修复**（v0.8 候选）：
-1. AppGroup view：改 `app_group_filtered_visual_items(&self, cached_processes: &[ProcessInfo])` 签名，按 pid 查原始 ProcessInfo；或预计算 pid→ProcessInfo map 存在 ProcessPanel。
-2. Tree view：在 `get_filtered_tree_visible` 加 mode 分支，FilterExpr 走 TreeNode 含的 ProcessInfo 字段。
-3. 两个视图的 `:` 激活加进 handle_tree_key / handle_app_group_key。
-**验证**：Tree / AppGroup 视图按 `:` 进 FilterExpr 模式，`cpu > 5` 正确过滤。
+**位置**：`src/view_models/process_panel.rs::handle_tree_key` / `handle_app_group_key` / `app_group_filtered_visual_items` / `get_filtered_tree_visible`
+**现状（已修复）**：v0.7.0 阶段 4 把 FilterExpr 接入了 List view（`:` 激活 + cached_sorted 缓存按 mode 分支）。v0.8.0 阶段 3 把 Tree / AppGroup 也接通：
+- `get_filtered_tree_visible(&self, cached_processes: &[ProcessInfo])` 签名加 cached_processes；FilterExpr 分支建 `pid → &ProcessInfo` HashMap，按 visible TreeNode 的 pid 取原 ProcessInfo 再 `FilterExpr::apply`。Substring 分支保留 v0.6 行为。
+- `app_group_filtered_visual_items(&self, cached_processes: &[ProcessInfo])` 同款扩参。FilterExpr 分支：
+  - **Header 项（聚合）**：用 group 的 `total_cpu` / `total_memory` + `display_name` 构造合成 ProcessInfo，apply 时 `cpu > 50` 表示「该 .exe 总 cpu > 50」。命中 → 整组保留。
+  - **Child 项（单进程）**：Header 不命中时按 pid 查 cached_processes 取原 ProcessInfo，命中的 child 保留并自动展开该组。
+- `handle_tree_key` / `handle_app_group_key` 在 `'/'` 旁边加 `':'` 激活 FilterExpr 模式，复用 `SearchState::activate_filter_expr()`。
+- 内部 helper（`tree_move_cursor` / `tree_toggle_select` / `tree_initiate_kill` / `tree_select_orphans` / `tree_select_stale` / `app_group_move_cursor` / `app_group_toggle_expand` / `app_group_toggle_select` / `app_group_initiate_kill`）签名加 `cached_processes: &[ProcessInfo]`。
+- 外部调用点（`src/app.rs::handle_scroll` / `src/tui/process_tree.rs::draw` / `src/tui/app_group_view.rs::draw`）传 `&app.cached_processes[..]`。
+**影响**：Tree / AppGroup 视图按 `:` 进 FilterExpr 模式，`cpu > 5` / `mem > 100mb` / `name =~ /chrome/` 都能正确过滤；parse 失败保留上一次成功 AST（与 List 同款契约）。
+**修复（已落地）**：`tests/test_filter_expr.rs` 加 10 个新 case（Tree × 5 + AppGroup × 5）：cpu_gt / pid_equality / keeps_prev_ast_on_bad_input / substring_mode_unchanged / empty_query_returns_all / aggregate_cpu_header_match / child_partial_match / memory_aggregate / app_group_keeps_prev_ast / app_group_substring_mode_unchanged。930 passed / 0 failed（基线 920 + 10 新）。
+**验证**：`cargo test --release -q` ≥ 925 passed；clippy + fmt 通过；Tree / AppGroup 视图按 `:` 进 FilterExpr 模式 + 表达式正确过滤。
 
-### TD-16：FilterExpr 错误信息用 nom 内部 ErrorKind 直出 — v0.7.0 阶段 4 遗留
+### TD-16：FilterExpr 错误信息用 nom 内部 ErrorKind 直出 — v0.7.0 阶段 4 遗留 ✅ Fixed in v0.8.0 阶段 2
 
-**位置**：`src/filter/parser.rs::to_parse_error`
-**现状**：parse 失败时 `msg` 字段直接 `format!("expected {:?}", ErrorKind::TakeWhile1)` 等 nom 内部枚举名，用户看不懂。
-**影响**：TUI 标题栏 / CLI stderr 显示「filter parse error at offset 5: expected TakeWhile1」之类，用户不知道是缺值。
-**修复**（v0.8 候选）：写一个 ErrorKind → 中文的映射表，例如 `TakeWhile1 → "缺少字段名/值"`、`Tag → "缺少关键字/操作符"`、`Verify → "正则编译失败"`。
-**验证**：parse("cpu >") 错误信息含「缺少值」字样。
+**位置**：`src/filter/parser.rs::to_parse_error` / `error_kind_to_chinese` / `char_to_chinese`
+**现状（已修复）**：parse 失败时 `msg` 字段不再 `format!("expected {:?}", ErrorKind::TakeWhile1)` 直出 nom 内部枚举名。新增 `error_kind_to_chinese(&ErrorKind) -> &'static str`（TakeWhile1 → 「缺少字段名/值」、Tag → 「缺少关键字/操作符」、AlphaNumeric → 「未知字段名」、Verify → 「正则编译失败」、Digit/Float → 「数字格式错误」等）+ `char_to_chinese(char) -> &'static str`（括号 → 「缺少括号」、引号 → 「缺少引号」、斜杠 → 「缺少斜杠」）。括号闭合用 `cut(char(')'))` 让 alt 不回退，`(cpu > 5` 缺 `)` 时最内层错误真正指向 Char(')') 而非被 leaf 的 TakeWhile1 覆盖。
+**影响**：TUI 标题栏 / CLI stderr 显示「filter parse error at offset 5: 缺少字段名/值」之类，用户一眼能定位问题。
+**修复（已落地）**：`tests/test_filter_expr.rs` 加 3 个中文契约 case（`cpu >` → 含「缺少」、`name =` → 含「缺少」、`(cpu > 5` → 含「括号」），并强化 `err_missing_value` / `err_unbalanced_open_paren` 断言排除 nom 内部枚举名泄漏。
+**验证**：`cargo run --release -- ls --filter 'cpu >'` 输出「filter 语法错误: filter parse error at offset 5: 缺少字段名/值」。
 
 ### TD-17：eBPF TLS SNI / JA4 指纹采集 — v0.7.0 阶段 8 遗留
 

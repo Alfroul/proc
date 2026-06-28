@@ -23,7 +23,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_till1, take_while1},
     character::complete::{char, digit1, multispace0},
-    combinator::{opt, recognize, value},
+    combinator::{cut, opt, recognize, value},
     error::{ErrorKind, ParseError as NomParseError, VerboseError, VerboseErrorKind},
     multi::many0,
     sequence::{pair, tuple},
@@ -61,7 +61,7 @@ pub fn parse(input: &str) -> Result<FilterExpr, ParseError> {
                 Ok(expr)
             } else {
                 Err(ParseError {
-                    msg: format!("unexpected trailing input: {:?}", trimmed),
+                    msg: format!("输入末尾出现多余内容：{:?}", trimmed),
                     position: input.len() - trimmed.len(),
                 })
             }
@@ -73,7 +73,7 @@ pub fn parse(input: &str) -> Result<FilterExpr, ParseError> {
 fn to_parse_error(input: &str, e: NomErr<VerboseError<&str>>) -> ParseError {
     match e {
         NomErr::Incomplete(_) => ParseError {
-            msg: "incomplete input".to_string(),
+            msg: "输入不完整".to_string(),
             position: input.len(),
         },
         NomErr::Error(ve) | NomErr::Failure(ve) => {
@@ -86,18 +86,66 @@ fn to_parse_error(input: &str, e: NomErr<VerboseError<&str>>) -> ParseError {
                 .map(|(sub, kind)| {
                     let off = input.len() - sub.len();
                     let m = match kind {
-                        VerboseErrorKind::Nom(k) => format!("expected {:?}", k),
+                        VerboseErrorKind::Nom(k) => error_kind_to_chinese(k).to_string(),
                         VerboseErrorKind::Context(s) => (*s).to_string(),
-                        VerboseErrorKind::Char(c) => format!("expected {:?}", c),
+                        VerboseErrorKind::Char(c) => char_to_chinese(*c).to_string(),
                     };
                     (off, m)
                 })
-                .unwrap_or((0, "parse error".to_string()));
+                .unwrap_or((0, "解析失败".to_string()));
             ParseError {
                 msg,
                 position: offset,
             }
         }
+    }
+}
+
+/// nom `VerboseErrorKind::Char(c)` → 中文映射（TD-16）。
+///
+/// 括号 / 引号 / 斜杠这几个特殊字符直接给出语义化提示，其他字符回退到
+/// `预期字符 'X'`。括号闭合错误（`Char(')')`）是 `(cpu > 5` 这类 unbalanced
+/// paren 场景最常见的，必须给出「括号」字样让 UI 标题栏一眼可读。
+#[must_use]
+fn char_to_chinese(c: char) -> &'static str {
+    match c {
+        '(' | ')' => "缺少括号",
+        '"' => "缺少引号",
+        '/' => "缺少斜杠",
+        _ => "缺少字符",
+    }
+}
+
+/// nom `ErrorKind` → 中文字符串映射（TD-16）。
+///
+/// 用户在 TUI / CLI 看到 `expected TakeWhile1` 这种 nom 内部枚举名根本无法
+/// 理解——映射成「缺少字段名/值」「缺少关键字/操作符」等可读提示。未在表内的
+/// `ErrorKind` 兜底「语法错误」。
+///
+/// 映射覆盖范围：parser.rs 实际会触发的 ErrorKind（TakeWhile1 / Tag / AlphaNumeric /
+/// Char / Digit / Verify）。其余 nom ErrorKind 在当前 parser 不会触达，但保留
+/// 兜底分支以防未来扩展。
+#[must_use]
+fn error_kind_to_chinese(kind: &ErrorKind) -> &'static str {
+    match kind {
+        // take_while1 / take_till1：字段名、裸字符串、正则体等「至少 1 字符」匹配失败。
+        ErrorKind::TakeWhile1 | ErrorKind::TakeTill1 => "缺少字段名/值",
+        // tag：关键字（AND/OR/NOT）或操作符（=~ / >= 等）字面量未匹配。
+        ErrorKind::Tag => "缺少关键字/操作符",
+        // char：单字符（括号 / 引号 / 斜杠）未匹配。
+        ErrorKind::Char => "缺少字符（括号/引号/斜杠）",
+        // AlphaNumeric：字段名解析走 take_while1，未知字段名（如 `foo`）会落到
+        // parse_field 内部 AlphaNumeric 错误分支。
+        ErrorKind::AlphaNumeric => "未知字段名",
+        ErrorKind::Alpha => "缺少字母",
+        ErrorKind::Digit => "数字格式错误",
+        // Verify：目前仅在 regex 编译失败时使用（leaf 中 regex::Regex::new 失败）。
+        ErrorKind::Verify => "正则编译失败",
+        // Float：parse_number_value 内部 raw.parse::<f64>() 失败时使用。
+        ErrorKind::Float => "数字格式错误",
+        ErrorKind::Eof => "未到输入结尾",
+        ErrorKind::MultiSpace | ErrorKind::Space => "缺少空白",
+        _ => "语法错误",
     }
 }
 
@@ -151,7 +199,11 @@ fn paren_expr(i: &str) -> NomRes<'_, FilterExpr> {
     let (i, _) = multispace0(i)?;
     let (i, expr) = parse_expr(i)?;
     let (i, _) = multispace0(i)?;
-    let (i, _) = char(')')(i)?;
+    // TD-16：括号闭合失败用 cut 转 Failure，让 alt 不回退到 leaf。
+    // 否则 `(cpu > 5` 缺 `)` 时 alt 会 fallback 到 leaf 解析整个 `(cpu > 5`，
+    // 最内层错误变成 leaf 的 TakeWhile1（「缺少字段名/值」），丢失「括号没闭合」
+    // 这条真正有用的信息。
+    let (i, _) = cut(char(')'))(i)?;
     Ok((i, expr))
 }
 

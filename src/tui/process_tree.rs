@@ -11,7 +11,10 @@ use crate::tree::TreeFilter;
 use crate::tui::theme;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
-    let visible = app.process_panel.panel.get_filtered_tree_visible();
+    let visible = app
+        .process_panel
+        .panel
+        .get_filtered_tree_visible(&app.cached_processes[..]);
     let rows_visible = area.height.saturating_sub(3) as usize;
 
     let header = Row::new(vec![
