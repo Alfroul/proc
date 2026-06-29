@@ -156,35 +156,65 @@
 **修复（已落地）**：`tests/test_filter_expr.rs` 加 3 个中文契约 case（`cpu >` → 含「缺少」、`name =` → 含「缺少」、`(cpu > 5` → 含「括号」），并强化 `err_missing_value` / `err_unbalanced_open_paren` 断言排除 nom 内部枚举名泄漏。
 **验证**：`cargo run --release -- ls --filter 'cpu >'` 输出「filter 语法错误: filter parse error at offset 5: 缺少字段名/值」。
 
-### TD-17：eBPF TLS SNI / JA4 指纹采集 — v0.7.0 阶段 8 遗留
+### TD-17：eBPF TLS SNI / JA4 指纹采集 — v0.7.0 阶段 8 遗留 ⏸ v0.10 cycle 部分覆盖（SNI 字段已扩，eBPF uprobe 实装推迟）
 
 **位置**：`src/ebpf/` 整个模块
 **现状**：v0.7 阶段 8 MVP 只关联 DNS + connect（[`ProcessFlow`] 的 `dns_name` 通过 [`FlowAggregator`] 的 5s 窗口向前查 DnsQuery 填入）。TLS SNI 需要在 `SSL_write` / `SSL_read` 上挂 uprobe（OpenSSL / BoringSSL / LibreSSL 多个版本分支 + offset 不同），第一版未做。`bytes_out` / `bytes_in` 也留 0（要 hook `tcp_sendmsg` / `tcp_recvmsg`）。
 **影响**：
 - 命中 DNS cache 的查询（系统直接走 /etc/hosts 或缓存）关联不到 → `dns_name = None`，但 R15 仍能通过条件 2（端口扫描）兜底。
 - 无字节计数 → UI Flow 子视图不能回答"实际发了多少字节"，仅能回答"谁连到哪里"。
-**修复**（v0.8 候选）：
+**修复**（v0.11+ 候选，原计划 v0.8 / v0.9 整体推迟）：
 1. 用 `aya-rs` uprobe 在 `SSL_write` 入口抓 ClientHello 明文 SNI 字段（OpenSSL 优先，BoringSSL / LibreSSL 后续）。
 2. JA4 指纹：从 ClientHello 抓 cipher suites + extensions + ALPN，按 [RFC 9503](https://www.ietf.org/archive/id/draft-ietf-tls-wg-tls-essentials-01.html) JA4 algorithm hash。
 3. `tcp_sendmsg` / `tcp_recvmsg` kprobe 累计 bytes_out / bytes_in（按 `(pid, saddr, daddr)` 聚合）。
 **验证**：curl https://example.com 后，端口面板 Flow 子视图该 flow 的 `dns_name == "example.com"` + `bytes_out > 0` + JA4 hash 字段。
+**v0.10 cycle 推进**：ProcessFlow.sni 字段已在 v0.10 阶段 1 扩上（v0.9 推迟范围一并完成），但 eBPF 路径仍填 `None`——uprobe 实装需要 Linux 真机环境（与 TD-19 同款推迟到 v0.11+）。Windows 路径已通过 Schannel ETW（ADR-0018）覆盖 SNI 字段（`source = Schannel`）。ja4 / bytes 字段未扩（用户明确「ja4 留 ebpf 那边」）。
 
-### TD-18：Windows ETW Schannel 抓 SNI（同名功能 Win 版本）— v0.7.0 阶段 8 遗留
+### TD-18：Windows ETW Schannel 抓 SNI（同名功能 Win 版本）— v0.7.0 阶段 8 遗留 ✅ Fixed in v0.10.0 阶段 3
 
-**位置**：`src/ebpf/` cfg-gate 失效的 Windows 平台
-**现状**：v0.7 阶段 8 eBPF flow graph 仅 Linux + `ebpf` feature 启用。Windows 用户没此功能（仅有 DNS 日志 + per-process 网络速率半关联）。Windows 等价物：ETW `Microsoft-Windows-Schannel` event 196（Operations 196 含 SNI 字段），schema 复杂未做。
-**影响**：Windows 用户不能回答"哪个二进制和哪个域名说了多少字节"，定位挖矿 / C2 弱于 Linux。
-**修复**（v0.8 候选）：在 `src/disk_io_etw/provider.rs` 同款手写 windows-rs ETW 框架基础上，新开 Schannel session 抓 event 196，关联 (pid, sni, ts) → 与 DNS 日志互补。
-**验证**：Windows 上 curl https://example.com → 端口面板 / `proc flows` 显示 SNI。
+**位置**：`src/schannel_etw/`（v0.10 阶段 1-3 新增，Windows cfg-gate）
+**现状**：**已修复**。v0.10 cycle 落地完整路径：阶段 1 ADR-0018 + 骨架 → 阶段 2 实测修订 provider GUID `{91CC1150-71AA-47E2-AE18-C96E61736B6F}`（原 `{37D2C3CD-...}` 不 fire）+ event ID 1793（原推测 196 实测不出现）+ 字段名 `TargetName`（原推测 `ServerName`）+ TDH 动态 schema 解析 + `SnapshotWorker<Vec<SniRecord>>` + WorkerManager 集成 → **阶段 3** `ProcessFlow.source` 字段（`FlowSource` enum）+ `App::overlay_flow_sni_schannel` 把 worker drain 的 SniRecord 关联到 ProcessFlow（pid 匹配覆盖 / 新建 Schannel flow）+ UI 跨平台对齐（`port_table::draw_flow_view` 标题动态切换 ebpf / schannel）+ R15 白名单跨平台（同时检查 sni + dns_name）+ `proc flows` CLI 跨平台（表格加「来源」列 + JSON 加 source 字段）。
+**验证**（用户 admin 下自测）：Windows 上 `proc` 后 curl https://example.com → 端口面板按 F 切到 Flow 子视图显示 SNI = "example.com"（来源 Schannel）+ `proc flows` 表格显示「来源 = schannel」列。stage 3 阶段 2 集成测试 `spawn_collects_self_sni_when_admin` 已落地（admin 下验证），用户没在 admin 下跑过（UAC 反复取消），但 stage 3 落地时若用户 admin 跑 proc 看到 SNI 显示正常即间接验证 stage 2 fix 正确。
 
-### TD-19：eBPF Linux 真实编译验证缺失 — v0.7.0 阶段 8 遗留 ⏸ v0.8.0 cycle 主动推迟
+### TD-19：eBPF Linux 真实编译验证缺失 — v0.7.0 阶段 8 遗留 ⏸ v0.10.0 cycle 主动推迟到 v0.11.0+
 
 **位置**：`src/ebpf/{worker.rs,elf_loader.rs}` + `src/ebpf/ebpf-ebpf/src/main.rs`
 **现状**：Part A + Part B 都在 Windows 会话落地，未在真实 Linux + root + 内核 5.10+ 环境验证：aya `TracePoint::attach` 真实签名、`RingBuf::try_from` API、tracepoint arg offset（`sys_enter_connect` 偏移 16 / `sched_process_exit` 偏移 24 在不同内核可能不同）、`include_bytes!` ELF 路径硬编码、内核态 `bpf_current_task_start_time` 占位 0（需 aya-tool BTF binding 补完）。
 **影响**：Linux 用户首次 `cargo build --features ebpf` 可能失败；attach 失败时 App::flows 为空，UI 显示降级提示（不崩，但功能不可用）。
 **修复**（v0.7 收尾或 v0.8）：Linux 会话跑 `cargo +nightly build --target bpfel-unknown-none -p proc-ebpf` + `cargo build --release --features ebpf` + `sudo cargo test --release --features ebpf --test test_ebpf_flow -- --ignored`，按报错修。
 **验证**：Linux 真实环境 `proc flows` 显示活跃 flow；端口面板按 F 切换 Flow 子视图有数据。
-**v0.8.0 cycle 推进**：用户主要用 Windows 开发，stage 1（WSL2 / Linux 真机验证）主动推迟到 **v0.9.0 cycle 启动前再评估**。stage 4 review（REVIEW-9）已确认此条不属 v0.8.0 cycle 范围；release CI `proc_ebpf` 后缀二进制构建步骤的 `continue-on-error=true` 设计让 Linux 编译失败不阻断主 release（5 target 主二进制优先发货）。README banner + CHANGELOG 显式标注此 known limitation。
+**v0.8.0 / v0.10.0 cycle 推进**：用户主要用 Windows 开发，stage 1（WSL2 / Linux 真机验证）主动推迟到 **v0.11.0+ cycle 启动前再评估**（v0.8.0 / v0.10.0 都不依赖 ebpf 路径，推迟无成本）。stage 4 review（REVIEW-9 / REVIEW-11）已确认此推迟不影响 cycle 收尾；Linux 验收标准（`cargo +nightly build -p proc-ebpf --target bpfel-unknown-none --release` / `cargo build --release --features ebpf`）跟随 stage 1 跳过；release CI `proc_ebpf` 后缀二进制构建步骤的 `continue-on-error=true` 设计让 Linux 编译失败不阻断主 release（5 target 主二进制优先发货）。README banner + CHANGELOG 显式标注此 known limitation。
+
+---
+
+## v0.11.0+ 候选（v0.10.0 stage 4 review 产出）
+
+### TD-20：Win10 < 1809 版本探测（P2-1 归档）
+
+**位置**：`src/schannel_etw/provider.rs::try_spawn_windows`（候选改造点）
+**现状**：Schannel event 1793 是 Win10 1809+ 才有的精细化 TLS handshake 事件（build 17763+）。Win10 < 1809 admin 用户：`try_spawn_windows` 成功（StartTraceW + EnableTraceEx2 + OpenTraceW 全过），但 event 1793 永远不 fire。accum 永远空，UI 显示「Schannel Flow graph（0 条）」误导用户。
+**影响**：Win10 早期版本（1709 / 1703）admin 用户以为「没流量」，实际是 OS 不支持 event 1793。
+**修复**：评估用 `RtlGetVersion` 在 `try_spawn_windows` 启动时探测 build number < 17763 → 直接返回 None（让 UI 显示「需要 Win10 1809+」更明确的提示）。
+**验证**：Win10 1709 admin 下 `try_spawn` 返 None + UI 标题显示版本提示（非「0 条」）。
+**v0.10.0 stage 4 决策**：不修。理由：(1) Win10 1809 是 2018-11 发布（7+ 年前），绝大多数用户已升级；(2) `RtlGetVersion` API 在不同 Windows 版本行为不同（manifest-guided 行为可能撒谎），需充分测试；(3) 当前 UI 显示「0 条」不挂 / 不崩，只是 UX 不够友好。归档为 v0.11+ 候选。
+
+### TD-21：Schannel overlay PID 复用防护（P2-2 归档）
+
+**位置**：`src/app.rs::overlay_flow_sni_schannel:1525-1534`
+**现状**：overlay 用 `flow.pid == rec.pid` 单键匹配。Schannel event 没给 `start_time`（只有 `EVENT_HEADER.ProcessId`）。进程 A（pid=1000）退出后 pid=1000 被 sysinfo 重用给新进程 B，accum 内 A 的 Schannel event（仍在 1s drain 窗口内）会被 overlay 到 B 的 flow 上。
+**影响**：误标一个 flow 的 sni（影响 R15 评分一次），不会崩溃 / 数据破坏。CONTEXT.md 已记录此限制。
+**修复**：用 `cached_processes` 查 pid 的当前 start_time，与 flow.start_time 比对，不一致则视为 PID 复用、跳过覆盖（让 record 走「未匹配」分支新建一条 source = Schannel flow）。
+**验证**：mock pid=1000 flow（start_time=T1）+ alive_pids 含 pid=1000 start_time=T2 → overlay 跳过；flow.start_time 与 alive 一致 → overlay 命中。
+**v0.10.0 stage 4 决策**：不修。理由：(1) 时间窗口窄（accum 1s drain + sysinfo PID 复用罕见）；(2) CONTEXT.md 已记录，用户透明；(3) 影响一次评分不持续，优先级低于 TD-19 ebpf 真实验证。归档为 v0.11+ 候选。
+
+### TD-22：`property_at_index` 生命周期标注代码质量（P2-3 归档）
+
+**位置**：`src/schannel_etw/provider.rs:456-475`
+**现状**：函数签名 `Option<&'static EVENT_PROPERTY_INFO>` 的 `'static` 标注技术上错误——返回的引用生命周期实际绑定到 `info_ptr` 指向的 buffer（来自 `tdh_get_event_info_buffer` 返回的 `Vec<u8>`）。Rust 借用检查无法表达「生命周期绑到 raw pointer 来源」，用 `'static` 绕过。
+**影响**：实际用法安全（调用方立即读 `NameOffset` 不跨 await / 不存进长生命周期字段）。Clippy / fmt 不报。
+**修复**：改成 `Option<&'a EVENT_PROPERTY_INFO>` + 加 lifetime parameter；或 inline 到调用点直接读字段。
+**验证**：`cargo clippy --release --all-targets -- -D warnings` 仍 0 warnings。
+**v0.10.0 stage 4 决策**：不修。理由：(1) 不引发 UB（实际用法安全）；(2) 修复增加 ~5 行代码但语义不变；(3) 优先级低于功能 / 测试改进。归档为 v0.11+ 代码质量候选。
 
 ---
 

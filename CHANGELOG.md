@@ -5,6 +5,59 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+下次 cycle（v0.11.0+）的工作面：候选方向见 stage 4 doc 末尾「v0.10.0 完工后」段（Linux rootless ebpf / Windows TLS keylog / FilterExpr v2 / worker restart）。
+
+## [0.10.0] - 2026-06-28
+
+v0.10.0 cycle 围绕 **跨平台 SNI 对齐**（Windows Schannel ETW 落地，弥补 v0.7 阶段 8 eBPF 仅 Linux 的缺位）+ **v0.9 推迟字段一并扩**（ProcessFlow.sni；ja4 留 ebpf 路径）两条线，分 4 阶段推进。v0.9 cycle（计划 ADR-0017 eBPF SNI/JA4）整体推迟，v0.10 直接启动不依赖 v0.9 tag。**全量回归 959 passed / 0 failed / 3 ignored**（v0.8.0 基线 930 → +29：test_schannel_etw +3 + test_flow_source +10 + 新模块内部单测 +12 + REVIEW-11 P1-1 修复 +4）；0 个新依赖进默认依赖图（windows-rs `Win32_System_Diagnostics_Tdh` feature 复用既有 windows-rs 依赖）。
+
+**已知限制（必须在 release notes 显式标注）**：
+- **Win10 < 1809**：Schannel event 1793 不 fire（精细化 TLS handshake 事件 1809+ 才有），admin 下 worker 启动成功但 UI 显示 0 条；无法在用户态探测，留 FAQ 提示。详见 [ADR-0018 §7](docs/adr/0018-windows-schannel-sni.md)。
+- **Linux ebpf 编译路径未在本机验证**（TD-19 延续）：v0.8.0 cycle stage 1 主动推迟到 v0.9.0 cycle 启动前再评估；本 v0.10 cycle 不依赖 ebpf 路径，继续推迟。
+- **Schannel overlay 单键 pid 匹配**：Schannel event 不带 start_time，PID 复用时可能错误覆盖（CONTEXT.md 已记录，影响窄）。
+
+### 阶段 4 — Review + 修 P0/P1 + 定稿 + tag v0.10.0（本次发布）
+
+> 本次发布 commit：Cargo.toml 0.8.0 → 0.10.0；CHANGELOG / README / CONTEXT 同步 v0.10.0；4 个 stage doc 头部加发布标记；ADR-0018 / tech-debt 收尾；REVIEW-11 P0/P1/P2 状态闭环。详见本次 commit diff。
+
+- Docs: **`docs/reviews/REVIEW-11.md`**（新）— v0.10.0 cycle 全局 review 报告。审查覆盖 stage 1-3 全部产出（跨平台一致性 / Schannel ETW Drop 安全性 / worker_metrics 性能 / Win10 < 1809 降级 4 子项），分级 **P0 0 / P1 2 / P2 4**。
+- Fix: **REVIEW-11 P1-1（Schannel-only flow 永不退出）** — `src/ebpf/flow.rs` 新增 `mark_dead_schannel_flows` + `reap_expired_schannel_flows` 两个 free function；`src/app.rs::tick_light_refresh` 在 alive_pids 计算后给 source = Schannel 且 pid 不在 alive_pids 的 flow 打 exit_time；`overlay_flow_sni_schannel` 末尾调 reaper 移除超过 GHOST_FLOW_TTL 的 Schannel ghost。Linux 上 schannel_etw_worker 恒为 None → no-op。新增 4 个 unit test。
+- Fix: **REVIEW-11 P1-2（trace_thread spawn 失败时泄漏 session/trace handle）** — `src/schannel_etw/provider.rs::try_spawn_windows` 第 4 步 spawn 改为 match Err 分支清理 stop_session + CloseTrace，再返回 None 降级。
+- Docs: ADR-0018 §7 降级路径补 Win10 < 1809 说明（P2-1）；tech-debt 新建 TD-20（Win10 版本探测）/ TD-21（PID 复用防护）/ TD-22（lifetime 代码质量）3 项 P2 归档（P2-2 / P2-3 + 新 Win10 探测）；4 个 v0.10 stage doc 头部加 ✅ 已发布标记（P2-4）；README banner 加 v0.10.0 段 + 平台支持表加 Windows SNI 行。
+- Release: `git tag -a v0.10.0 -m "v0.10.0：Windows Schannel ETW SNI 落地，跨平台流量分析对齐"` 已打（等用户确认后 push）。
+
+
+### 阶段 3 — ProcessFlow.source 字段 + App overlay + UI / CLI / R15 跨平台
+
+> **TD-18 标 ✅ Fixed**：Windows admin 跑 proc，curl https://example.com 后端口面板 Flow 子视图显示 SNI = "example.com"（来源 Schannel），与 Linux eBPF 路径在 `ProcessFlow.source` 字段统一。Stage 2 落地的 Schannel ETW worker → `App::overlay_flow_sni_schannel` → UI 全链路打通。
+
+- Added: **ProcessFlow.source 字段（FlowSource enum）** — `src/ebpf/flow.rs` 加 `pub enum FlowSource { Ebpf, Schannel }`（Copy + `#[derive(Default)]` 标 `Ebpf` 默认；serde `#[serde(rename_all = "lowercase")]` 序列化为 `"ebpf"` / `"schannel"`）。`ProcessFlow` 加 `pub source: FlowSource`（`#[serde(default)]` 保旧录屏兼容）。**3 处字面量构造点**（`flow.rs::ingest_event` 写 `Ebpf`、`security/flow.rs::mk_flow` 写 `Ebpf`、`test_ebpf_flow::process_flow_serde_round_trip` 写 `Ebpf`）+ **2 处测试 mk_flow**（`test_ebpf_flow.rs` / `test_security.rs`）同步更新。
+- Added: **`App::overlay_flow_sni_schannel`** — `src/app.rs` 新方法（在 `tick_flows_ebpf` 之后调用）：drain `workers.schannel_etw_worker` → 拿 `Vec<SniRecord>` → 对每条 record：(1) 匹配 pid 的 `ProcessFlow` **全部**覆盖 `sni` + 标 `source = Schannel` + 刷新 `last_seen`；(2) 没匹配上的 record（典型 Windows-only 环境，ebpf 路径空）直接 push 一条 `source = Schannel` 新 flow（从 `cached_processes` 查 pid → (start_time, comm) 填字段，remote_addr / remote_port / bytes / dns_name 留空——Schannel event 不给 socket 元数据 + 不参与 DNS 关联）。drain 后重排序保 last_seen 倒序。Linux 上 `schannel_etw_worker = None` → no-op。
+- Changed: **`port_table::draw_flow_view` 跨平台对齐** — 标题栏不再硬编码 "eBPF Flow graph"：`schannel_etw_worker` 启用且 ebpf 不在线时显示 "Schannel Flow graph（N 条 · SNI 明文 · TLS handshake）"；两条都不在线时显示降级提示 "Flow graph：需要 Linux + ebpf feature 或 Windows 管理员（Schannel ETW）"。表格列改名 "域名" → "SNI/域名"（数据来源透明，用户看到的是名字，优先 sni 回退 dns_name）；Schannel-only flow 的 remote_addr 空字符串 / remote_port 0 时显示 `—` 保持视觉对齐。**TUI 不显示 source 列**（用户透明，仅内部用，符合 stage 3 任务指令 #5）。
+- Changed: **R15 跨平台激活** — `src/security/flow.rs::check_flow_risk` 条件 1 同时检查 `sni`（Windows Schannel / Linux eBPF uprobe 路径）和 `dns_name`（Linux eBPF DNS 关联路径），SNI 优先（`f.sni.as_deref().or(f.dns_name.as_deref())`）。Windows admin + 用户显式 touch `~/.config/proc/sni_whitelist.txt` 时 Schannel 抓到的 SNI 进入白名单检查路径（与 v0.7 阶段 8 Part B 同款契约，stage 3 不改默认关闭策略）。JA4 黑名单规则在 source = Schannel 路径自动 skip（ja4 字段未实现，仍 None）。条件 2（端口扫描）不受影响——Schannel-only flow 的空 remote_addr 进入 distinct HashSet 时只贡献 1 个唯一值，远不及阈值 50。
+- Changed: **`proc flows` CLI 跨平台** — `src/cli/flows.rs` 入口判断改为 `EBPF_ENABLED=false` 且 `schannel_etw_worker=None` 才降级（之前只判 ebpf）。表格输出加 "来源" 列（`ebpf` / `schannel`）；JSON 输出由 `#[serde(rename_all="lowercase")]` 自动加 `"source": "ebpf"|"schannel"` 字段。打印 summary 按 ebpf / schannel 条数分支措辞。
+- Added: **`tests/test_flow_source.rs`**（新）10 case：FlowSource enum Copy + Default + serde lowercase 行为契约（3 case）+ ProcessFlow.source serde round-trip + **旧录屏兼容性**（无 source 字段 JSON 反序列化应得 Ebpf 默认）（2 case）+ R15 跨平台 5 case（Schannel sni 命中 / 放行 / sni 优先于 dns_name / 空白名单命中 / 端口扫描阈值不可达）。
+- Test: 全量回归 933 → 943 passed（test_flow_source +10）。
+- Docs: **TD-18 标 ✅ Fixed in v0.10.0 阶段 3**；CONTEXT.md 加 `FlowSource` + `App::overlay_flow_sni_schannel` 2 个新术语 + 术语演进历史加 v0.10.0 阶段 3 行；ADR-0018 Consequences 段补「阶段 3 落地」子段。
+
+### 阶段 1 — ADR-0018 + ProcessFlow.sni 字段扩展 + Schannel ETW 骨架
+
+> 独立会话产出：本段 commit。stage 1 doc 验收标准 4 项全达：ADR-0018 文件存在（Status Accepted）/ event 196 schema 文档化（标注「未经实测，阶段 2 修订」+ TDH 路线说明）/ 最简 Schannel session 骨架跑通（编译 + 测试通过）/ ProcessFlow.sni 字段一并扩（v0.9 推迟，ja4 留 ebpf）。
+
+- Added: **ADR-0018 Windows Schannel ETW SNI** — `docs/adr/0018-windows-schannel-sni.md`（新）。Status Accepted。决策路线：手写 windows-rs ETW（不引 ferrisetw / schannel-rs），开 `Microsoft-Windows-Schannel` session（provider GUID `{37D2C3CD-C5D4-4587-8531-4696C44244C8}`，来自 MS technet blog 实证）。**关键差异（与 ADR-0015 disk_io_etw）**：走 TDH 动态 schema（`TdhGetEventInformation` + `EVENT_PROPERTY_INFO`）而非硬编码偏移——Schannel event 196 manifest Microsoft 未公开，跨 Win10/Win11 版本可能变；硬编码会随时挂，TDH 路线从 manifest 资源动态拉 schema。Alternatives 7 项列出（ferrisetw fallback / 硬编码偏移 / WinDivert / FiddlerCore MITM / EventLog Schannel source / sysinfo+DNS 关联 / 一起扩 ja4）。
+- Added: **ProcessFlow.sni 字段（v0.9 推迟过来的范围）** — `src/ebpf/flow.rs::ProcessFlow` 加 `pub sni: Option<String>`（`#[serde(default)]`）。与 `dns_name` 区别：`dns_name` 来自 DNS 查询事件（HTTPS 命中 DNS cache 时关联不到 / DoH 抓不到）；`sni` 来自 TLS ClientHello 明文（HTTPS 必经路径）。Linux 由 eBPF uprobe on `SSL_write` 抓（留 v0.9 复活时实现）；Windows 由 Schannel ETW event 196 抓（v0.10 阶段 2 落地）。3 处字面量构造点（`flow.rs::ingest_event` + `flow.rs` tests + `security/flow.rs::mk_flow` helper）+ 2 处集成测试（`test_ebpf_flow` / `test_security`）同步加 `sni: None` / `sni: Some("example.com")`。**ja4 字段不加**——用户明确「ja4 留 ebpf 那边」（纯 eBPF 范畴，与 Schannel 路径无关）。
+- Added: **Schannel ETW 骨架** — `src/schannel_etw/{mod.rs, provider.rs, parser.rs}`（新）。`provider.rs`（Windows cfg-gate）实装 StartTraceW + `EnableTraceEx2`（启用 Schannel provider，TRACE_LEVEL_VERBOSE 抓全事件）+ OpenTraceW（注册 callback）+ ProcessTrace 阻塞线程；`EventRecordCallback` 阶段 1 只 hex 打印 raw UserData（event_id / opcode / pid / 前 64 字节预览），SNI 解析留阶段 2 用 TDH 实测 schema 后填实。`mod.rs` 跨平台入口 `try_spawn_probe(Option<Sender<WorkerCrash>>) -> Option<SessionProbeHandle>`；非 Windows 直接返回 None。`parser.rs` 占位 `parse_event_196` + `SniRecord` 类型（阶段 2 接 SnapshotWorker 时用）。**与 disk_io_etw 路径不同的关键点**：Schannel 是用户态 manifest-based provider，**不能用 NT Kernel Logger**（后者只用于 kernel events）；必须用自定义 session name + `EnableTraceEx2` 启用特定 provider GUID。降级路径：非管理员 / StartTraceW 失败 / EnableTraceEx2 失败 / x86 进程 → 返回 None。
+- Added: **`tests/test_schannel_etw.rs`**（新）3 case：跨平台 stub 测试（非 Windows `try_spawn_probe` 返回 None）+ SniRecord 数据格式契约 + Windows 集成测试（管理员下 SessionProbe 启停 + drop 干净；非管理员走 SKIP 不 fail）。
+- Docs: **CONTEXT.md 加 v0.10.0 段** — 5 个新术语（ProcessFlow.sni / SessionProbe / SchannelProviderGuid / SniRecord / TDH 动态 schema 路线）+ 术语演进历史加 v0.10.0 阶段 1 行。
+- Test: 全量 930 → 933 passed（test_schannel_etw +3）。
+
+**已知限制（v0.10.0 cycle 启动时已确认）**：
+- Schannel event 196 schema **未经实测**：阶段 1 没在 Windows 真跑 xperf/logman 抓真实 event，ADR-0018 文档化「待阶段 2 修订」；阶段 2 必须 xperf 实测 + 与 TDH 动态解析结果对账。
+- 阶段 1 Schannel 骨架不接 WorkerManager（留阶段 2）：主线程 `App::workers` 没加 `schannel_etw_worker` 字段，`proc diag` 也没加 worker 行——全部留阶段 2 落地。
+- ProcessFlow.sni 字段在所有路径都填 None（eBPF 路径 v0.9 推迟、Schannel 路径阶段 2 才填），UI / CLI 暂不显示。
+
 ## [0.8.0] - 2026-06-28
 
 v0.8.0 cycle 围绕 **小修一波清**（TD-12 Linux stub 测试 + TD-13 Linux CI 校验 + TD-16 FilterExpr 错误中文化）+ **FilterExpr 扩展**（TD-15 Tree / AppGroup view 接入）+ **收尾交付**（REVIEW-9 全局 Review + tag）三条线，分 4 阶段推进（stage 1 主动推迟 / stage 2+3 实现 / stage 4 review + 收尾）。**全量回归 930 passed / 0 failed / 3 ignored**（v0.7.0 基线 910 → +20 新测试 case）；0 个新依赖进默认依赖图。

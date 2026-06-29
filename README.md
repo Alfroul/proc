@@ -2,9 +2,11 @@
 
 Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中。Windows 主开发平台，Linux/macOS 可降级运行。
 
-> **v0.8.0（2026-06-28）** 小修一波清 + FilterExpr 扩展：**FilterExpr 全 view 支持**（Tree / AppGroup 视图按 `:` 也能用 `cpu > 5 AND name =~ /chrome/` 过滤）/ **错误信息中文化**（不再直出 nom 内部 `TakeWhile1`，改友好提示「缺少字段名/值」）/ **Linux CI 加固**（全量 `cargo test --release` + 测试 bin 数 ≥ 30 校验防 cfg-gate 静默 skip）/ **Linux stub 测试覆盖**（env/dlls/handles/memory 降级路径有早期告警）。全量回归 930 tests passed / 0 failed。详见 [CHANGELOG](CHANGELOG.md)。
+> **v0.10.0（2026-06-28）** 跨平台 SNI 对齐：**Windows Schannel ETW SNI 落地**（手写 windows-rs ETW + TDH 动态 schema，event 1793 / TargetName 字段实测修订）/ **ProcessFlow.source 字段**（`Ebpf` / `Schannel` enum，跨平台在 ProcessFlow 数据结构统一）/ **R15 跨平台激活**（白名单同时检查 sni + dns_name）/ **`proc flows` 跨平台 CLI**（表格加「来源」列，JSON 自动加 source 字段）/ **REVIEW-11 P1 修复**（Schannel-only flow 退出感知 + spawn 失败句柄清理）。弥补 v0.7 阶段 8 eBPF 仅 Linux 的缺位。全量回归 959 tests passed / 0 failed。详见 [CHANGELOG](CHANGELOG.md)。
 >
-> **已知限制**：Linux ebpf 编译路径未在本机验证（stage 1 主动推迟到 v0.9.0 cycle）；release CI 用 `continue-on-error=true` 让 ebpf 构建失败不阻断主 release。详见 [tech-debt TD-19](docs/tech-debt.md)。
+> **已知限制**：Win10 < 1809 admin 下 Schannel event 1793 不 fire（worker 启动成功但 UI 显示 0 条）；Linux ebpf 编译路径未在本机验证（v0.8.0 cycle stage 1 主动推迟，本 cycle 不依赖）。详见 [tech-debt TD-19 / TD-20](docs/tech-debt.md)。
+
+> **v0.8.0（2026-06-28）** 小修一波清 + FilterExpr 扩展：**FilterExpr 全 view 支持**（Tree / AppGroup 视图按 `:` 也能用 `cpu > 5 AND name =~ /chrome/` 过滤）/ **错误信息中文化**（不再直出 nom 内部 `TakeWhile1`，改友好提示「缺少字段名/值」）/ **Linux CI 加固**（全量 `cargo test --release` + 测试 bin 数 ≥ 30 校验防 cfg-gate 静默 skip）/ **Linux stub 测试覆盖**（env/dlls/handles/memory 降级路径有早期告警）。全量回归 930 tests passed / 0 failed。详见 [CHANGELOG](CHANGELOG.md)。
 
 > **v0.7.0（2026-06-28）** 新增三大主题：**生态卡位**（`proc mcp serve` LLM agent 接入 / shell 补全 / Ctrl+P 命令面板 / FilterExpr 表达式搜索 `cpu > 5 AND name =~ /chrome/`）/ **平台深度**（Linux PSI 监控 / Win11 EcoQoS 切换 / Win ETW per-process 磁盘 IO / Linux eBPF flow graph）/ **架构债清理**（App 拆 5 个 panel controller）。全量回归 910 tests passed / 0 failed。详见 [CHANGELOG](CHANGELOG.md)。
 
@@ -231,7 +233,7 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 | `proc throttle <pid> on\|off`<sup>v0.7.0</sup> | Windows 11 EcoQoS / Efficiency Mode 切换（🍃 标记由 HeavyWorker 批量 query 维护） |
 | `proc smart [device]`<sup>v0.5.0</sup> | SMART 磁盘健康（省略 device 列出所有磁盘） |
 | `proc dns [--tail]`<sup>v0.5.0</sup> | DNS 查询日志（仅 Windows，内存 only） |
-| `proc flows [--limit N] [--json]`<sup>v0.7.0</sup> | eBPF flow graph（仅 Linux + `ebpf` feature；ADR-0016） |
+| `proc flows [--limit N] [--json]`<sup>v0.7.0 · 跨平台 v0.10.0</sup> | ProcessFlow 列表（Linux 走 eBPF connect+DNS 关联，Windows admin 走 Schannel ETW SNI；表格含「来源」列；ADR-0016 + ADR-0018） |
 | `proc diag`<sup>v0.6.0</sup> | worker metrics JSON 输出（avg/max/polls/drops），bug 报告附上 |
 | `proc monitor --add --pid N` / `--remove ID` | 监控管理（按 `--pid` / `--port` / `--command`） |
 | `proc record` / `proc replay <file>` | VT100 录屏 |
@@ -447,6 +449,7 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 | **Windows 11 EcoQoS 切换**<sup>v0.7.0</sup> | ✅ SetProcessInformation(ProcessPowerThrottling) + 进程列表 🍃 标记 | ❌（cgroup freezer / cpu.weight 留 v0.8+） | ❌ |
 | **Linux PSI 监控**<sup>v0.7.0</sup> | ❌ | ✅ /proc/pressure/{cpu,mem,io} + 监控面板 + 5 条 alert 规则 | ❌ |
 | **eBPF flow graph（端到端关联）**<sup>v0.7.0</sup> | ❌ | ⚠️ feature flag `ebpf`（内核 ≥ 5.10 + root / CAP_BPF）；端口面板按 `F` 进入 Flow 子视图 + `proc flows` CLI | ❌ |
+| **Schannel ETW TLS SNI**<sup>v0.10.0</sup> | ✅ `Microsoft-Windows-Schannel-Events` ETW event 1793（Win10 1809+ 管理员 + TDH 动态 schema） | ❌（Linux 走 eBPF uprobe 路径，v0.9 推迟） | ❌ |
 | **文件占用反查（who）**<sup>v0.5.0</sup> | ✅ filelocksmith | ⚠️ lsof 启发式 | ⚠️ lsof 启发式 |
 | **v0.6.0 安全加固**（self-mitigation / env mask / restricted spawn） | ✅ | ⚠️ self-mitigation 暂无（Linux prctl 留 v0.7+） | ⚠️ 同 Linux |
 | **v0.6.0 可观测性**（log rotate / crash report / worker metrics） | ✅ | ✅ | ✅ |
@@ -484,6 +487,10 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 **eBPF 需要什么权限？** root 或 `CAP_BPF` + `CAP_PERFMON` capability，内核 ≥ 5.10（CO-RE / BTF 支持）。Ubuntu 20.04+ / Debian 11+ / RHEL 9 默认满足。无权限 / 内核不满足 → `EbisuBpfWorker::try_spawn` 返回 `None`，UI 显示降级提示，proc 其它功能不受影响。
 
 **R15 安全评分（外联行为）怎么触发？**<sup>v0.7.0</sup> 默认不启用。需要显式创建 `~/.config/proc/sni_whitelist.txt`（一行一个允许的域名，`#` 开头注释），R15 才激活。两条命中条件（任一扣 30 分）：dns_name 不在白名单 / 10s 内 ≥ 50 个不同 IP（端口扫描特征）。空文件 = "所有 dns_name 都不在白名单"（用户自负）。详见 [ADR-0016](docs/adr/0016-ebpf-flow-graph.md#securityrule-r15-外联行为评分)。
+
+**Windows Flow graph 怎么用？**<sup>v0.10.0</sup> Windows admin 自动启用 Schannel ETW worker（不需要 feature flag）：启动 proc → 端口面板按 `F` 切到 Flow 子视图 → curl / 浏览器触发 TLS handshake → 看到 SNI 列表。CLI 走 `proc flows` 同款显示，`proc flows --json` 输出含 `"source": "schannel"` 字段。非管理员 / Win10 < 1809 / x86 进程 → worker 启动失败 / 不 fire，UI 显示降级提示。详见 [ADR-0018](docs/adr/0018-windows-schannel-sni.md)。
+
+**Windows 用户在 Flow 子视图看到 0 条怎么办？**<sup>v0.10.0</sup> 三步排查：(1) `winver` 查 Windows 版本，需 Win10 1809+（build 17763+）/ Win11；(2) 以管理员身份启动 proc（非管理员 worker 启动失败）；(3) 触发 TLS handshake 后等 1-2s（Schannel event 1793 在 DeleteSecurityContext 时 fire，连接关闭瞬间才有）。仍 0 条？跑 `proc diag` 看 `schannel_etw` worker 行的 `poll_count` 是否增长——若增长但 SNI 空，说明 callback 收到 event 但 TDH 解析失败，请附 `~/.config/proc/logs/proc.log` 报 issue。
 
 **worker 崩溃了怎么办？**<sup>v0.6.0</sup> TUI 顶部会渲染红色 banner（`[worker name] panicked: <message>`），按 `D` 清空。同时 crash report 写到 `crashes/crash-worker-*.txt`。worker 自身无热恢复（重启方法 `WorkerManager::restart` 未实现，见 [tech-debt](docs/tech-debt.md) TD-4），需重启 proc。
 
