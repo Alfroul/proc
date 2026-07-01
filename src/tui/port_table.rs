@@ -378,15 +378,22 @@ fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
         .as_ref()
         .map(|e| format!(" · ⚠ {e}"))
         .unwrap_or_default();
+    // v0.11 后修复（REVIEW-13 P1-2 同款 UX 缺口）：filter_expr 含 process 字段时
+    // 显示提示，避免用户写 `cpu > 5` 后看到 0 条 flow 不知原因。与 parse error
+    // 同款黄色标题栏样式。
+    let warn_hint = pp
+        .flow_filter_warn()
+        .map(|w| format!(" · ⚠ {w}"))
+        .unwrap_or_default();
     let ops_hint = "  F/Esc 退出 · ↑↓滚动 · / 搜索 · : FilterExpr";
-    let header_line = format!("{base_header}{filtered_hint}{search_hint}{err_hint}{ops_hint}");
+    let header_line = format!("{base_header}{filtered_hint}{search_hint}{err_hint}{warn_hint}{ops_hint}");
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(area);
 
-    let header_style = if pp.flow_search.filter_error.is_some() {
+    let header_style = if pp.flow_search.filter_error.is_some() || pp.flow_filter_warn().is_some() {
         theme::style_header().fg(Color::Yellow)
     } else {
         theme::style_header()

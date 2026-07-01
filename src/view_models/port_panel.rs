@@ -822,6 +822,32 @@ impl PortPanel {
         }
     }
 
+    /// v0.11 后修复（REVIEW-13 P1-2 同款 UX 缺口）：
+    /// Flow view 走 [`FilterExpr::apply_network`]，process 字段变体在该 ctx 下永远
+    /// false（无 ProcessInfo）。如果用户在 Flow view FilterExpr 写 `cpu > 5` 等
+    /// process 字段表达式，所有 flow 都会被过滤掉，体验反直觉。本方法返回中文
+    /// 警告字符串供 [`crate::tui::port_table::draw_flow_view`] 在标题栏显示。
+    ///
+    /// 检测时机：filter_expr 已成功 parse（非 None）+ AST 含 process 字段变体。
+    /// 返回 None 的场景：(1) FilterExpr 模式未激活；(2) 纯 network 表达式
+    /// （`sni =~ /evil/` 等，正常工作）；(3) Substring 模式（不涉及 FilterExpr）。
+    #[must_use]
+    pub fn flow_filter_warn(&self) -> Option<&'static str> {
+        match self.flow_search.mode {
+            crate::search::QueryMode::FilterExpr => {
+                let expr = self.flow_search.filter_expr.as_ref()?;
+                if expr.contains_process_field() {
+                    Some(
+                        "process 字段在 Flow 视图永远不命中，请用 sni/dns_name/remote_addr/remote_port/bytes_out/bytes_in/source",
+                    )
+                } else {
+                    None
+                }
+            }
+            crate::search::QueryMode::Substring => None,
+        }
+    }
+
     /// 主线程 tick 后调，clamp `flow_cursor` 到当前 flows 列表范围。
     pub(crate) fn flow_clamp_cursor(&mut self, total: usize) {
         if total == 0 {

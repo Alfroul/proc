@@ -26,8 +26,9 @@ use std::ffi::c_void;
 #[cfg(windows)]
 pub fn apply_self_mitigations() -> Vec<&'static str> {
     use windows::Win32::System::Threading::{
-        ProcessASLRPolicy, ProcessDEPPolicy, ProcessDynamicCodePolicy,
-        ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy, SetProcessMitigationPolicy,
+        GetProcessMitigationPolicy, GetCurrentProcess, ProcessASLRPolicy, ProcessDEPPolicy,
+        ProcessDynamicCodePolicy, ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy,
+        SetProcessMitigationPolicy,
     };
 
     // SAFETY: 我们只对自己进程调用，传 ptr 都指向本函数栈上结构；size_of 与类型一致。
@@ -43,18 +44,36 @@ pub fn apply_self_mitigations() -> Vec<&'static str> {
             flags: u32,
             permanent: bool,
         }
-        let dep = DepPolicy {
-            flags: 0b011, // Enable | DisableAtlThunkEmulation
-            permanent: true,
-        };
-        if SetProcessMitigationPolicy(
+        // v0.11 后修复：Rust 二进制默认带 /NXCOMPAT linker flag，PE header 已声明
+        // DEP Enable + Permanent。运行时再调 SetProcessMitigationPolicy 会被拒绝
+        // （Permanent 不可改），导致 warning 误报。先 GetProcessMitigationPolicy 预检，
+        // 已经 Enable + Permanent 时视为成功跳过；其他状态（off / 非 Permanent）才调
+        // SetProcessMitigationPolicy 强制设到 Permanent。
+        let mut current = DepPolicy::default();
+        let already_ok = GetProcessMitigationPolicy(
+            GetCurrentProcess(),
             ProcessDEPPolicy,
-            &dep as *const _ as *const c_void,
+            &mut current as *mut _ as *mut c_void,
             std::mem::size_of::<DepPolicy>(),
         )
-        .is_err()
-        {
-            failed.push("DEP");
+        .is_ok()
+            && current.permanent
+            && (current.flags & 0b001) != 0; // Enable bit
+
+        if !already_ok {
+            let dep = DepPolicy {
+                flags: 0b011, // Enable | DisableAtlThunkEmulation
+                permanent: true,
+            };
+            if SetProcessMitigationPolicy(
+                ProcessDEPPolicy,
+                &dep as *const _ as *const c_void,
+                std::mem::size_of::<DepPolicy>(),
+            )
+            .is_err()
+            {
+                failed.push("DEP");
+            }
         }
 
         // ── 2. ASLR High Entropy ─────────────────────────────────────────────
