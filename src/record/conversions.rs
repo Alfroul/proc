@@ -45,6 +45,8 @@ impl From<&FrameProcess> for ProcessInfo {
             start_time: 0,
             run_time: 0,
             throttled: crate::throttle::EcoQoSState::default(),
+            signature_status: crate::security::SignatureStatus::default(),
+            parent_chain: Vec::new(),
         }
     }
 }

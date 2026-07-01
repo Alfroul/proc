@@ -246,6 +246,8 @@ fn collect_missing_processes(
                     run_time,
                     name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
                     throttled: crate::throttle::EcoQoSState::default(),
+                    signature_status: crate::security::SignatureStatus::default(),
+                    parent_chain: Vec::new(),
                 });
             }
         }
@@ -641,6 +643,16 @@ pub struct ProcessInfo {
     /// `#[serde(default)]`：旧录屏文件能反序列化（缺字段 → Unknown）。
     #[serde(default)]
     pub throttled: crate::throttle::EcoQoSState,
+    /// v0.11.0 阶段 1：签名验证状态骨架。默认 `Pending`，阶段 4 由
+    /// `BackgroundScorer` 调 `verify_signature` 异步填实。`#[serde(default)]`
+    /// 让旧录屏文件能反序列化（缺字段 → Pending）。
+    #[serde(default)]
+    pub signature_status: crate::security::SignatureStatus,
+    /// v0.11.0 阶段 1：父子链骨架。元组 `(pid, name)`，从该进程向上追溯到
+    /// 根进程的完整链路。默认空 Vec，阶段 5 由 collect 时填实。
+    /// `#[serde(default)]` 让旧录屏文件能反序列化（缺字段 → 空 Vec）。
+    #[serde(default)]
+    pub parent_chain: Vec<(u32, String)>,
 }
 
 impl Default for ProcessInfo {
@@ -672,6 +684,8 @@ impl Default for ProcessInfo {
             run_time: 0,
             name_lower: std::sync::Arc::clone(empty_str),
             throttled: crate::throttle::EcoQoSState::default(),
+            signature_status: crate::security::SignatureStatus::default(),
+            parent_chain: Vec::new(),
         }
     }
 }
@@ -974,6 +988,8 @@ impl HeavyWorker {
                                 },
                                 name_lower,
                                 throttled: crate::throttle::EcoQoSState::default(),
+                                signature_status: crate::security::SignatureStatus::default(),
+                                parent_chain: Vec::new(),
                             },
                         );
                     }
@@ -994,6 +1010,25 @@ impl HeavyWorker {
                     for (pid, state) in &throttle_map {
                         if let Some(p) = processes.get_mut(pid) {
                             p.throttled = *state;
+                        }
+                    }
+
+                    // v0.11 阶段 5：批量填 parent_chain（stage-5.md 任务 1）。
+                    // 先 collect 所有 chain 到独立 HashMap（不可变借用结束后再
+                    // iter_mut 写入，绕开 Rust 借用规则）。防循环 + 32 层上限
+                    // 由 `build_parent_chain` 内部保证。
+                    let pid_to_chain: HashMap<u32, Vec<(u32, String)>> = processes
+                        .keys()
+                        .map(|&pid| {
+                            (
+                                pid,
+                                crate::security::lineage::build_parent_chain(pid, &processes),
+                            )
+                        })
+                        .collect();
+                    for (pid, proc) in processes.iter_mut() {
+                        if let Some(chain) = pid_to_chain.get(pid) {
+                            proc.parent_chain = chain.clone();
                         }
                     }
 

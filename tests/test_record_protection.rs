@@ -179,6 +179,8 @@ fn detail_v_key_blocked_during_recording() {
         run_time: 0,
         name_lower: std::sync::Arc::from("self"),
         throttled: proc::throttle::EcoQoSState::default(),
+        signature_status: proc::security::SignatureStatus::default(),
+        parent_chain: Vec::new(),
     };
     app.inspector.detail_process = Some(proc.clone());
     app.inspector.inspection_data = Some(inspect::inspect(pid));

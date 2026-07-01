@@ -7,7 +7,121 @@
 
 ## [Unreleased]
 
-下次 cycle（v0.11.0+）的工作面：候选方向见 stage 4 doc 末尾「v0.10.0 完工后」段（Linux rootless ebpf / Windows TLS keylog / FilterExpr v2 / worker restart）。
+下次 cycle（v0.12.0+）的工作面：候选方向见下方 v0.11.0 段末尾「下一步候选」+ tech-debt v0.11 REVIEW-13 P2 归档（TD-23+）。
+
+## [0.11.0] - 2026-07-01
+
+v0.11.0 cycle 围绕 **TD-4 真正实装**（worker panic 后指数退避热恢复，v0.6 起长期挂账）+ **DNS ETW 替代 PowerShell probe**（CPU 3-5% → < 0.5%，延迟 500ms-1s → < 50ms）+ **FilterExpr v2 网络字段**（`sni/dns_name/remote_addr/...`）+ **进程签名验证 R16**（WinVerifyTrust）+ **进程父子链 R17**（macro attack 检测）+ **可疑启动路径 R18**（malware LOLBAS 模式）六条线，分 8 阶段推进（stage 1-6 实现 / stage 7 review / stage 8 收尾）。**全量回归 1146 passed / 0 failed / 3 ignored**（v0.10.0 基线 959 → +187：v0.11 cycle 阶段 1-6 新增 6 个 test_* 文件 89 case + 模块内嵌单元测试数十个 + 阶段 8 P1 修复 +4 contains_process_field + signature cfg-gate 覆盖）；0 个新依赖进默认依赖图（windows-rs `Win32_System_Diagnostics_Etw` + `Win32_Security_WinTrust` + `Win32_Security_Cryptography` feature 复用既有 windows-rs 依赖）。
+
+**已知限制（必须在 release notes 显式标注）**：
+- **Win10 < 1809**：Schannel event 1793 不 fire（延续 v0.10.0 已知限制，TD-20）；worker 启动成功但 UI 显示 0 条 Schannel flow。
+- **Worker restart 3 次失败后仍永久死亡**：v0.11 阶段 1 落地指数退避（5s/30s/5min）+ MAX_RETRIES=3 止损；持续 panic 后仍需重启 proc（catch_unwind + crash report 路径不变）。
+- **DNS ETW 仅 Windows 管理员启用**：非管理员降级到 PowerShell fallback（v0.5.0 路径保留）；其他平台无 DNS 日志采集。
+- **Linux ebpf 编译路径未在本机验证**（TD-19 延续）：v0.8.0 / v0.10.0 cycle stage 1 主动推迟到 v0.12.0+ cycle 启动前再评估；本 v0.11 cycle 不依赖 ebpf 路径，继续推迟。
+
+### 阶段 8 — REVIEW-13 P1 修复 + 定稿 + tag v0.11.0（本次发布）
+
+> 本次发布 commit：Cargo.toml 0.10.0 → 0.11.0；CHANGELOG / README / CONTEXT 同步 v0.11.0；8 个 stage doc 头部加 ✅ 已发布标记；REVIEW-13 P0/P1/P2 状态闭环；tech-debt TD-4 标 Fixed；新增 TD-23+（P2 归档）。
+
+- Docs: **`docs/reviews/REVIEW-13.md`**（已存在，stage 7 产出）— v0.11.0 cycle 全局 review 报告。审查覆盖 stage 1-6 全部产出（代码质量 / 架构 / 安全 / 跨平台 / 性能 / 完整性 7 子项），分级 **P0 0 / P1 4 / P2 15**。无阻断问题（基线 1141 passed + fmt/clippy/no-default-features build 全通过）；P1 集中在 UX / 跨平台一致性 / 文档完整性，不影响核心功能。
+- Fix: **REVIEW-13 P1-1（DNS ETW callback 跨 FFI panic UB）** — `src/dns_log/etw.rs::dns_event_callback` 整段 parse + push 包 `std::panic::catch_unwind(AssertUnwindSafe(...))`，避免 panic 跨 `extern "system"` 边界 UB；`accum.lock().expect(...)` 改 `if let Ok(mut acc) = accum.lock()` 防 Mutex poison panic。与 v0.6 阶段 3 worker.rs::run_poll_loop catch_unwind 同款原则——best-effort drop event 而非 propagate panic。
+- Fix: **REVIEW-13 P1-2（CLI flows filter process 字段静默无输出）** — `src/cli/flows.rs::run_flows` parse 成功后调 `FilterExpr::contains_process_field()` 检测；纯 process 字段表达式（如 `cpu > 5` / `name = chrome`）在 Flow 视图（apply_network ctx）下永远 false，用户写后所有 flow 被过滤掉。检测到则打印 warn 提示「Flow 字段：sni/dns_name/remote_addr/...，详见 ADR-0011」+ 退出 1。`src/filter/mod.rs` 新增 `contains_process_field` 递归方法 + 5 个 unit test 覆盖纯 process / 纯 network / 混合 And / NetworkIn / Not 各场景。TUI 同款 UX 缺口留 TD 归档（需更深状态机协调）。
+- Fix: **REVIEW-13 P1-3（非 Windows 所有进程因 Unknown 扣 5 分）** — `src/security/signature.rs::signature_risk_factor(SignatureStatus::Unknown)` 加 `#[cfg(target_os="windows")]` / `#[cfg(not(...))]` 分支：Windows 上保持扣 5 分（非管理员降级行为，ADR-0021 设计），非 Windows 返 `None`（Linux/macOS 没有 WinVerifyTrust 概念，所有进程都返 Unknown 扣分会全部标红）。同时把 `_ => None` 通配符改为显式 `SignatureStatus::Trusted => None`（合并 P2-15），让未来加新 SignatureStatus 变体时编译器强制穷尽 match。`tests/test_signature.rs::signature_risk_factor_unknown_deducts_5_on_windows` + `tests/test_security.rs::test_signature_unknown_deducts` 双 cfg-gate 分支同步更新。
+- Fix: **REVIEW-13 P1-4（6 个 stage docs 头部缺 ✅ 已发布标记 + stage-7.md 「4 个」笔误）** — `docs/stages/v0.11-stage-{1..8}.md` 全部头部加 `> ✅ **已完成**（v0.11.0 阶段 N 会话产出，2026-06-29 / 2026-06-30 / 2026-07-01）` 标记；`docs/stages/v0.11-stage-7.md` 第 56 行「4 个 stage docs（v0.11-stage-1~6）」改「6 个 stage docs（v0.11-stage-1~6）」。
+- Docs: tech-debt.md 加 v0.12.0+ 候选段（TD-23 ~ TD-37 = REVIEW-13 P2-1 ~ P2-15 归档）；TD-4 ✅ Fixed in v0.11.0 阶段 1 标记保持；ADR-0019 / 0020 / 0021 三条新 ADR（Accepted）；README banner 加 v0.11.0 段 + 平台支持表 DNS / 签名 / 安全评分三行更新。
+- Release: `git tag -a v0.11.0 -m "v0.11.0：worker restart + DNS ETW + FilterExpr v2 + 签名验证 R16 + 父子链 R17 + 可疑路径 R18"` 已打（等用户确认后 push）。
+
+### 阶段 7 — 全局 Review
+
+> 独立会话产出：`docs/reviews/REVIEW-13.md`。本阶段不动任何代码，仅做 review + 出具结构化问题清单。
+
+- Docs: **`docs/reviews/REVIEW-13.md`**（新）— v0.11.0 cycle 全局 review 报告。**P0 0 / P1 4 / P2 15**。覆盖矩阵按 stage 7 doc 任务清单 7 子项（基线 / 代码质量 / 架构 / 安全 / 跨平台 / 性能 / 完整性）。验收对照表确认 stage 1-6 全部交付，无未交付项。P1 集中在：(1) DNS ETW callback 跨 FFI panic UB；(2) FilterExpr UX 反直觉（Flow 视图写 process 字段静默无输出）；(3) 非 Windows signature_risk_factor 扣分；(4) 6 个 stage docs 头部缺 ✅ 标记 + stage-7.md 笔误。P2 15 项归档到 tech-debt v0.12.0+ 候选段。
+
+### 阶段 6 — R18 可疑启动路径 + R16+R18 协同扣分
+
+> `src/security/path_rules.rs`（新）+ `src/security/score.rs` 第 18 步接入；R18 与 v0.6 path_check 叠加扣分（surgical 原则）；用户可通过 `path_rules.toml` 标记自家应用可疑目录。
+
+- Added: **R18 落地** — `src/security/path_rules.rs`（新 ~470 行）实装 `expand_user_dir` + `UserDirs::from_env`（环境变量一次性展开缓存）+ `is_in_suspicious_path`（**前缀匹配 + 路径分隔符**——避免 `C:\Temp` 误判 `C:\Tempx`）+ `SuspiciousPathKind` 5 变体（Temp 20 / AppData / LocalAppData / UserProfileDownloads 各 15 / Custom）+ `PathRule` / `path_rules.toml` 解析（支持 `%VAR%` / `${VAR}` / `$VAR` 占位符）+ `check_path_risk`。
+- Added: **R16+R18 协同扣分** — `src/security/score.rs` 第 18 步接入；`SecurityScorer` 加 `user_dirs` + `path_rules` 字段构造时一次性加载；抽出 `r18_cooperation_factor` 纯函数（pub(crate)）决策 R16 + R18 协同扣 10 分（Unsigned/Revoked + 可疑路径同时命中），让单元测试能直接验证状态机（score 函数内 verify_signature 无法注入 mock）。
+- Added: **UI 显示** — `src/tui/detail_view.rs::draw_summary` 加 R18 命中橙色警告 + 「可执行」行追加 `[⚠ 可疑位置]` 标记。
+- Added: **`tests/test_path_rules.rs`**（新）9 case：Temp/AppData/LocalAppData/Downloads 扣分 / 系统目录不命中 / 大小写不敏感 / env 全 None / R18 + path_check 叠加 / 缓存一致。
+- Docs: CONTEXT.md 加 `SuspiciousPathKind` / `UserDirs` / `is_in_suspicious_path` / `PathRule` / `R18` 5 个新术语 + 演进历史加 v0.11.0 阶段 6 行；README FAQ 加 R18 误报排查一条。
+
+### 阶段 5 — 进程父子链 + R17 可疑父子链
+
+> `src/security/lineage.rs`（新）+ `ProcessInfo.parent_chain` 字段填实（阶段 1 仅骨架）；R17 与 v0.7 `office_spawning_shell` 叠加扣分（surgical 原则）。
+
+- Added: **build_parent_chain** — `src/security/lineage.rs`（新 ~370 行）实装防循环 visited HashSet + 32 层 `MAX_PARENT_CHAIN_DEPTH` 上限。HeavyWorker 全量构造 ProcessInfo 后批量调一次（先 collect 到独立 HashMap 再 iter_mut 绕 Rust 借用规则）。
+- Added: **SuspiciousPattern + detect_suspicious_chain** — 4 变体 enum：`OfficeToShell`（扣 35）/ `BrowserToShell`（扣 25）/ `ScriptInterpreter`（扣 15）/ `Custom`。判定规则：ScriptInterpreter 不看祖先（仅当前进程名命中即扣）；OfficeToShell / BrowserToShell **只看直接父**（chain[0]），间接祖先不算典型 macro attack 链（避免误报）。
+- Added: **LineageRule / lineage_rules.toml** — 用户自定义 R17 规则配置：TOML 格式 `[[rule]] name / parent_pattern / child_pattern / weight`（weight 缺省 20）。默认不存在 → 空 Vec；解析失败 / regex 编译失败 → 静默降级为空（tracing::warn）。
+- Added: **R17 规则** — `src/security/score.rs::SecurityScorer::score` 第 17 步接入 `check_lineage_risk(slice::from_ref(proc), &self.lineage_rules)`；`SecurityScorer` 加 `lineage_rules` 字段构造时一次性加载。
+- Added: **UI 显示** — `src/tui/detail_view.rs::draw_summary` Summary 顶部 R17 命中红色警告 + 「父进程」行升级为 `{name} ({pid})` + 「祖父进程链」一行展示。
+- Added: **`tests/test_lineage.rs`**（新）10 case：3 档扣分 / 不命中场景 / serde round-trip / 缺字段默认空 Vec / 缓存保留。
+- Docs: CONTEXT.md 加 `build_parent_chain` / `SuspiciousPattern` / `detect_suspicious_chain` / `LineageRule` / `R17` 5 个新术语 + 演进历史加 v0.11.0 阶段 5 行；README FAQ 加 R17 误报排查一条。
+
+### 阶段 4 — 进程签名验证 + R16
+
+> ADR-0021 落地；6 状态机（Pending/Trusted/Signed/Unsigned/Revoked/Unknown）替代 stage-4.md 原方案 4 状态机；BackgroundScorer poll 后反向同步 ProcessInfo.signature_status；`proc ls --filter 'security_score < 80'` 验证未签名进程扣分。
+
+- Added: **ADR-0021 进程签名验证** — `docs/adr/0021-process-signature-verification.md`（新）。Status Accepted。决策：`WinVerifyTrust` + 6 状态机 + HashReputation SHA-256 内容寻址缓存（v0.6 已落地，复用）+ BackgroundScorer 异步集成。stage-4.md 原方案的 4 状态机 + R16 第 16 步 + 路径键 SignatureCache 落地为更优的 6 状态机 + 第 1 步接入（v0.6 已落地）+ HashReputation——不重复实装缓存路径，保留与现有数据流的兼容。
+- Added: **from_wintrust_result / verify_signature_with_policy** — `pub fn from_wintrust_result(result: i32) -> SignatureStatus` pure function 把 `WinVerifyTrust` 返回的 HRESULT 映射（0 → Signed / TRUST_E_SUBJECT_NOT_SIGNED → Unsigned / CRYPT_E_REVOKED → Revoked / 其他 → Unknown）。`pub(crate) fn verify_signature_with_policy(exe_path, policy_override: Option<i32>)` 是内部可注入入口：`None` 走真实 WinVerifyTrust，`Some(hresult)` 走 mock 路径（不读文件，跨平台可测）。
+- Added: **SignatureStatus::badge** — 进程列表 name 后追加 emoji：Trusted 🔒 / Unsigned|Revoked ⚠️ / Unknown ❓ / Pending|Signed 空串（避免列宽波动，与 v0.7 EcoQoS 🍃 同款规则）。
+- Added: **App::tick_heavy poll BackgroundScorer 反向同步** — poll_results 拿到 Some(scores) 后，调 `Arc::make_mut(&mut self.cached_processes)` 拿可变引用，对每个 proc 若 `scores[proc.pid].signature != proc.signature_status` 则更新。这让 UI 显示的 signature_status 字段与最新评分结果保持一致。
+- Added: **`tests/test_signature.rs`**（新）24 case：状态机 / 风险因子 / badge / serde / 缺字段默认 Pending / is_trusted_signer / 跨平台 stub。
+- Docs: CONTEXT.md 加 `SignatureStatus 6 状态机` / `from_wintrust_result` / `SignatureStatus::badge` / `App::poll BackgroundScorer 反向同步` 4 个新术语 + 演进历史加 v0.11.0 阶段 4 行；README FAQ 加签名 emoji + 显示 Untrusted 排查两条。
+
+### 阶段 3 — FilterExpr v2 网络字段接入
+
+> ADR-0011 v0.11 阶段 3 增量；NetworkField 与 ProcessField 平级分离（作用对象不同）；CLI `proc flows --filter '<expr>'` + TUI Flow 子视图（`F` 进入）享有同款 FilterExpr UX。
+
+- Added: **FilterExpr v2 / NetworkField** — AST 扩出网络字段分支：新枚举 `NetworkField`（`Sni` / `DnsName` / `RemoteAddr` / `RemotePort` / `BytesOut` / `BytesIn` / `Source`）+ `FilterExpr` 三个新变体 `NetworkFieldCmp` / `NetworkRegex` / `NetworkIn`。与 v0.7 `Field`（process 系）**平级分离**：NetworkField 作用于 `&ProcessFlow`，作用对象不同不能合并。
+- Added: **NetworkEvalCtx** — FilterExpr 的 Flow view 求值上下文，与 `EvalCtx`（持 `&ProcessInfo`）平级。`FilterExpr::apply_network(&NetworkEvalCtx) -> bool` 是执行入口，与 `apply` 对称。让类型系统保证字段不会跨 ctx 误用。
+- Added: **`in` 操作符**（NetworkField 独有）— Parser 走新 `parse_in_list`；process 字段暂不支持（surgical：仅在 Flow 视图要求）。
+- Added: **PortPanel.flow_search** — PortPanel 加 `flow_search: SearchState` 字段，Flow 子视图（按 `F` 进入）享有与 List / Tree / AppGroup 视图同款搜索 UI：`/` 激活 substring 模式 / `:` 激活 FilterExpr 模式。`flow_filtered_indices(flows) -> Vec<usize>` 按 mode 分支返回可见索引。
+- Added: **CLI `proc flows --filter '<expr>'`** — 接入同款 parser；PanelContext 加 `flows` 字段让 PortPanel handle_key 拿到 flow 切片。
+- Added: **`tests/test_filter_expr_v2.rs`**（新）25 case：Parser 解析各网络字段语法 / apply_network 各变体求值 / 跨 ctx 隔离 / 跨 ctx 不命中 / And/Or/Not 组合。
+- Docs: ADR-0011 加 v0.11 阶段 3 增量段；CONTEXT.md 加 `FilterExpr v2 / NetworkField` / `NetworkEvalCtx` / `PortPanel.flow_search` 3 个新术语 + 演进历史加 v0.11.0 阶段 3 行。
+
+### 阶段 2 — DNS ETW 替代 PowerShell probe
+
+> ADR-0020 落地；CPU 3-5% → < 0.5%；延迟 500ms-1s → < 50ms；漏抓高频 → 100% 抓；`proc diag` 输出 collector 类型让 bug report 自带上下文。
+
+- Added: **ADR-0020 DNS ETW provider** — `docs/adr/0020-dns-etw-provider.md`（新）。Status Accepted。决策：手写 windows-rs ETW（`Win32::System::Diagnostics::Etw`）开 `Microsoft-Windows-DNS-Client` session（provider GUID `{1C95126E-7EEA-49A9-A3FE-A9FB58F46014}`）+ `EnableTraceEx2` + `OpenTraceW` + `ProcessTrace` + `EventRecordCallback`。event 3008 (`QueryResponseEx`) / 3010 (`QueryCompletedEx`) 都抓保证完整性。callback fast-filter + TDH 动态 schema 按 property name 找 `QueryName` / `QueryType` / `QueryStatus` / `QueryResults`。
+- Added: **EtwDnsCollector** — `src/dns_log/etw.rs`（新 ~470 行）实装 ETW collector。callback fast-filter `event_id == 3008 || event_id == 3010` → TDH 动态 schema 解析 → 构造 `DnsQuery`。`drain()` impl `DnsLogCollector` trait，与 `PowershellDnsCollector` 同接口。PID 来自 `EVENT_HEADER.ProcessId`（用户态 provider 自带）。失败模式：非管理员 / StartTraceW 失败 / EnableTraceEx2 失败 / x86 → `Err` 让 `detect_collector` fallback PowerShell。**仅 Windows + x64 编译**（cfg-gate）。
+- Added: **DnsCollectorKind** — `WorkerManager::dns_collector_kind: DnsCollectorKind` 字段值。Copy enum 三态：`Etw` / `PowerShell` / `None`。`#[serde(rename_all="lowercase")]` 序列化为 `"etw"` / `"powershell"` / `"none"`。`detect_collector()` 返回 `(Option<Box<dyn DnsLogCollector>>, DnsCollectorKind)` tuple。
+- Added: **proc diag 输出 dns_collector** — `src/cli/diag.rs` human-readable 末尾追加 `dns_collector: <kind>` 行；JSON 模式 P2-1（REVIEW-13）归档到 TD-23 候选补。
+- Added: **`tests/test_dns_etw.rs`**（新）7 case：跨平台 DnsCollectorKind enum 契约 / detect_collector tuple 自洽 / Windows admin 端到端验证（admin 跑 Resolve-DnsName example.com 验证采到 DNS-Client event）。
+- Docs: CONTEXT.md 加 `EtwDnsCollector` / `DnsCollectorKind` / `DNS-Client ETW provider GUID` 3 个新术语 + 演进历史加 v0.11.0 阶段 2 行；ADR-0020 新。
+
+### 阶段 1 — Worker Restart（TD-4 真正实装）+ ProcessInfo 字段骨架
+
+> ADR-0019 落地；TD-4 长期挂账清零；指数退避（5s/30s/5min）+ MAX_RETRIES=3 止损 + RESET_WINDOW=1h reset；ProcessInfo 加 `signature_status` + `parent_chain` 字段骨架锁定阶段 4 / 5 契约。
+
+- Added: **ADR-0019 Worker Restart Policy** — `docs/adr/0019-worker-restart-policy.md`（新）。Status Accepted。决策：指数退避（`backoff_for(retry_count)` = 5s / 30s / 5min）+ `MAX_RETRIES=3` 后永久失败；`RESET_WINDOW=1h` 上次成功 spawn 距今 ≥ 1h 且 retry_count > 0 时归零。不在 ebpf_worker 路径（Linux-only）。
+- Added: **WorkerManager::restart API** — `restart(name, now, crash_tx) -> bool` 记录 crash + 触发指数退避 respawn 决策；`restart_tick(now, crash_tx)` 每 1s 检查 backoff 到期；`restart_status(name, now)` 给 banner 用；`restart_history: HashMap<&'static str, RestartState>` 字段记录每个 worker 的状态机。`spawn_one` match thread_name 字面量调对应 spawn 入口。
+- Added: **RestartState / RestartStatus** — `RestartState` 纯状态机（`retry_count` / `last_crash` / `last_restart` / `last_reset`）。方法：`record_crash(now)` / `decide_restart(now) -> Option<()>` / `on_respawned(now)`。`RestartStatus` banner 渲染用状态枚举（`Healthy` / `Restarting` / `Restarted` / `PermanentFailure`）。`from_state(&RestartState, now)` 纯函数。14 unit test 覆盖完整状态机。
+- Added: **App::poll_crashes 升级 + restart_tick** — drain `crash_rx` 时调 `workers.restart()`；`App::restart_tick` 每 1s 调一次。`App::crash_tx: Option<Sender<WorkerCrash>>` 字段保留 sender 副本让 respawn 的新 worker 仍能把后续 panic 推给主线程。
+- Added: **SignatureStatus 加 Pending 变体** — `src/security/signature.rs::SignatureStatus` 加 `Pending` 作为 `#[default]`（v0.6 已有 Signed / Trusted / Unsigned / Revoked / Unknown 5 个）。`signature_risk_factor(Pending) = None`（不扣分，启动后头 1-2 个 heavy refresh 内全部 Pending）。
+- Added: **ProcessInfo 字段骨架** — 加 `pub signature_status: crate::security::SignatureStatus`（`#[serde(default)]`）+ `pub parent_chain: Vec<(u32, String)>`（`#[serde(default)]`）。5 处 src 内构造点 + 16 处 tests 构造点同步加 `signature_status: SignatureStatus::Pending` + `parent_chain: Vec::new()`。
+- Added: **crash banner 升级** — `src/tui/layout.rs::draw_crash_banner` 升级支持三态（restarting / restarted / permanent failure）；`restart_label_for` + `restart_style_for` 把 RestartStatus 转成 banner 文案 + 颜色。
+- Added: **`tests/test_worker_restart.rs`**（新）12 case：端到端 + 真实 spawn → panic 路径覆盖。
+- Docs: tech-debt TD-4 标 ✅ Fixed in v0.11.0 阶段 1（真正实装）；CONTEXT.md 加 `WorkerRestartPolicy` / `RestartState` / `RestartStatus` / `ProcessInfo.signature_status` / `ProcessInfo.parent_chain` / `App::crash_tx` 6 个新术语 + 演进历史加 v0.11.0 阶段 1 行；ADR-0019 新。
+
+**v0.11.0 cycle 摘要**：
+- 阶段 1：Worker Restart（TD-4 Fixed）+ ProcessInfo 字段骨架
+- 阶段 2：DNS ETW 替代 PowerShell probe（CPU 3-5% → < 0.5%）
+- 阶段 3：FilterExpr v2 网络字段（sni/dns_name/remote_addr/...）
+- 阶段 4：进程签名验证 + R16（6 状态机 + BackgroundScorer 反向同步）
+- 阶段 5：进程父子链 + R17（macro attack 检测）
+- 阶段 6：可疑路径 R18（LOLBAS 模式 + R16 协同扣分）
+- 阶段 7：全局 Review（P0 0 / P1 4 / P2 15）
+- 阶段 8：批量修复 + tag v0.11.0
+
+**下一步候选（v0.12.0+）**：
+- TD-17 eBPF TLS SNI / JA4（Linux 真机环境依赖）
+- TD-19 eBPF Linux 真实编译验证
+- TD-23 ~ TD-37（v0.11 REVIEW-13 P2 归档 15 项）
+- 新方向：参考 v0.10-stage-4.md 末尾候选 + v0.11 cycle 期间发现的可扩展点
 
 ## [0.10.0] - 2026-06-28
 

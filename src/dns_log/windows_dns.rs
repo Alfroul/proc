@@ -1,5 +1,19 @@
 //! Windows DNS 查询日志：PowerShell `Get-WinEvent` 子进程路线。
 //!
+//! # v0.11 阶段 2 后退为 fallback
+//!
+//! **主路径已切换到 ETW**（[`crate::dns_log::etw::EtwDnsCollector`]，对应
+//! [ADR-0020](../../docs/adr/0020-dns-etw-provider.md)）。本文件保留作 fallback：
+//! [`crate::dns_log::detect_collector`] 先尝试 ETW → 失败时回退到本文件的
+//! [`PowershellDnsCollector`]。fallback 触发场景：
+//! - 非管理员（ETW real-time session 需 admin）
+//! - `StartTraceW` 失败（session name 占用 / Win10 早期版本）
+//! - `EnableTraceEx2` 失败（DNS-Client service 未启动）
+//! - x86 (32-bit) Windows（cfg-gate 拒绝）
+//!
+//! `proc diag` 输出的 `dns_collector` 字段值反映当前使用的 collector
+//! （`etw` / `powershell` / `none`）。
+//!
 //! # 数据流
 //!
 //! 1. spawn `powershell.exe -NoProfile -NonInteractive -Command <SCRIPT>`，
@@ -30,6 +44,7 @@
 //!   worker 不启动，UI 显示空列表（不阻塞其它功能）
 //! - PowerShell 启动延迟 ~300ms；首次 `Get-WinEvent` 查询历史 ~200ms；
 //!   后续轮询 ~10-50ms（filter hashtable 走 ETL 索引）
+//! - **CPU 持续占 3-5%**（v0.11 阶段 2 切 ETW 主路径的主要动机，详见 ADR-0020）
 //!
 //! # 选型说明
 //!
@@ -40,7 +55,9 @@
 //!   [`crate::net_flow::nethogs`]），~150 行代码即可覆盖；
 //! - CPU 开销在 ~10 events/sec DNS 查询频率下可忽略。
 //!
-//! 详见 `docs/adr/0006-dns-subprocess-not-etw-dbus.md`。
+//! v0.11 阶段 2 反转：CPU 开销在高频 DNS 查询场景（浏览器并发抓取数十个 subresource）
+//! 不可忽略，落地 ETW 主路径。详见 `docs/adr/0020-dns-etw-provider.md`。
+//! 原始 PowerShell 路线决策历史见 `docs/adr/0006-dns-subprocess-not-etw-dbus.md`。
 
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
@@ -157,14 +174,19 @@ fn unix_millis_to_system_time(ms: i64) -> Option<SystemTime> {
 /// 阶段 11 P1-A5/D4：cache value 含 start_time。每次 lookup 先查 sysinfo 当前
 /// `Process::start_time()`，若与 cache 里的不一致 → PID 被复用 → 重查并更新
 /// cache，让 reader_loop 拿到正确的 (name, start_time) 填到 DnsQuery。
-struct PidNameLookup {
+///
+/// v0.11 阶段 2：从 `windows_dns.rs` private 提升为 `pub(crate)`——
+/// [`crate::dns_log::etw::EtwDnsCollector`] 复用同款 PID lookup 逻辑（drain 时
+/// 在 worker 线程填 process_name/start_time）。两个 collector 各自持一份独立
+/// 实例（cache 不共享），避免 mutex 开销。
+pub(crate) struct PidNameLookup {
     sys: sysinfo::System,
     last_refresh: Instant,
     cache: std::collections::HashMap<u32, (String, u64)>,
 }
 
 impl PidNameLookup {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut sys = sysinfo::System::new();
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,
@@ -181,7 +203,7 @@ impl PidNameLookup {
     /// 返回 (process_name, start_time)。PID 不存在时返回 ("?", 0)。
     /// cache 命中且 start_time 与 sysinfo 当前值一致 → 直接返回；
     /// 否则重查并更新 cache。
-    fn lookup(&mut self, pid: u32) -> (String, u64) {
+    pub(crate) fn lookup(&mut self, pid: u32) -> (String, u64) {
         // sysinfo Process::start_time() 是 O(1) HashMap 查询（不 refresh）。
         let current_st = self
             .sys

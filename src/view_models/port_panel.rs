@@ -100,6 +100,11 @@ pub struct PortPanel {
     pub flow_view_active: bool,
     pub flow_cursor: usize,
     pub flow_scroll: usize,
+    /// v0.11 阶段 3：Flow 子视图搜索框（与 List view / DNS 子视图同款 SearchState）。
+    /// `/` 激活 substring 模式；`:` 激活 FilterExpr 模式（作用于 ProcessFlow
+    /// 字段：sni / dns_name / remote_addr / remote_port / bytes_out / bytes_in /
+    /// source）。详见 ADR-0011 v0.11 阶段 3 增量段。
+    pub flow_search: crate::search::SearchState,
 }
 
 /// DNS 子视图列表行数（每行一条 DnsQuery）。filtered = 搜索过滤后剩余条数。
@@ -199,6 +204,7 @@ impl PortPanel {
             flow_view_active: false,
             flow_cursor: 0,
             flow_scroll: 0,
+            flow_search: crate::search::SearchState::new(),
         }
     }
 
@@ -709,12 +715,36 @@ impl PortPanel {
     }
 
     /// v0.7 阶段 8：Flow 子视图按键处理（ADR-0016）。
-    /// 简化版 MVP：只支持光标移动 + Esc/F 退出，无搜索（DNS 子视图的搜索
-    /// 列可在 Part B 复用 `dns_search` 模式加，目前 flows 通常很少 ≤ 50 条）。
-    fn handle_flow_view_key(&mut self, key: KeyEvent) -> KeyResult {
+    /// v0.11 阶段 3：加搜索支持（`/` substring + `:` FilterExpr），与 List view 同款。
+    fn handle_flow_view_key(
+        &mut self,
+        key: KeyEvent,
+        flows: &[crate::ebpf::flow::ProcessFlow],
+    ) -> KeyResult {
+        // 搜索激活时优先消费
+        if self.flow_search.is_active() {
+            if self.flow_search.handle_input(key) {
+                self.flow_cursor = 0;
+                self.flow_scroll = 0;
+            }
+            return KeyResult::Consumed;
+        }
+
+        let total = self.flow_filtered_indices(flows).len();
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('F') => {
                 self.flow_view_active = false;
+                self.flow_search.clear();
+                KeyResult::Consumed
+            }
+            KeyCode::Char('/') => {
+                self.flow_search.activate_substring();
+                KeyResult::Consumed
+            }
+            // v0.11 阶段 3：`:` 激活 FilterExpr 模式（与 List / Tree / AppGroup 同款）。
+            KeyCode::Char(':') => {
+                self.flow_search.activate_filter_expr();
                 KeyResult::Consumed
             }
             KeyCode::Up => {
@@ -738,11 +768,57 @@ impl PortPanel {
                 KeyResult::Consumed
             }
             KeyCode::End => {
-                // End 需要总数；用 saturating_add(usize::MAX / 2) 让 clamp 处理。
-                self.flow_cursor = self.flow_cursor.saturating_add(usize::MAX / 2);
+                if total > 0 {
+                    self.flow_cursor = total - 1;
+                }
                 KeyResult::Consumed
             }
             _ => KeyResult::Ignored,
+        }
+    }
+
+    /// Flow 子视图当前可见条目的索引列表（按搜索 / FilterExpr 过滤）。
+    /// Substring 模式：sni / dns_name / comm / remote_addr 任一含 query（忽略大小写）。
+    /// FilterExpr 模式：走 [`crate::filter::FilterExpr::apply_network`]，作用于
+    /// ProcessFlow 字段（sni / dns_name / remote_addr / remote_port / bytes_out /
+    /// bytes_in / source）。parse 失败保留上一次成功 AST（与 List view 同款契约）。
+    pub fn flow_filtered_indices(&self, flows: &[crate::ebpf::flow::ProcessFlow]) -> Vec<usize> {
+        match self.flow_search.mode {
+            crate::search::QueryMode::Substring => {
+                let q = self.flow_search.query().trim().to_lowercase();
+                if q.is_empty() {
+                    return (0..flows.len()).collect();
+                }
+                flows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| {
+                        let name = f
+                            .sni
+                            .clone()
+                            .or_else(|| f.dns_name.clone())
+                            .unwrap_or_default();
+                        name.to_lowercase().contains(&q)
+                            || f.comm.to_lowercase().contains(&q)
+                            || f.remote_addr.to_lowercase().contains(&q)
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
+            }
+            crate::search::QueryMode::FilterExpr => {
+                let Some(expr) = self.flow_search.filter_expr.as_ref() else {
+                    return (0..flows.len()).collect();
+                };
+                flows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| {
+                        let ctx = crate::filter::NetworkEvalCtx { flow: f };
+                        expr.apply_network(&ctx)
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
+            }
         }
     }
 
@@ -855,7 +931,7 @@ impl Panel for PortPanel {
 
         // v0.7 阶段 8 Flow 子视图：激活后接管所有按键（除 `F`/`Esc` 退出外）。
         if self.flow_view_active {
-            return self.handle_flow_view_key(key);
+            return self.handle_flow_view_key(key, ctx.flows);
         }
 
         // Anomaly detail overlay
@@ -883,6 +959,7 @@ impl Panel for PortPanel {
                 self.flow_view_active = true;
                 self.flow_cursor = 0;
                 self.flow_scroll = 0;
+                self.flow_search.clear();
                 return KeyResult::Consumed;
             }
             KeyCode::Char('q') => return KeyResult::Quit,

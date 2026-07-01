@@ -17,10 +17,11 @@ pub fn run_dns(tail: bool, since: Option<&str>) {
         return;
     }
 
-    let Some(collector) = crate::dns_log::detect_collector() else {
+    let (collector, _kind) = crate::dns_log::detect_collector();
+    let Some(collector) = collector else {
         eprintln!(
             "{}",
-            "DNS 日志采集在此平台不可用（Windows 走 PowerShell Get-WinEvent，其它见 ADR-0006）"
+            "DNS 日志采集在此平台不可用（Windows 走 ETW 主路径 / PowerShell fallback，其它见 ADR-0020）"
                 .yellow()
         );
         return;

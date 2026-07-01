@@ -65,7 +65,11 @@ pub fn run_subcommand(cmd: &Command) {
         Command::Smart { device } => smart::run_smart(device.as_deref()),
         Command::Dns { tail, since } => dns::run_dns(*tail, since.as_deref()),
         // v0.7 阶段 8：`proc flows` —— eBPF flow graph CLI 视图（ADR-0016）。
-        Command::Flows { limit, json } => flows::run_flows(*limit, *json),
+        Command::Flows {
+            limit,
+            json,
+            filter,
+        } => flows::run_flows(limit, *json, filter.as_deref()),
         Command::Record { output } => record::run_record(output),
         Command::Replay { file } => record::run_replay(file),
         Command::Export {

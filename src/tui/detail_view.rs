@@ -354,57 +354,142 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
             theme::style_normal(),
         )),
         Line::from(Span::raw("")),
-        Line::from(Span::styled(
-            format!("  分类:     {}", class.label()),
-            theme::style_normal(),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "  父进程:   {}",
-                proc.parent_pid
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "-".to_string())
-            ),
-            theme::style_normal(),
-        )),
-        Line::from(Span::styled(
-            format!("  状态:     {}", proc.status),
-            theme::style_normal(),
-        )),
-        Line::from(Span::styled(
-            format!("  CPU:      {:.1}%", proc.cpu_usage),
-            theme::style_normal(),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "  内存:     {} (物理) / {} (虚拟)",
-                format_bytes(proc.memory),
-                format_bytes(proc.virtual_memory)
-            ),
-            theme::style_normal(),
-        )),
-        Line::from(Span::styled(
-            format!("  磁盘:     读 {} / 写 {}", disk_read, disk_write),
-            theme::style_normal(),
-        )),
-        Line::from(Span::styled(
-            format!("  运行时长: {}h {}m {}s", hours, mins, secs),
-            theme::style_normal(),
-        )),
-        Line::from(Span::raw("")),
-        Line::from(Span::styled(
-            format!("  可执行:   {}", proc.exe.as_deref().unwrap_or("-")),
-            theme::style_normal(),
-        )),
-        Line::from(Span::styled(
-            format!("  命令行:   {}", proc.cmd.join(" ")),
-            theme::style_normal(),
-        )),
-        Line::from(Span::styled(
-            format!("  工作目录: {}", proc.cwd.as_deref().unwrap_or("-")),
-            theme::style_normal(),
-        )),
     ];
+
+    // v0.11 阶段 5：R17 可疑父子链命中时，Summary 顶部显示红色警告（stage-5.md
+    // 任务 4）。从 security_scores 拿当前 proc 的 risk factors，找 lineage 名
+    // （office_to_shell / browser_to_shell / script_interpreter / lineage_custom:*）。
+    // 没评分（启动后头 1-2 个 heavy refresh 内）→ 不显示，等 BackgroundScorer 跑完。
+    if let Some(score) = app.security_scores.get(&proc.pid) {
+        if let Some(risk) = score.factors.iter().find(|f| {
+            f.name == "office_to_shell"
+                || f.name == "browser_to_shell"
+                || f.name == "script_interpreter"
+                || f.name.starts_with("lineage_custom:")
+        }) {
+            let chain_text: String = proc
+                .parent_chain
+                .iter()
+                .map(|(_, n)| n.as_str())
+                .chain(std::iter::once(proc.name.as_ref()))
+                .collect::<Vec<_>>()
+                .join(" → ");
+            lines.push(Line::from(Span::styled(
+                format!("  ⚠ 可疑父子链：{}（{}）", chain_text, risk.description),
+                theme::style_danger(),
+            )));
+            lines.push(Line::from(Span::raw("")));
+        }
+    }
+
+    // v0.11 阶段 6：R18 可疑启动路径命中时，Summary 顶部显示橙色警告（stage-6.md
+    // 任务 4）。检查 suspicious_path_* 命名前缀（Temp/AppData/LocalAppData/
+    // Downloads/Custom:*）。协同扣分 unsigned_in_suspicious_path 单独显示一行
+    // 「未签名 + 可疑路径」强信号提示。
+    if let Some(score) = app.security_scores.get(&proc.pid) {
+        if let Some(risk) = score
+            .factors
+            .iter()
+            .find(|f| f.name.starts_with("suspicious_path_"))
+        {
+            lines.push(Line::from(Span::styled(
+                format!("  ⚠ 可疑启动路径：{}", risk.description),
+                theme::style_warning(),
+            )));
+            lines.push(Line::from(Span::raw("")));
+        }
+    }
+
+    // v0.11 阶段 5：父进程行从「只显示 PID」升级为「{name} ({pid})」（数据源
+    // 是 parent_chain[0]，比 parent_pid 字段更准——parent_chain 已由 HeavyWorker
+    // 拿全量 processes map 解析）。祖父链一行展示（stage-5.md 任务 4）。
+    let (parent_label, grandparent_chain_label) = if !proc.parent_chain.is_empty() {
+        let parent_entry = &proc.parent_chain[0];
+        let parent_label = format!("{} ({})", parent_entry.1, parent_entry.0);
+        let chain_label = proc.parent_chain[1..]
+            .iter()
+            .map(|(_, n)| n.as_str())
+            .collect::<Vec<_>>()
+            .join(" → ");
+        (parent_label, chain_label)
+    } else {
+        (
+            proc.parent_pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            String::new(),
+        )
+    };
+
+    lines.push(Line::from(Span::styled(
+        format!("  分类:     {}", class.label()),
+        theme::style_normal(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  父进程:   {}", parent_label),
+        theme::style_normal(),
+    )));
+    if !grandparent_chain_label.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  祖父进程链: {}", grandparent_chain_label),
+            theme::style_muted(),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        format!("  状态:     {}", proc.status),
+        theme::style_normal(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  CPU:      {:.1}%", proc.cpu_usage),
+        theme::style_normal(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  内存:     {} (物理) / {} (虚拟)",
+            format_bytes(proc.memory),
+            format_bytes(proc.virtual_memory)
+        ),
+        theme::style_normal(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  磁盘:     读 {} / 写 {}", disk_read, disk_write),
+        theme::style_normal(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  运行时长: {}h {}m {}s", hours, mins, secs),
+        theme::style_normal(),
+    )));
+    lines.push(Line::from(Span::raw("")));
+    // v0.11 阶段 6：可执行路径行追加 [⚠ 可疑位置] 标记（stage-6.md 任务 4）。
+    // R18 命中时（suspicious_path_* factor 存在）追加标记，否则纯路径。
+    let exe_path_label = proc.exe.as_deref().unwrap_or("-");
+    let suspicious_marker = app
+        .security_scores
+        .get(&proc.pid)
+        .and_then(|s| {
+            s.factors
+                .iter()
+                .find(|f| f.name.starts_with("suspicious_path_"))
+        })
+        .map(|_| "  [⚠ 可疑位置]")
+        .unwrap_or("");
+    let exe_line_style = if suspicious_marker.is_empty() {
+        theme::style_normal()
+    } else {
+        theme::style_warning()
+    };
+    lines.push(Line::from(Span::styled(
+        format!("  可执行:   {}{}", exe_path_label, suspicious_marker),
+        exe_line_style,
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  命令行:   {}", proc.cmd.join(" ")),
+        theme::style_normal(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  工作目录: {}", proc.cwd.as_deref().unwrap_or("-")),
+        theme::style_normal(),
+    )));
 
     // 阶段 11 P1-A3：从 App::detail_priority 缓存读（进入详情页 / `F5` 刷新 /
     // `+/-` 调整 / heavy tick 4 处更新），避免每帧 4 次 syscall（OpenProcess +
@@ -491,7 +576,19 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
 
         lines.push(Line::from(vec![
             Span::styled("  签名:     ", theme::style_muted()),
-            Span::styled(score.signature.to_string(), theme::style_normal()),
+            Span::styled(
+                // v0.11 阶段 4（ADR-0021）：优先显示 ProcessInfo.signature_status
+                // （App poll BackgroundScorer 后反向同步的最新值），而非 score.signature
+                // （可能过期一个 heavy refresh 周期）。Trusted 附加「微软/已知 CA」
+                // 标注，让用户能区分微软签名与第三方已知 CA 签名。
+                match proc.signature_status {
+                    crate::security::SignatureStatus::Trusted => {
+                        "受信签名 (微软/已知 CA)".to_string()
+                    }
+                    other => other.to_string(),
+                },
+                theme::style_normal(),
+            ),
         ]));
 
         if !score.factors.is_empty() {

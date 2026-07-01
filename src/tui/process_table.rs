@@ -83,7 +83,15 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             let cpu_str = format!("{:.1}", proc.cpu_usage);
             // v0.7 阶段 6：EcoQoS 🍃 标记（ADR-0014）。Eco 状态在 name 后追加，
             // Non-Eco 不渲染占位，避免列宽波动。
-            let name_str = format!("{}{}", proc.name, proc.throttled.badge());
+            // v0.11 阶段 4：签名状态 emoji（ADR-0021）。Trusted 🔒 / Unsigned|Revoked ⚠ /
+            // Unknown ❓ / Pending|Signed 空串（不渲染占位）。status 字段由 App 在 poll
+            // BackgroundScorer 结果后反向同步（src/app.rs::poll_background_scorer）。
+            let name_str = format!(
+                "{}{}{}",
+                proc.name,
+                proc.throttled.badge(),
+                proc.signature_status.badge(),
+            );
             let (_, total_mem) = app.snapshot.memory_usage();
             let mem_pct = if total_mem > 0 {
                 format!("{:.1}", proc.memory as f64 / total_mem as f64 * 100.0)

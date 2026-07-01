@@ -143,6 +143,8 @@ fn serde_round_trip_preserves_all_arc_fields() {
         // name_lower 不参与 round-trip（serde skip），由 heavy worker 重算。
         name_lower: Arc::from("chrome.exe"),
         throttled: proc::throttle::EcoQoSState::default(),
+        signature_status: proc::security::SignatureStatus::default(),
+        parent_chain: Vec::new(),
     };
 
     let json = serde_json::to_string(&info).expect("serialize");

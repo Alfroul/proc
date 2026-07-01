@@ -73,6 +73,9 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 /// 渲染 worker crash banner。每条 `WorkerCrash` 一行 + 底部一行「按 D 关闭」。
+///
+/// v0.11.0 阶段 1（ADR-0019）：每条 crash 查 `workers.restart_status(name, now)`
+/// 显示重启状态：restarting in Ns / restarted (retry #N) / permanent failure。
 fn draw_crash_banner(f: &mut Frame, app: &App) {
     use ratatui::text::Span;
     use ratatui::widgets::{Block, Borders, Paragraph};
@@ -89,6 +92,7 @@ fn draw_crash_banner(f: &mut Frame, app: &App) {
         ))
         .style(theme::style_danger());
 
+    let now = std::time::SystemTime::now();
     let mut lines: Vec<ratatui::text::Line> = Vec::new();
     for crash in crashes.iter().rev().take(5) {
         // rev + take 5：显示最近 5 条（active_crashes 已限 10 条上限）。
@@ -106,11 +110,19 @@ fn draw_crash_banner(f: &mut Frame, app: &App) {
         } else {
             crash.message.clone()
         };
-        lines.push(ratatui::text::Line::from(vec![
+        // v0.11.0 阶段 1：查 restart_status 显示重启状态。
+        let status = app.workers.restart_status(crash.worker, now);
+        let restart_label = restart_label_for(&status);
+        let restart_style = restart_style_for(&status);
+        let mut spans = vec![
             Span::styled(format!(" {} ", crash.worker), theme::style_warning()),
             Span::styled(format!("({time_str}) "), theme::style_muted()),
             Span::styled(msg, theme::style_normal()),
-        ]));
+        ];
+        if !restart_label.is_empty() {
+            spans.push(Span::styled(format!("  — {restart_label}"), restart_style));
+        }
+        lines.push(ratatui::text::Line::from(spans));
     }
     lines.push(ratatui::text::Line::from(""));
     lines.push(ratatui::text::Line::from(Span::styled(
@@ -119,6 +131,55 @@ fn draw_crash_banner(f: &mut Frame, app: &App) {
     )));
 
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// 把 [`crate::workers::RestartStatus`] 转成 banner 显示文案。
+fn restart_label_for(status: &crate::workers::RestartStatus) -> String {
+    use crate::workers::RestartStatus;
+    match status {
+        RestartStatus::Healthy => String::new(),
+        RestartStatus::Restarting {
+            retry_count,
+            remaining_secs,
+        } => {
+            if *remaining_secs == 0 {
+                format!("即将重启 (retry #{})", retry_count + 1)
+            } else if *remaining_secs >= 60 {
+                format!(
+                    "{}min 后重启 (retry #{})",
+                    remaining_secs / 60,
+                    retry_count + 1
+                )
+            } else {
+                format!("{}s 后重启 (retry #{})", remaining_secs, retry_count + 1)
+            }
+        }
+        RestartStatus::Restarted {
+            retry_count,
+            elapsed_secs,
+        } => {
+            // 3 秒内显示「已重启」反馈，之后淡出（返回空 → banner 不显示状态）。
+            if *elapsed_secs <= 3 {
+                format!("✓ 已重启 (retry #{retry_count})")
+            } else {
+                String::new()
+            }
+        }
+        RestartStatus::PermanentFailure { retry_count } => {
+            format!("✗ 永久失败（已重试 {retry_count} 次，请重启 proc）")
+        }
+    }
+}
+
+/// 选 banner 重启状态的颜色：Restarting / PermanentFailure 用 danger，
+/// Restarted 用 success 风格（绿色），Healthy / 空标签用 normal。
+fn restart_style_for(status: &crate::workers::RestartStatus) -> ratatui::style::Style {
+    use crate::workers::RestartStatus;
+    match status {
+        RestartStatus::Restarted { .. } => theme::style_success(),
+        RestartStatus::PermanentFailure { .. } => theme::style_danger(),
+        _ => theme::style_normal(),
+    }
 }
 
 fn draw_toolbar(f: &mut Frame, app: &App, area: Rect) {

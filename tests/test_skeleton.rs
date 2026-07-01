@@ -253,6 +253,8 @@ fn test_process_info_construction() {
         run_time: 500,
         name_lower: std::sync::Arc::from("test.exe"),
         throttled: proc::throttle::EcoQoSState::default(),
+        signature_status: proc::security::SignatureStatus::default(),
+        parent_chain: Vec::new(),
     };
     assert_eq!(info.pid, 1234);
     assert_eq!(info.name.as_ref(), "test.exe");
@@ -499,6 +501,8 @@ fn test_security_scorer_returns_100() {
         run_time: 0,
         name_lower: std::sync::Arc::from("test.exe"),
         throttled: proc::throttle::EcoQoSState::default(),
+        signature_status: proc::security::SignatureStatus::default(),
+        parent_chain: Vec::new(),
     };
     let all_procs = vec![proc.clone()];
     let score = scorer.score(&proc, &all_procs, &[], &[]);

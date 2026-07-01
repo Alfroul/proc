@@ -29,7 +29,7 @@ use nom::{
     sequence::{pair, tuple},
 };
 
-use super::{CmpOp, Field, FilterExpr, Value};
+use super::{CmpOp, Field, FilterExpr, NetworkField, Value};
 
 /// Parser 错误。`position` 是字节偏移（与 input.as_bytes()[position] 对齐）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +86,14 @@ fn to_parse_error(input: &str, e: NomErr<VerboseError<&str>>) -> ParseError {
                 .map(|(sub, kind)| {
                     let off = input.len() - sub.len();
                     let m = match kind {
+                        // v0.11 阶段 3：未知字段名 — 把 input[off..] 处的标识符
+                        // 提取出来塞进提示，让用户一眼看出是哪个字段名拼错。
+                        // parse_field 的未知分支故意把错误锚点（`sub`）设在
+                        // 标识符起点（`i`，而非 `after_ident`），所以 off 就是
+                        // 未知字段名的首字符位置。
+                        VerboseErrorKind::Nom(ErrorKind::AlphaNumeric) => {
+                            unknown_field_message(&input[off..])
+                        }
                         VerboseErrorKind::Nom(k) => error_kind_to_chinese(k).to_string(),
                         VerboseErrorKind::Context(s) => (*s).to_string(),
                         VerboseErrorKind::Char(c) => char_to_chinese(*c).to_string(),
@@ -98,6 +106,24 @@ fn to_parse_error(input: &str, e: NomErr<VerboseError<&str>>) -> ParseError {
                 position: offset,
             }
         }
+    }
+}
+
+/// v0.11 阶段 3：从「未知字段名」错误锚点处抽出标识符，构造友好提示。
+///
+/// `rest` 是错误锚点之后的剩余输入（即从未知字段名首字符开始）。提取首个
+/// `[A-Za-z0-9_]+` 段当作未知字段名。提不到（边界情况）→ 退到无标识符版本。
+#[must_use]
+fn unknown_field_message(rest: &str) -> String {
+    const SUPPORTED: &str = "cpu/mem/pid/name/user/cmd/disk_read/disk_write/net_sent/net_recv/security_score/sni/dns_name/remote_addr/remote_port/bytes_out/bytes_in/source";
+    let ident: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    if ident.is_empty() {
+        format!("未知字段名（支持 {SUPPORTED}）")
+    } else {
+        format!("未知字段名：{ident}（支持 {SUPPORTED}）")
     }
 }
 
@@ -210,7 +236,7 @@ fn paren_expr(i: &str) -> NomRes<'_, FilterExpr> {
 fn leaf(i: &str) -> NomRes<'_, FilterExpr> {
     let (i, field) = parse_field(i)?;
     let (i, _) = multispace0(i)?;
-    // 先尝试 regex 路径（=~），不命中再走 cmp。
+    // 先尝试 regex 路径（=~），不命中再走 in / cmp。
     let (i, regex_path) = opt(tuple((tag("=~"), multispace0, parse_regex_lit)))(i)?;
     if let Some((_, _, (pattern, ci))) = regex_path {
         let re_str = if ci {
@@ -220,43 +246,113 @@ fn leaf(i: &str) -> NomRes<'_, FilterExpr> {
         };
         let re = regex::Regex::new(&re_str)
             .map_err(|_| NomErr::Failure(VerboseError::from_error_kind(i, ErrorKind::Verify)))?;
-        return Ok((
-            i,
-            FilterExpr::Regex {
-                field,
+        let expr = match field {
+            ParsedField::Process(f) => FilterExpr::Regex {
+                field: f,
                 re,
                 case_insensitive: ci,
             },
-        ));
+            ParsedField::Network(f) => FilterExpr::NetworkRegex {
+                field: f,
+                re,
+                case_insensitive: ci,
+            },
+        };
+        return Ok((i, expr));
+    }
+    // v0.11 阶段 3：`in` 操作符（仅 NetworkField 支持）。
+    let (i, in_path) = opt(tuple((keyword("in"), multispace0, parse_in_list)))(i)?;
+    if let Some((_, _, values)) = in_path {
+        let expr = match field {
+            ParsedField::Process(_) => {
+                // process 字段暂不支持 in（surgical：仅在 Flow view 设计文档要求）。
+                // cut → Failure 让 alt 不回退；错误锚点回退到字段起点附近。
+                return Err(NomErr::Failure(VerboseError::from_error_kind(
+                    i,
+                    ErrorKind::Tag,
+                )));
+            }
+            ParsedField::Network(f) => FilterExpr::NetworkIn { field: f, values },
+        };
+        return Ok((i, expr));
     }
     let (i, op) = parse_cmp_op(i)?;
     let (i, _) = multispace0(i)?;
     let (i, value) = parse_value(i)?;
-    Ok((i, FilterExpr::FieldCmp { field, op, value }))
+    let expr = match field {
+        ParsedField::Process(f) => FilterExpr::FieldCmp {
+            field: f,
+            op,
+            value,
+        },
+        ParsedField::Network(f) => FilterExpr::NetworkFieldCmp {
+            field: f,
+            op,
+            value,
+        },
+    };
+    Ok((i, expr))
 }
 
-fn parse_field(i: &str) -> NomRes<'_, Field> {
+/// parser 内部用的字段归属：process 系（作用 `ProcessInfo`）或 network 系
+/// （作用 `ProcessFlow`）。`leaf` 拿到归属后再决定构造 `FieldCmp` /
+/// `Regex` 还是 `NetworkFieldCmp` / `NetworkRegex` / `NetworkIn`。
+#[derive(Debug, Clone, Copy)]
+enum ParsedField {
+    Process(Field),
+    Network(NetworkField),
+}
+
+fn parse_field(i: &str) -> NomRes<'_, ParsedField> {
     let (after_ident, ident) = take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_')(i)?;
     let field = match ident {
-        "cpu" => Field::Cpu,
-        "mem" | "memory" => Field::Mem,
-        "pid" => Field::Pid,
-        "name" => Field::Name,
-        "user" => Field::User,
-        "cmd" => Field::Cmd,
-        "disk_read" | "diskread" => Field::DiskRead,
-        "disk_write" | "diskwrite" => Field::DiskWrite,
-        "net_sent" | "netsent" => Field::NetSent,
-        "net_recv" | "netrecv" => Field::NetRecv,
-        "security_score" | "security" => Field::SecurityScore,
+        // process 系字段（v0.7 阶段 4 落地）
+        "cpu" => ParsedField::Process(Field::Cpu),
+        "mem" | "memory" => ParsedField::Process(Field::Mem),
+        "pid" => ParsedField::Process(Field::Pid),
+        "name" => ParsedField::Process(Field::Name),
+        "user" => ParsedField::Process(Field::User),
+        "cmd" => ParsedField::Process(Field::Cmd),
+        "disk_read" | "diskread" => ParsedField::Process(Field::DiskRead),
+        "disk_write" | "diskwrite" => ParsedField::Process(Field::DiskWrite),
+        "net_sent" | "netsent" => ParsedField::Process(Field::NetSent),
+        "net_recv" | "netrecv" => ParsedField::Process(Field::NetRecv),
+        "security_score" | "security" => ParsedField::Process(Field::SecurityScore),
+        // network 系字段（v0.11 阶段 3 新增）
+        "sni" => ParsedField::Network(NetworkField::Sni),
+        "dns_name" | "dnsname" => ParsedField::Network(NetworkField::DnsName),
+        "remote_addr" | "remoteaddr" => ParsedField::Network(NetworkField::RemoteAddr),
+        "remote_port" | "remoteport" => ParsedField::Network(NetworkField::RemotePort),
+        "bytes_out" | "bytesout" => ParsedField::Network(NetworkField::BytesOut),
+        "bytes_in" | "bytesin" => ParsedField::Network(NetworkField::BytesIn),
+        "source" => ParsedField::Network(NetworkField::Source),
         _ => {
+            // 错误锚点放在字段名起点（i），让 to_parse_error 能从 input[off..]
+            // 提取出未知字段名拼出友好提示（v0.11 阶段 3）。
             return Err(NomErr::Error(VerboseError::from_error_kind(
-                after_ident,
+                i,
                 ErrorKind::AlphaNumeric,
             )));
         }
     };
     Ok((after_ident, field))
+}
+
+/// v0.11 阶段 3：`in (v1, v2, ...)` 列表解析。至少 1 个值；trailing `,` 不允许。
+/// 闭合 `)` 用 `cut` 让错误不被 alt 吞掉（与 paren_expr 同款）。
+fn parse_in_list(i: &str) -> NomRes<'_, Vec<Value>> {
+    let (i, _) = char('(')(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, first) = parse_value(i)?;
+    let (i, rest) = many0(tuple((multispace0, char(','), multispace0, parse_value)))(i)?;
+    let (i, _) = multispace0(i)?;
+    let (i, _) = cut(char(')'))(i)?;
+    let mut values = Vec::with_capacity(rest.len() + 1);
+    values.push(first);
+    for (_, _, _, v) in rest {
+        values.push(v);
+    }
+    Ok((i, values))
 }
 
 fn parse_cmp_op(i: &str) -> NomRes<'_, CmpOp> {
@@ -559,5 +655,154 @@ mod tests {
         let e = parse("cpu >").unwrap_err();
         assert!(e.position > 0);
         assert!(!e.msg.is_empty());
+    }
+
+    // --- v0.11 阶段 3：network 字段 + in 操作符 ---
+
+    #[test]
+    fn parse_network_sni_regex() {
+        let e = parse("sni =~ /google\\.com$/").unwrap();
+        match e {
+            FilterExpr::NetworkRegex { field, .. } => {
+                assert_eq!(field, NetworkField::Sni);
+            }
+            other => panic!("expected NetworkRegex, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_network_dns_name_eq() {
+        // v0.7 语法约定：相等用 `=`（与 `user = root` / `name = chrome.exe` 同款）。
+        let e = parse("dns_name = \"example.com\"").unwrap();
+        match e {
+            FilterExpr::NetworkFieldCmp {
+                field,
+                op: CmpOp::Eq,
+                value: Value::Text(s),
+            } => {
+                assert_eq!(field, NetworkField::DnsName);
+                assert_eq!(s, "example.com");
+            }
+            other => panic!("expected NetworkFieldCmp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_network_remote_addr_in() {
+        let e = parse(r#"remote_addr in ("1.2.3.4", "5.6.7.8")"#).unwrap();
+        match e {
+            FilterExpr::NetworkIn { field, values } => {
+                assert_eq!(field, NetworkField::RemoteAddr);
+                assert_eq!(values.len(), 2);
+            }
+            other => panic!("expected NetworkIn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_network_remote_port_cmp() {
+        let e = parse("remote_port = 443").unwrap();
+        match e {
+            FilterExpr::NetworkFieldCmp {
+                field,
+                op: CmpOp::Eq,
+                value: Value::Number(n),
+            } => {
+                assert_eq!(field, NetworkField::RemotePort);
+                assert!((n - 443.0).abs() < 1e-9);
+            }
+            other => panic!("expected NetworkFieldCmp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_network_source_eq() {
+        let e = parse("source = schannel").unwrap();
+        match e {
+            FilterExpr::NetworkFieldCmp {
+                field,
+                op: CmpOp::Eq,
+                value: Value::Text(s),
+            } => {
+                assert_eq!(field, NetworkField::Source);
+                assert_eq!(s, "schannel");
+            }
+            other => panic!("expected NetworkFieldCmp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_network_bytes_unit() {
+        // bytes_out 字段允许字节单位字面量。
+        let e = parse("bytes_out > 1kb").unwrap();
+        match e {
+            FilterExpr::NetworkFieldCmp {
+                field,
+                value: Value::Number(n),
+                ..
+            } => {
+                assert_eq!(field, NetworkField::BytesOut);
+                assert!((n - 1024.0).abs() < 1e-9);
+            }
+            other => panic!("expected NetworkFieldCmp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_network_in_single_value() {
+        // 单值 in 也合法（语义等价于 =，但语法允许）。
+        let e = parse(r#"sni in ("a.com")"#).unwrap();
+        assert!(matches!(e, FilterExpr::NetworkIn { .. }));
+    }
+
+    #[test]
+    fn parse_network_combined_with_and() {
+        // 网络表达式 AND 组合，确认网络字段在布尔结构里也能解析。
+        let e = parse(r#"sni =~ /evil\.com/ AND remote_port = 443"#).unwrap();
+        assert!(matches!(e, FilterExpr::And(_, _)));
+    }
+
+    #[test]
+    fn parse_backward_compat_old_expr_still_works() {
+        // v0.7/v0.8 契约：纯 process 字段表达式不变。
+        let e = parse("cpu > 5 AND name =~ /chrome/").unwrap();
+        assert!(matches!(e, FilterExpr::And(_, _)));
+    }
+
+    #[test]
+    fn err_unknown_field_message_contains_supported_list() {
+        // 未知字段错误信息含「未知字段名」+ 支持列表（v0.11 阶段 3 增强）。
+        let e = parse("foo > 5").unwrap_err();
+        assert!(
+            e.msg.contains("未知"),
+            "expected 含「未知」的提示, got: {}",
+            e.msg
+        );
+        assert!(
+            e.msg.contains("sni"),
+            "expected 含支持列表（含 sni）, got: {}",
+            e.msg
+        );
+        assert!(
+            e.msg.contains("cpu"),
+            "expected 含支持列表（含 cpu）, got: {}",
+            e.msg
+        );
+        assert!(
+            !e.msg.contains("AlphaNumeric"),
+            "must not leak nom ErrorKind: {}",
+            e.msg
+        );
+    }
+
+    #[test]
+    fn err_in_on_process_field_rejected() {
+        // `in` 仅支持 network 字段，process 字段报错。
+        assert!(parse(r#"name in ("chrome")"#).is_err());
+    }
+
+    #[test]
+    fn err_in_unclosed_paren() {
+        assert!(parse(r#"sni in ("a.com", "b.com""#).is_err());
     }
 }

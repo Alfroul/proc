@@ -13,7 +13,7 @@ use crate::ebpf::flow::FlowSource;
 /// 2s 与 `proc diag` 同款兜底；典型 connect / TLS handshake < 1s 出现。
 const WARM_UP_SECS: u64 = 2;
 
-pub fn run_flows(limit: Option<usize>, json: bool) {
+pub fn run_flows(limit: &Option<usize>, json: bool, filter: Option<&str>) {
     let mut app = match crate::app::App::new() {
         Ok(a) => a,
         Err(e) => {
@@ -46,10 +46,40 @@ pub fn run_flows(limit: Option<usize>, json: bool) {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    let flows: Vec<&crate::ebpf::flow::ProcessFlow> = match limit {
-        Some(n) => app.flows.iter().take(n).collect(),
-        None => app.flows.iter().collect(),
-    };
+    // v0.11 阶段 3：先 collect 全部，再过滤，最后截断 limit（典型「找前 N 个
+    // 命中 X 的 flow」语义）。filter 走 FilterExpr v2 apply_network。
+    let mut flows: Vec<&crate::ebpf::flow::ProcessFlow> = app.flows.iter().collect();
+    if let Some(expr_str) = filter {
+        match crate::filter::parse(expr_str) {
+            Ok(expr) => {
+                // v0.11 阶段 8 REVIEW-13 P1-2：检测纯 process 字段表达式。
+                // process 字段在 Flow 视图（apply_network ctx）下永远 false，
+                // 用户写 `cpu > 5` 会把所有 flow 都过滤掉，体验反直觉。
+                // 给出 warn + 退出 1，提示用户改用 network 字段。
+                if expr.contains_process_field() {
+                    eprintln!(
+                        "{} filter 表达式只含 process 字段（cpu/mem/name/...），\
+                        在 Flow 视图下永远不命中。\n\
+                        Flow 字段：sni / dns_name / remote_addr / remote_port / \
+                        bytes_out / bytes_in / source。详见 ADR-0011。",
+                        "提示:".yellow()
+                    );
+                    std::process::exit(1);
+                }
+                flows.retain(|f| {
+                    let ctx = crate::filter::NetworkEvalCtx { flow: f };
+                    expr.apply_network(&ctx)
+                })
+            }
+            Err(e) => {
+                eprintln!("{} {}", "filter 语法错误:".red(), e);
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some(n) = limit {
+        flows.truncate(*n);
+    }
 
     if json {
         // 序列化前转 owned（serde_json 处理 Vec<&T> 麻烦，直接 clone）。

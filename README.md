@@ -2,6 +2,10 @@
 
 Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中。Windows 主开发平台，Linux/macOS 可降级运行。
 
+> **v0.11.0（2026-07-01）** 安全 + 可靠性大版本：**Worker Restart 真正实装**（TD-4 清零，panic 后指数退避 5s/30s/5min 自动重启，3 次失败永久死亡）/ **DNS ETW 替代 PowerShell probe**（CPU 3-5% → < 0.5%，延迟 500ms-1s → < 50ms，PowerShell fallback 保留）/ **FilterExpr v2 网络字段**（`sni/dns_name/remote_addr/remote_port/bytes_out/bytes_in/source`）/ **进程签名验证 R16**（WinVerifyTrust 6 状态机 + BackgroundScorer 异步）/ **进程父子链 R17**（Office → shell / Browser → shell / ScriptInterpreter 三档扣分）/ **可疑启动路径 R18**（%TEMP% / %APPDATA% / Downloads + R16 协同扣分）。全量回归 1146 tests passed / 0 failed。详见 [CHANGELOG](CHANGELOG.md)。
+
+> **已知限制**：Win10 < 1809 admin 下 Schannel event 1793 不 fire（延续 v0.10）；worker restart 3 次失败后仍永久死亡；DNS ETW 仅 Windows 管理员启用（非 admin 走 PowerShell fallback）；Linux ebpf 编译路径未在本机验证（TD-19 延续）。详见 [tech-debt](docs/tech-debt.md)。
+
 > **v0.10.0（2026-06-28）** 跨平台 SNI 对齐：**Windows Schannel ETW SNI 落地**（手写 windows-rs ETW + TDH 动态 schema，event 1793 / TargetName 字段实测修订）/ **ProcessFlow.source 字段**（`Ebpf` / `Schannel` enum，跨平台在 ProcessFlow 数据结构统一）/ **R15 跨平台激活**（白名单同时检查 sni + dns_name）/ **`proc flows` 跨平台 CLI**（表格加「来源」列，JSON 自动加 source 字段）/ **REVIEW-11 P1 修复**（Schannel-only flow 退出感知 + spawn 失败句柄清理）。弥补 v0.7 阶段 8 eBPF 仅 Linux 的缺位。全量回归 959 tests passed / 0 failed。详见 [CHANGELOG](CHANGELOG.md)。
 >
 > **已知限制**：Win10 < 1809 admin 下 Schannel event 1793 不 fire（worker 启动成功但 UI 显示 0 条）；Linux ebpf 编译路径未在本机验证（v0.8.0 cycle stage 1 主动推迟，本 cycle 不依赖）。详见 [tech-debt TD-19 / TD-20](docs/tech-debt.md)。
@@ -42,7 +46,7 @@ macOS 等非 Win/Linux 平台，环境 / DLL / 句柄 / 内存 Tab 显示「此�
 
 ### 安全评分
 
-每个进程附带 **0-100 分**（100 = 安全）。基于 **14 项独立检查**：
+每个进程附带 **0-100 分**（100 = 安全）。基于 **18 项独立检查**（v0.11.0 起扩到 18 项，新增 R16 签名验证 / R17 父子链 / R18 可疑路径 + 与既有 v0.6 path_check 协同扣分；详见 [ADR-0021](docs/adr/0021-process-signature-verification.md) + [CONTEXT.md](CONTEXT.md) R16/R17/R18 段）：
 
 - **签名** Authenticode 数字签名
 - **父子链** 父进程链完整性（如 `explorer.exe → chrome.exe` 是否合理）
@@ -93,12 +97,14 @@ CLI `proc ls --sort net_recv --limit 10` 按流量排序；TUI 内 `←→` 切�
 
 ### DNS 查询日志<sup>v0.5.0</sup>
 
-Windows 平台专属。`DnsLogCollector` trait + `PowershellDnsCollector` 实现：spawn 长跑 `powershell.exe` 子进程订阅 `Microsoft-Windows-DNS-Client/Operational` channel event 3010，reader 线程解析 JSON 行 + sysinfo PID 名 lookup + `sync_channel(1000)` 推到主线程。500ms 周期 drain，主线程 cap=1000 FIFO。
+Windows 平台专属。<sup>v0.11.0</sup> **主路径走 ETW**（手写 windows-rs `Microsoft-Windows-DNS-Client` real-time session，event 3008/3010 + TDH 动态 schema 解析，延迟 < 50ms + 100% 完整性）；ETW 启动失败时**降级到 PowerShell fallback**（spawn 长跑 `powershell.exe` 子进程订阅 `Microsoft-Windows-DNS-Client/Operational` channel event 3010）。两者都通过 `DnsLogCollector` trait 抽象，reader 线程 / ETW callback 解析事件 + sysinfo PID 名 lookup + `sync_channel(1000)` 推到主线程。500ms 周期 drain，主线程 cap=1000 FIFO。详见 [ADR-0020](docs/adr/0020-dns-etw-provider.md)。
 
 - **TUI 内**：端口面板按 `D`（大写）激活 DNS 子视图，显示最近 DNS 查询列表
 - **详情页 Network Tab**：底部展示该 PID 最近 5 条 DNS 查询
 - **CLI**：`proc dns --tail` 流式输出新事件
 - **异常规则 R9**：新 PID 首次发起 DNS 查询且不在白名单 → Warning
+
+**怎么知道当前用的是哪个 collector？** 跑 `proc diag`，末尾的 `dns_collector: <kind>` 行反映实际类型（`etw` / `powershell` / `none`）。报「DNS 日志缺数据」类 bug 时附上此行。
 
 **隐私承诺**：DNS 查询记录**永不持久化**到磁盘，仅在内存中保留最近 1000 条；`record/frame.rs` 序列化类型不含 `DnsQuery`。
 
@@ -430,7 +436,7 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 |---|---|---|---|
 | 进程列表 / 树 | ✅ | ⚠️ 基础 | ⚠️ 基础 |
 | 进程分类（用户/系统/服务） | ✅ Win32 | ⚠️ 启发式 | ⚠️ 启发式 |
-| 安全评分（签名） | ✅ | ⚠️ 仅行为 | ⚠️ 仅行为 |
+| 安全评分（签名） | ✅ WinVerifyTrust R16<sup>v0.11.0</sup> | ⚠️ 仅行为（无 WinVerifyTrust） | ⚠️ 仅行为 |
 | USB 助手 | ✅ | ❌ | ❌ |
 | 降频检测 | ✅ | ❌ | ❌ |
 | per-core 频率<sup>v0.5.0</sup> | ✅ | ✅ sysfs cpufreq | ❌ |
@@ -441,7 +447,7 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 | **GPU（多厂商）**<sup>v0.5.0</sup> | ✅ NVIDIA via NVML | ✅ AMD/Intel/NVIDIA via nvtop | ❌ |
 | **SMART 磁盘健康**<sup>v0.5.0</sup> | ✅ smartctl + WMI 降级 | ✅ smartctl | ✅ smartctl |
 | **per-process 网络流量**<sup>v0.5.0</sup> | ✅ IP Helper | ✅ nethogs 子进程 | ❌ |
-| **DNS 查询日志**<sup>v0.5.0</sup> | ✅ PowerShell | ❌（pcap 留 v0.7+） | ❌ |
+| **DNS 查询日志**<sup>v0.5.0 · v0.11.0 ETW</sup> | ✅ ETW（默认）/ PowerShell（fallback，管理员判定 `proc diag` 看 `dns_collector`） | ❌（pcap 留 v0.7+） | ❌ |
 | **TCP 传输质量**<sup>v0.5.0</sup> | ✅ GetTcpStatisticsEx2 | ✅ /proc/net/snmp | ❌ |
 | **进程句柄 Tab**<sup>v0.5.0</sup> | ✅ NtQuerySystemInformation | ✅ /proc/\<pid\>/fd | ❌ |
 | **内存映射 Tab**<sup>v0.5.0</sup> | ✅ VirtualQueryEx | ✅ /proc/\<pid\>/maps | ❌ |
@@ -488,11 +494,48 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 
 **R15 安全评分（外联行为）怎么触发？**<sup>v0.7.0</sup> 默认不启用。需要显式创建 `~/.config/proc/sni_whitelist.txt`（一行一个允许的域名，`#` 开头注释），R15 才激活。两条命中条件（任一扣 30 分）：dns_name 不在白名单 / 10s 内 ≥ 50 个不同 IP（端口扫描特征）。空文件 = "所有 dns_name 都不在白名单"（用户自负）。详见 [ADR-0016](docs/adr/0016-ebpf-flow-graph.md#securityrule-r15-外联行为评分)。
 
+**进程名旁边的 🔒 / ⚠️ / ❓ 是什么？**<sup>v0.11.0</sup> 签名状态标记（ADR-0021）：🔒 Trusted（签名链追溯到微软 / 已知 CA）/ ⚠️ Unsigned 或 Revoked（无签名 / 签名被吊销）/ ❓ Unknown（验证失败 / 非管理员运行）。`Pending`（启动后头 1-2 个 heavy refresh 内的默认值）和 `Signed`（已签名但非受信 CA）不显示 emoji 避免列宽波动。Inspector Summary Tab 显示完整状态（如「签名: 受信签名 (微软/已知 CA)」）。CLI 走 `proc ls --filter 'security_score < 80'` 可过滤出扣分进程。详见 [ADR-0021](docs/adr/0021-process-signature-verification.md)。
+
+**proc 显示我的应用是 ⚠️（无签名），但我明明有签名？**<sup>v0.11.0</sup> 三步排查：(1) proc 是否以管理员身份运行？非 elevated 时 `verify_signature` 直接返回 Unknown（不调 `WinVerifyTrust`），所有进程显示 ❓ 而非 ⚠️；(2) 签名链是否完整？中间证书缺失会让 `WinVerifyTrust` 返 `TRUST_E_SUBJECT_NOT_SIGNED` 或链断裂错误（落入 Unknown）；(3) 是不是 `.cat` 文件签名？驱动 + 系统组件走 `.cat` 关联签名，`WinVerifyTrust` 直接验 `.exe` 会返 Unsigned——这是已知限制，留 TD。跑 `proc ls --json | jq '.[] | select(.signature_status=="Unsigned")'` 拿到完整列表后用 `sigcheck /a your.exe`（Sysinternals）交叉验证。
+
 **Windows Flow graph 怎么用？**<sup>v0.10.0</sup> Windows admin 自动启用 Schannel ETW worker（不需要 feature flag）：启动 proc → 端口面板按 `F` 切到 Flow 子视图 → curl / 浏览器触发 TLS handshake → 看到 SNI 列表。CLI 走 `proc flows` 同款显示，`proc flows --json` 输出含 `"source": "schannel"` 字段。非管理员 / Win10 < 1809 / x86 进程 → worker 启动失败 / 不 fire，UI 显示降级提示。详见 [ADR-0018](docs/adr/0018-windows-schannel-sni.md)。
 
 **Windows 用户在 Flow 子视图看到 0 条怎么办？**<sup>v0.10.0</sup> 三步排查：(1) `winver` 查 Windows 版本，需 Win10 1809+（build 17763+）/ Win11；(2) 以管理员身份启动 proc（非管理员 worker 启动失败）；(3) 触发 TLS handshake 后等 1-2s（Schannel event 1793 在 DeleteSecurityContext 时 fire，连接关闭瞬间才有）。仍 0 条？跑 `proc diag` 看 `schannel_etw` worker 行的 `poll_count` 是否增长——若增长但 SNI 空，说明 callback 收到 event 但 TDH 解析失败，请附 `~/.config/proc/logs/proc.log` 报 issue。
 
-**worker 崩溃了怎么办？**<sup>v0.6.0</sup> TUI 顶部会渲染红色 banner（`[worker name] panicked: <message>`），按 `D` 清空。同时 crash report 写到 `crashes/crash-worker-*.txt`。worker 自身无热恢复（重启方法 `WorkerManager::restart` 未实现，见 [tech-debt](docs/tech-debt.md) TD-4），需重启 proc。
+**proc 显示 R17 可疑父子链命中，但我的 Word/Excel 启动 cmd 是合法脚本？**<sup>v0.11.0</sup> R17 是「典型 macro attack 链」启发式检测——扣分不代表恶意，只是符合攻击模式。三步排查：(1) Inspector Summary Tab 顶部红色警告下方有完整 chain（`WINWORD.EXE → cmd.exe`），核对是不是你预期的脚本；(2) 进入详情页看 `命令行:` 字段（`proc inspect <pid>` 同款），确认 cmd 参数是预期脚本路径而非 base64 / encoded payload；(3) 如果确实合法想消除警告，目前 R17 内置 pattern 不支持白名单（v0.11.0 后续会加），但可以在 `~/.config/proc/lineage_rules.toml` 配自定义规则替代默认检测——例如把 weight 调低到 5：
+   ```toml
+   # 注：内置 OfficeToShell/BrowserToShell/ScriptInterpreter 仍会扣 35/25/15，
+   # 此处仅用于追加自定义规则（无法 override 内置 weight）。
+   [[rule]]
+   name = "my_editor_to_shell"
+   parent_pattern = "(?i)my_editor"
+   child_pattern = "(?i)(cmd|powershell)"
+   weight = 5
+   ```
+   详见 [tech-debt](docs/tech-debt.md)（R17 内置 pattern 白名单待加）。
+
+**proc 显示 R18 命中（`suspicious_path_*` / `[⚠ 可疑位置]`），但我的便携应用就放在 AppData？**<sup>v0.11.0</sup> R18 是「malware 常见启动位置」启发式检测——`%TEMP%` / `%APPDATA%` / `%LOCALAPPDATA%` / `%USERPROFILE%\Downloads` 都是用户可写目录，合法便携应用确实会放在这些位置。三步排查：(1) 看进程是否同时命中 R16（未签名）——Inspector Summary Tab 顶部若有「未签名 + 可疑路径协同命中（双重特征强信号）」警告，强烈建议扫描病毒；签名应用（🔒 / 空 emoji）通常合法。(2) 便携应用确实需要放 AppData 时，可在 `~/.config/proc/path_rules.toml` 配置中接受该路径（虽然不能直接白名单内置 kind，但可以确认权重符合预期）：
+   ```toml
+   # 自定义可疑目录（不会影响内置 Temp/AppData/LocalAppData/Downloads 判定）
+   [[suspicious_dir]]
+   name = "my_portable_app"
+   path = "%USERPROFILE%\\my_portable"  # 支持 %VAR% / ${VAR} / $VAR 占位符
+   weight = 5                            # 缺省 25
+   reason = "便携应用残留路径"
+   ```
+   (3) R18 与 v0.6 path_check（temp_dir / downloads_dir）**叠加扣分**——Temp 路径会同时扣 25（temp_dir）+ 20（suspicious_path_temp）+ 协同 10 = 55 分（未签名情况下）。这是 surgical 原则下的设计：保留 v0.6 path_check 不动，R18 作为独立入口叠加扣分（同 R17 + v0.7 office_spawning_shell 的处理模式）。如果只能接受单次扣分，参考 [CONTEXT.md](CONTEXT.md) R18 段了解评分逻辑。
+
+**worker 崩溃了怎么办？**<sup>v0.6.0 · v0.11.0 自动重启</sup> TUI 顶部会渲染红色 banner（`[worker name] panicked: <message>`），按 `D` 清空。同时 crash report 写到 `crashes/crash-worker-*.txt`。**v0.11.0 起自动热恢复**：worker panic 后按指数退避（5s / 30s / 5min）自动 respawn；3 次失败永久死亡需重启 proc（`WorkerManager::restart` 实装，TD-4 清零）。banner 三态显示（restarting / restarted / permanent failure）。详见 [ADR-0019](docs/adr/0019-worker-restart-policy.md)。
+
+**为什么我的 DNS 日志延迟还是高 / 漏抓？**<sup>v0.11.0</sup> v0.11 起默认走 ETW（CPU < 0.5%、延迟 < 50ms），但管理员权限是硬要求——非管理员自动降级到 PowerShell probe（v0.5.0 路径保留）。跑 `proc diag`，末尾的 `dns_collector: <kind>` 行反映实际类型（`etw` / `powershell` / `none`）。如果是 `powershell` 想用 ETW：以管理员身份启动 proc 即可。Linux / macOS 没有 DNS-Client ETW provider，DNS 日志功能不可用。
+
+**FilterExpr `cpu > 5` 在 Flow 子视图（`F` 进入）为什么过滤掉所有 flow？**<sup>v0.11.0</sup> v0.11 阶段 8 REVIEW-13 P1-2 修复——Flow 视图走 `apply_network` 求值上下文，process 字段（cpu/mem/name/...）在该 ctx 下永远 false（无 ProcessInfo），用户写后会过滤掉所有 flow。CLI `proc flows --filter 'cpu > 5'` 会打印 warn 提示「Flow 字段：sni/dns_name/remote_addr/remote_port/bytes_out/bytes_in/source，详见 ADR-0011」+ 退出 1；TUI 同款 UX 缺口留 TD 归档（需更深状态机协调）。Flow 视图正确语法：`sni =~ /google\.com$/` / `remote_port = 443` / `source = schannel` / `dns_name in ("a.com", "b.com")`。
+
+**R16 / R17 / R18 触发条件分别是什么？**<sup>v0.11.0</sup> 三档评分规则：
+- **R16 签名**（第 1 步接入，ADR-0021）：每个进程 `.exe` 走 `WinVerifyTrust` 6 状态机——Unsigned 扣 20 / Revoked 扣 35 / Signed（已签名但非受信 CA）扣 10 / Unknown（验证失败 / 非管理员）扣 5（仅 Windows）/ Trusted / Pending 不扣分。
+- **R17 可疑父子链**（第 17 步）：`OfficeToShell`（Word/Excel/PowerPoint → cmd/powershell/wscript）扣 35；`BrowserToShell`（Chrome/Edge/Firefox → cmd/powershell）扣 25；`ScriptInterpreter`（wscript/cscript/mshta 直接运行）扣 15。可在 `~/.config/proc/lineage_rules.toml` 加自定义规则。
+- **R18 可疑启动路径**（第 18 步）：`%TEMP%` 扣 20 / `%APPDATA%` / `%LOCALAPPDATA%` / `%USERPROFILE%\Downloads` 各扣 15；与 R16 协同（Unsigned/Revoked + 可疑路径同时命中）额外扣 10。系统目录（Program Files / Windows / System32）白名单不扣分。可在 `~/.config/proc/path_rules.toml` 加自定义目录。
+- 跨规则**叠加扣分**（surgical 原则——保留 v0.6 path_check / v0.7 office_spawning_shell 不动，R17/R18 作为独立入口叠加）：典型 macro attack 模式 `未签名 + 临时目录 + Word → cmd` 可累加扣到 100+ 分。
 
 **终端异常？** 退出后执行 `reset` 恢复。
 

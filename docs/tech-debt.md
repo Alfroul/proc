@@ -31,13 +31,24 @@
 **修复**：stage-7.md 切片 E 改问"是否需要引入 proptest（v0.7.0+ 评估）" / "性能回归测试是否覆盖 hot path"。
 **验证**：stage-7.md 切片 E 不再假设 proptest/criterion 存在。
 
-### TD-4（P2-4）：CONTEXT.md 显眼标注 WorkerManager::restart 未实现 ✅ Fixed in v0.7.0 阶段 1
+### TD-4（P2-4）：CONTEXT.md 显眼标注 WorkerManager::restart 未实现 ✅ Fixed in v0.11.0 阶段 1（真正实装）
 
 **位置**：`CONTEXT.md:55`
 **现状**：第 55 行写"restart(name) 故障恢复方法尚未实现（无调用方，surgical 原则不预实现）"，但藏在表格里不够显眼。
 **影响**：用户/开发者读 CONTEXT.md 后误以为 worker 崩溃可热恢复。
 **修复**：CONTEXT.md 顶部加"已知限制"段或 ⚠️ 标注；README 平台支持表加"worker 崩溃后只能重启 proc"。
 **验证**：CONTEXT.md 顶部"已知限制"段含 restart 条目。
+
+> **v0.7.0 阶段 1 标 Fixed**：仅完成「文档标注」部分（CONTEXT.md 顶部加 ⚠️ 已知限制 + README FAQ），实际 `restart()` 函数尚未实装。
+>
+> **v0.11.0 阶段 1 标 Fixed（真正实装）**：ADR-0019 落地完整的 Worker Restart Policy：
+> - 指数退避（5s / 30s / 5min）+ 最大重试 3 + reset 计数（1h 无 panic 后归零）
+> - `WorkerManager::restart(name, now, crash_tx)` 记录 crash + 触发 respawn 决策
+> - `WorkerManager::restart_tick(now, crash_tx)` 每 1s 检查 backoff 到期
+> - `WorkerManager::restart_status(name, now)` 给 banner 渲染用
+> - `RestartState` / `RestartStatus` 状态机纯逻辑（src/workers/restart.rs，14 unit test）
+> - `tests/test_worker_restart.rs` 12 个集成测试覆盖端到端 + 真实 spawn → panic 路径
+> - CONTEXT.md 顶部「已知限制」段更新为「worker panic 后自动按指数退避重启（5s/30s/5min），3 次失败后永久死亡需重启 proc」
 
 ### TD-5（P2-5）：WorkerManager 含 Docker worker metrics ✅ Fixed in v0.7.0 阶段 1
 
@@ -215,6 +226,157 @@
 **修复**：改成 `Option<&'a EVENT_PROPERTY_INFO>` + 加 lifetime parameter；或 inline 到调用点直接读字段。
 **验证**：`cargo clippy --release --all-targets -- -D warnings` 仍 0 warnings。
 **v0.10.0 stage 4 决策**：不修。理由：(1) 不引发 UB（实际用法安全）；(2) 修复增加 ~5 行代码但语义不变；(3) 优先级低于功能 / 测试改进。归档为 v0.11+ 代码质量候选。
+
+---
+
+## v0.12.0+ 候选（v0.11.0 stage 7 REVIEW-13 P2 归档）
+
+> 源：`docs/reviews/REVIEW-13.md` P2 段（15 项）。与 P0/P1 区分：P0/P1 阻断 v0.11.0 发布，已在阶段 8 修；P2 不阻断，归档到下个 cycle。
+
+### TD-23（REVIEW-13 P2-1）：DNS ETW diag JSON 输出不含 dns_collector 字段
+
+**位置**：`src/cli/diag.rs:54`（human-readable 模式有 dns_collector 行，JSON 模式无）
+**现状**：用户用 `proc diag --json` 报 bug 时附上的 JSON 缺 collector 类型信息。JSON 是 bug report 的主要格式，工程化场景几乎都用 JSON。
+**影响**：用户报「DNS 日志缺数据」类 bug 附 JSON 时无法看出走的是 ETW 还是 PowerShell fallback。
+**修复**：在 JSON 模式输出 object 中加 `"dns_collector": "etw" | "powershell" | "none"` 字段（与 human-readable 的 `dns_collector: <kind>` 行对齐）。
+**验证**：`proc diag --json | jq '.dns_collector'` 输出 `"etw"` / `"powershell"` / `"none"`。
+**v0.11.0 stage 8 决策**：不修。理由：(1) human-readable 模式已含此信息，用户可临时用 human-readable；(2) JSON schema 变更需在 rmcp MCP tools 同步——优先级低于 P1 修复。归档为 v0.12+ 候选。
+
+### TD-24（REVIEW-13 P2-2）：worker restart spawn_one 失败时 retry_count 不增加，无法到达 permanent_failure
+
+**位置**：`src/workers/manager.rs:215-220`（`try_respawn` 在 spawn_one 返 false 时仅不调 on_respawned）
+**现状**：panic 后 `spawn_one` 失败（如 `detect_collector()` 返 None 因环境变化），`on_respawned` 不调用，retry_count 不增加。`state.last_crash` 仍在，下次 `restart_tick`（1s 后）会再次尝试 spawn_one——按 backoff 间隔（5s/30s/5min）重试。这意味着环境持续不支持该 worker 时，**永远无法到达 permanent_failure 状态**——worker 看似在重试，实际每次都失败。
+**影响**：少见。典型发生在管理员 → 非管理员权限切换后 ETW worker panic。banner 持续显示 restarting 状态，但实际 respawn 永远失败。
+**修复**：在 `spawn_one` 失败时调用 `state.on_respawn_failed(now)` 让 retry_count += 1，达到 MAX_RETRIES 后进入 permanent_failure 止损。
+**验证**：mock spawn_one 永远返 false → restart_tick 调 MAX_RETRIES 次后 banner 显示 permanent_failure。
+**v0.11.0 stage 8 决策**：不修。理由：(1) 实际触发场景极少（权限切换）；(2) banner 已显示 restarting，用户能感知；(3) 修复需新增 RestartState::on_respawn_failed 方法 + 状态机扩展测试，改动中等。归档为 v0.12+ 候选。
+
+### TD-25（REVIEW-13 P2-3）：docker worker 不在 canonical_worker_thread_name 列表
+
+**位置**：`src/workers/manager.rs:278-288`（`canonical_worker_thread_name` 列表）+ ADR-0019 未明确文档化此例外
+**现状**：`canonical_worker_thread_name` 列出 6 个 worker（port / usb / net-flow / dns-log / disk-io-etw / schannel-etw），不含 docker-snapshot-worker / docker-logs-worker-{name}。docker worker panic 时 `WorkerManager::restart` 因 canonical 返回 None 直接返 false，docker worker 不会自动 respawn。
+**影响**：CONTEXT.md line 9 of manager.rs 注释明确「Docker worker 仍由 DockerPanel 自管」，但 ADR-0019 文档未明确这一例外，未来维护者会困惑。
+**修复**：在 ADR-0019 §决策 7「不实装 ebpf_worker restart」之后追加「不实装 docker worker restart：DockerPanel 自管 worker 生命周期，独立 spawn/drop 逻辑」。或者把 docker worker 也接入 restart（需重构 DockerPanel 把 worker handle 暴露给 WorkerManager）。
+**验证**：ADR-0019 文档明确 docker 例外；或 docker worker panic 后也走 restart 路径。
+**v0.11.0 stage 8 决策**：不修。理由：(1) ADR 文档补充；(2) docker worker 接入 restart 需重构 DockerPanel（影响大）。归档为 v0.12+ 文档候选。
+
+### TD-26（REVIEW-13 P2-4）：HRESULT 映射不完整，CERT_E_EXPIRED / CERT_E_UNTRUSTEDROOT 都归 Unknown
+
+**位置**：`src/security/signature.rs:83-93`（`from_wintrust_result`）
+**现状**：仅映射 3 个 HRESULT：0 → Signed / TRUST_E_SUBJECT_NOT_SIGNED → Unsigned / CRYPT_E_REVOKED → Revoked。其他都归 Unknown 扣 5 分（仅 Windows）。
+未映射的关键 HRESULT：
+- `CERT_E_EXPIRED` (0x800B0101) — 证书过期（应类似 Unsigned 严重）
+- `CERT_E_UNTRUSTEDROOT` (0x800B0109) — 不受信根（应类似 Unsigned 严重）
+- `CERT_E_WRONG_NAME` (0x800B0113) — 名称不匹配
+- `TRUST_E_CERT_SIGNATURE` (0x80096010) — 签名无效
+- `CERT_E_CHAINING` (0x800B010A) — 链断裂
+**影响**：证书过期 / 不受信根的进程扣分偏宽松（Unknown 5 vs 应 15-20）。
+**修复**：扩 from_wintrust_result 映射 + 加 SignatureStatus 变体（如 `Expired` / `UntrustedRoot`），或在 Unknown 桶内细分 weight。
+**验证**：mock 各 HRESULT → 验证 SignatureStatus 映射 + 扣分 weight。
+**v0.11.0 stage 8 决策**：不修。理由：(1) 当前 6 状态机已能区分主要场景；(2) 扩状态机需改 badge / Display / risk_factor 多处连锁；(3) 影响窄（CERT_E_EXPIRED 等不常见）。归档为 v0.12+ 候选。
+
+### TD-27（REVIEW-13 P2-5）：TRUSTED_SIGNERS 列表较短，缺常见 vendor
+
+**位置**：`src/security/signature.rs:50-59`
+**现状**：仅 8 个 vendor：Microsoft / Google / Mozilla / Apple / Intel / NVIDIA。
+**缺**：Adobe / Cisco / Oracle / VMWare / Docker / Red Hat / Apache Software Foundation / Python Software Foundation / Electron.js / GitHub 等。
+**影响**：常见软件（如 Adobe Reader / Cisco VPN / Docker Desktop / Oracle JDK）的进程被标为 `Signed`（扣 10 分）而非 `Trusted`（不扣分），用户视角误报。
+**修复**：扩列表 + 走 `path_rules.toml` 类似的用户配置入口（`trusted_signers.toml`），让用户标记自家应用。
+**验证**：常见 vendor 进程显示 🔒 而非空 badge。
+**v0.11.0 stage 8 决策**：不修。理由：(1) 列表扩充争议（哪些 vendor 算「trusted」主观）；(2) 用户配置入口 `trusted_signers.toml` 需新 schema + UI 反馈机制，优先级低于 P1 修复。归档为 v0.12+ 候选（与 path_rules / lineage_rules 一同设计统一用户规则系统）。
+
+### TD-28（REVIEW-13 P2-6）：regex 中不能 escape `/`，影响 CIDR / URL pattern
+
+**位置**：`src/filter/parser.rs:425-431`（`parse_regex_lit` 用 `take_till1(|c| c == '/')`）
+**现状**：用户写 `remote_addr =~ /127\.0\.0\.1\/8/` 想匹配 CIDR `127.0.0.1/8`，但 parser 在第一个 `/` 停止，pattern 变成 `127\.0\.0\.1\`，剩余 `/8/` 被当成 trailing input 报错。
+**影响**：CIDR / URL pattern 不能直接表达，用户需用 `[\/]` character class（regex crate 支持）绕。
+**修复**：要么支持 `\/` escape（修改 parser），要么文档建议用户用 `[\/]`。
+**验证**：`remote_addr =~ /127\.0\.0\.1\/8/` 正确解析为 pattern `127\.0\.0\.1/8`。
+**v0.11.0 stage 8 决策**：不修。理由：(1) 影响 narrow（CIDR 用得少）；(2) `[\/]` workaround 可用；(3) parser 改动需考虑转义序列连锁（`\d` / `\w` 等是否也支持）。归档为 v0.12+ 候选。
+
+### TD-29（REVIEW-13 P2-7）：NetworkIn 用 Vec 线性查找
+
+**位置**：`src/filter/mod.rs:270-280`（`FilterExpr::apply_network` 的 NetworkIn 分支用 `values.iter().any(...)`）
+**现状**：N 个值的 in 列表，每个 flow 检查 O(N)。N 通常 < 10，但极端用户写 100 个 IP 黑名单 + 1000 个 flow → 100K 操作每 tick。
+**修复**：在 FilterExpr::NetworkIn 构造时把 Vec 转为 HashSet，apply 时 O(1) 查找。改动小（~10 行）。
+**验证**：benchmark NetworkIn 100 values × 1000 flows 不超过 1ms。
+**v0.11.0 stage 8 决策**：不修。理由：(1) N 通常 < 10，性能差异微秒级；(2) 当前 50ms tick 预算充足。归档为 v0.12+ 性能候选。
+
+### TD-30（REVIEW-13 P2-8）：`%` 单位与 cpu / mem 字段交互语义不清
+
+**位置**：`src/filter/parser.rs:406-414`（`parse_number_value` 的 `%` 分支）
+**现状**：`mem > 5%` 解析为 `Value::Percent(5)`，与 `mem > 5`（字节）在 `apply_num` 下等价（5 == 5）。用户期望 `mem > 5%` 是「内存占用 > 5%」（基于总内存），实际是「内存字节数 > 5 字节」。
+**影响**：用户写 `mem > 50%` 期望过滤占用 50%+ 内存的进程，实际过滤内存 > 50 字节的进程（几乎全部命中）。
+**修复**：在 `Field::Mem::extract` 中把字节转 % 总内存（需 `System::total_memory()`），或者在 parser 阶段拒绝 `mem%` 组合（更严格）。
+**验证**：`mem > 50%` 在 16GB 系统上等价于 `mem > 8GB`。
+**v0.11.0 stage 8 决策**：不修。理由：(1) cpu 字段本身就是 %，与 mem 字段单位不一致是历史问题；(2) 修复需 EvalCtx 加 total_memory 字段或 parser 严格化（破坏向后兼容）。归档为 v0.12+ UX 候选（与 FilterExpr v3 字段单位语义重构一同设计）。
+
+### TD-31（REVIEW-13 P2-9）：跨 ctx 表达式不支持（如 `cpu > 5 AND sni =~ /evil/`）
+
+**位置**：`src/filter/mod.rs:204-288`（`apply` 与 `apply_network` 完全分离）
+**现状**：Flow 视图调 `apply_network` 时，process 字段变体（FieldCmp / Regex）返 false。`cpu > 5 AND sni =~ /evil/` 在 Flow 视图下：`cpu > 5`（false） AND `sni =~ /evil/`（true） → false。
+**影响**：用户视角：「我想看 chrome 进程的 evil.com flow」无法直接表达。需先在 Process 视图找 chrome pid，再在 Flow 视图按 pid 过滤。
+**修复**：在 NetworkEvalCtx 加 `process: Option<&ProcessInfo>` 字段，apply_network 对 process 变体在 process 存在时走 apply 逻辑。Flow 视图构造 ctx 时通过 pid 关联 process。改动中等（~50 行），与 surgical 原则冲突（ctx 类型不再纯净）。
+**验证**：`cpu > 5 AND sni =~ /evil/` 在 Flow 视图下命中 chrome 高 CPU + evil.com SNI 的 flow。
+**v0.11.0 stage 8 决策**：不修。理由：(1) 类型系统分离是 ADR-0011 v0.11 阶段 3 设计选择（保证字段不跨 ctx 误用）；(2) 修复破坏 surgical 原则，与 stage-3 doc 任务指令「类型系统保证字段不跨 ctx 误用」冲突。归档为 v0.12+ 设计候选（需重新评估 FilterExpr 整体架构）。
+
+### TD-32（REVIEW-13 P2-10）：R17 ScriptInterpreter 不分场景扣分（系统登录脚本也命中）
+
+**位置**：`src/security/lineage.rs:179-182`（`detect_suspicious_chain` 的 ScriptInterpreter 优先级）
+**现状**：当前进程是 wscript/cscript/mshta 即扣 15 分，不看祖先。系统登录脚本 / IT 部门部署脚本都命中。
+**影响**：企业环境常见 wscript.exe 启动脚本，被标可疑。15 分扣分较低，但用户视角误报。
+**修复**：增加「直接父是 services.exe / wininit.exe（系统启动）→ 不扣分」白名单。或降低 weight 到 5。
+**验证**：mock chain [services.exe → wscript.exe] → 不命中 ScriptInterpreter。
+**v0.11.0 stage 8 决策**：不修。理由：(1) 15 分扣分较轻，不影响用户使用；(2) 修复需扩 lineage_rules.toml schema 支持白名单（与 TD-27 trusted_signers.toml 一同设计）。归档为 v0.12+ UX 候选。
+
+### TD-33（REVIEW-13 P2-11）：R18 + path_check 叠加扣分导致 Downloads 等合法路径扣 30 分
+
+**位置**：`src/security/score.rs` 第 3 步（path_check）+ 第 18 步（R18）
+**现状**：用户从 Downloads 运行合法安装包（如 VS Code installer），同时命中：
+- v0.6 path_check downloads_dir (15)
+- R18 UserProfileDownloads (15)
+- 总扣分 30
+
+CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设计选择，但**用户视角是误报**。
+**修复**：在 path_check 内部「命中 downloads_dir 时跳过 R18 检查」（去重），或者 R18 UserProfileDownloads weight 从 15 降到 5。
+**验证**：Downloads 路径签名进程扣分从 30 降到 15（或 20）。
+**v0.11.0 stage 8 决策**：不修。理由：(1) surgical 原则明确「叠加扣分」是设计行为；(2) 用户配置 path_rules.toml 可以补充注释解释；(3) 修复需评估 R18 内部 weight 调整对其他场景的影响。归档为 v0.12+ UX 候选。
+
+### TD-34（REVIEW-13 P2-12）：plan.md 不用 [x] checkbox 风格，stage-7.md 任务清单描述与实际不匹配
+
+**位置**：`plan.md`（表格风格）+ `docs/stages/v0.11-stage-7.md:55`（假设 checkbox 风格）
+**现状**：stage-7.md 任务清单第 7 项「plan.md 中所有功能阶段已 [x]」假设 plan.md 用 checkbox 标记阶段完成情况，但 plan.md 实际是表格风格（「阶段 N 实装：...」描述）。
+**影响**：v0.11 阶段 7 review 时按不存在的格式提问，浪费精力。
+**修复**：要么改 plan.md 用 checkbox（破坏现有风格），要么改 stage-7.md 任务清单第 7 项描述（更准确：「plan.md 阶段表 + CONTEXT.md 演进历史段全部更新到 v0.11」）。后者更 surgical。
+**验证**：stage-7.md 任务清单第 7 项描述与 plan.md 实际风格匹配。
+**v0.11.0 stage 8 决策**：不修。理由：(1) stage-7.md 已落 ✅，本次 cycle 不再触发；(2) 文档风格调整优先级低。归档为 v0.12+ 文档候选。
+
+### TD-35（REVIEW-13 P2-13）：`property_at_index` 的 `'static` lifetime 不正确（DNS ETW 版本）
+
+**位置**：`src/dns_log/etw.rs:510-526`
+**现状**：返回 `&'static` 但实际生命周期与 `info_ptr` 指向的 buffer 绑定（调用方 info_buf 保活）。严格说应改为 `Option<&'a EVENT_PROPERTY_INFO>` + 加生命周期参数。实际不会触发 use-after-free（info_buf 在调用栈保活），但是 API 契约不准确。**与 TD-22 同款问题（schannel_etw 版本）**。
+**影响**：实际用法安全（调用方立即读字段，不跨 await / 不存进长生命周期字段）。
+**修复**：加 lifetime parameter。与 TD-22 一同修复。
+**验证**：`cargo clippy --release --all-targets -- -D warnings` 仍 0 warnings。
+**v0.11.0 stage 8 决策**：不修。理由：与 TD-22 同款（不引发 UB / 修复增加代码但语义不变）。归档为 v0.12+ 代码质量候选。
+
+### TD-36（REVIEW-13 P2-14）：MCP DNS tool 拿不到历史（每次调用重启 ETW session）
+
+**位置**：`src/mcp/handler.rs:891-910`（`make_dns_json`）
+**现状**：MCP 每次调用 `proc_dns` 都创建一个临时 `EtwDnsCollector`（启动 ETW session + spawn ProcessTrace 线程），drain 一次拿现有数据，然后 collector drop（关闭 session）。**启动前发生的 DNS 查询无法被捕获**——session 启动后到 drain 之间的查询（短暂窗口）才能拿到。
+**影响**：MCP 用户调用 `proc_dns` 通常拿到空结果或少量结果（取决于 drain 间隔）。与 v0.6 PowerShell 路径行为一致，不是 v0.11 引入。
+**修复**：让 MCP handler 持有长生命的 EtwDnsCollector（与 App::workers.dns_log_worker 类似的生命周期）。改动中等（MCP handler 需 state 化）。
+**验证**：MCP `proc_dns` 调用前触发 DNS 查询，调用时能拿到结果。
+**v0.11.0 stage 8 决策**：不修。理由：(1) 与 v0.6 行为一致，不引入回归；(2) MCP handler state 化改动大（涉 rmcp SDK state 传递机制）。归档为 v0.12+ 候选。
+
+### TD-37（REVIEW-13 P2-15）：`signature_risk_factor` 中 `_ => None` 通配符可能掩盖新加变体 ✅ Fixed in v0.11.0 阶段 8
+
+**位置**：`src/security/signature.rs:264`
+**现状**：`signature_risk_factor` 用 `_ => None` 通配符兜底 Trusted 变体（不扣分），但未来加新 SignatureStatus 变体也会静默落入此桶。
+**影响**：未来加新 SignatureStatus 变体时编译器不会强制更新 match，新变体可能静默不扣分。
+**修复**：把 `_ => None` 改为 `SignatureStatus::Trusted => None`，让编译器在新加变体时强制更新 match。
+**验证**：`cargo build` 在加新 SignatureStatus 变体时报「non-exhaustive match」错误。
+**v0.11.0 stage 8 决策**：✅ **已修复**（合并到 P1-3 修复）。`signature_risk_factor` 的 `_ => None` 已改为显式 `SignatureStatus::Trusted => None`，未来加新变体时编译器会强制穷尽 match。本 TD 标 ✅ Fixed in v0.11.0 阶段 8。
 
 ---
 

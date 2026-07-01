@@ -888,9 +888,10 @@ pub fn make_dns_json(tail: bool) -> Value {
             "tail mode is streaming-only — use the proc CLI (`proc dns --tail`) instead. MCP tools are one-shot.",
         );
     }
-    let Some(mut collector) = crate::dns_log::detect_collector() else {
+    let (collector, _kind) = crate::dns_log::detect_collector();
+    let Some(mut collector) = collector else {
         return err(
-            "DNS log collector unavailable on this platform (Windows: PowerShell Get-WinEvent; see ADR-0006)",
+            "DNS log collector unavailable on this platform (Windows: ETW primary / PowerShell fallback; see ADR-0020)",
         );
     };
     let queries = collector.drain();

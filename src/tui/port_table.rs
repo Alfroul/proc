@@ -313,33 +313,39 @@ fn format_system_time(t: std::time::SystemTime) -> String {
 /// - ebpf + schannel 都不在线：显示降级提示。
 /// - flows 为空但 worker 已启用：显示「尚无 flow」。
 /// - `bytes_out / bytes_in` MVP 留 0（Part B 接 tcp_sendmsg/recvmsg），不渲染。
+///
+/// v0.11 阶段 3：加搜索支持。`/` substring 模式按 sni/dns_name/comm/remote_addr
+/// 子串匹配；`:` FilterExpr 模式走 `NetworkEvalCtx::apply_network` 过滤。parse
+/// 失败保留上一次成功 AST，标题栏显示错误。
 fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
     let pp = &app.port_panel.panel;
     let flows = &app.flows;
+    let visible_indices = pp.flow_filtered_indices(flows);
 
     let ebpf_enabled = crate::ebpf::EBPF_ENABLED;
     let schannel_on = app.workers.schannel_etw_worker.is_some();
 
     // 标题栏：worker 状态 + 条数 + 操作提示。v0.10 阶段 3：跨平台对齐
     // （ebpf / schannel 都有 → 显示数据来源 mix；单一来源 → 显示对应路径）。
+    // v0.11 阶段 3：搜索 / FilterExpr 激活时附加 query 与错误。
     let ghost_count = flows.iter().filter(|f| f.is_ghost()).count();
-    let header_line = if ebpf_enabled && app.workers.ebpf_worker.is_some() {
+    let base_header = if ebpf_enabled && app.workers.ebpf_worker.is_some() {
         if ghost_count > 0 {
             format!(
-                " eBPF Flow graph（{} 条 · 👻{} 幽灵保留 ≤30s · connect + DNS 关联）  F/Esc 退出 · ↑↓滚动",
+                " eBPF Flow graph（{} 条 · 👻{} 幽灵保留 ≤30s · connect + DNS 关联）",
                 flows.len(),
                 ghost_count
             )
         } else {
             format!(
-                " eBPF Flow graph（{} 条 · connect + DNS 关联）  F/Esc 退出 · ↑↓滚动",
+                " eBPF Flow graph（{} 条 · connect + DNS 关联）",
                 flows.len()
             )
         }
     } else if schannel_on {
         // v0.10 阶段 3：Windows admin 走 Schannel 路径（source = Schannel）。
         format!(
-            " Schannel Flow graph（{} 条 · SNI 明文 · TLS handshake）  F/Esc 退出 · ↑↓滚动",
+            " Schannel Flow graph（{} 条 · SNI 明文 · TLS handshake）",
             flows.len()
         )
     } else if ebpf_enabled {
@@ -348,12 +354,44 @@ fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
         " Flow graph：需要 Linux + ebpf feature 或 Windows 管理员（Schannel ETW）".to_string()
     };
 
+    // v0.11 阶段 3：搜索 / FilterExpr 状态条。visible_indices.len() 与 flows.len()
+    // 不同时附加 `命中 N/M`；parse 错误附加红字提示。
+    let filtered_hint = if visible_indices.len() != flows.len() {
+        format!(" · 命中 {}/{}", visible_indices.len(), flows.len())
+    } else {
+        String::new()
+    };
+    let search_hint = if pp.flow_search.is_active() {
+        let mode_label = match pp.flow_search.mode {
+            crate::search::QueryMode::Substring => "搜索",
+            crate::search::QueryMode::FilterExpr => "filter",
+        };
+        format!(" · {mode_label}: {}", pp.flow_search.query())
+    } else if !pp.flow_search.query().is_empty() {
+        format!(" · 过滤: {}", pp.flow_search.query())
+    } else {
+        String::new()
+    };
+    let err_hint = pp
+        .flow_search
+        .filter_error
+        .as_ref()
+        .map(|e| format!(" · ⚠ {e}"))
+        .unwrap_or_default();
+    let ops_hint = "  F/Esc 退出 · ↑↓滚动 · / 搜索 · : FilterExpr";
+    let header_line = format!("{base_header}{filtered_hint}{search_hint}{err_hint}{ops_hint}");
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(area);
 
-    let header = Paragraph::new(header_line).style(theme::style_header());
+    let header_style = if pp.flow_search.filter_error.is_some() {
+        theme::style_header().fg(Color::Yellow)
+    } else {
+        theme::style_header()
+    };
+    let header = Paragraph::new(header_line).style(header_style);
     f.render_widget(header, chunks[0]);
 
     let header_row = Row::new(vec![
@@ -368,12 +406,17 @@ fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
 
     let rows_visible = chunks[1].height.saturating_sub(3) as usize;
     let scroll = pp.flow_scroll;
-    let window: Vec<&crate::ebpf::flow::ProcessFlow> =
-        flows.iter().skip(scroll).take(rows_visible).collect();
+    let window: Vec<usize> = visible_indices
+        .iter()
+        .skip(scroll)
+        .take(rows_visible)
+        .copied()
+        .collect();
 
     let rows: Vec<Row> = window
         .iter()
-        .map(|flow| {
+        .map(|&idx| {
+            let flow = &flows[idx];
             // v0.10 阶段 3：SNI 优先（Schannel 路径 / ebpf 路径 sni 填上时），
             // 回退到 dns_name（ebpf 路径 DNS 关联命中），都没有显示 —。
             let name_str = flow

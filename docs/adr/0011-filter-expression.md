@@ -167,14 +167,49 @@ v0.7 阶段 4 FilterExpr 只接入 List view；Tree / AppGroup 视图保留 subs
 
 代价：内部 helper（`tree_move_cursor` / `tree_toggle_select` / `tree_initiate_kill` / `tree_select_orphans` / `tree_select_stale` / `app_group_move_cursor` / `app_group_toggle_expand` / `app_group_toggle_select` / `app_group_initiate_kill`）签名都加 `cached_processes: &[ProcessInfo]`；外部调用点（`src/app.rs::handle_scroll` / `src/tui/process_tree.rs::draw` / `src/tui/app_group_view.rs::draw`）传 `&app.cached_processes[..]`。
 
+### v0.11.0 阶段 3 增量：FilterExpr v2 网络字段（ADR-0011 v2）
+
+v0.10 阶段 3 落地的 `ProcessFlow.sni` / `dns_name` / `remote_addr` 字段没有过滤入口，用户在 Flow 子视图（按 `F` 进入）只能逐行扫；CLI `proc flows` 也没法按字段过滤。v0.11 阶段 3 把 FilterExpr AST 扩出网络字段，让 Flow 视图（TUI + CLI）与 List / Tree / AppGroup 视图享有同款过滤体验。
+
+具体增量：
+
+1. **新枚举 `NetworkField`**：`Sni` / `DnsName` / `RemoteAddr` / `RemotePort` / `BytesOut` / `BytesIn` / `Source`。与现有 `Field`（process 系）平级，不合并。`is_text()` / `extract(&NetworkEvalCtx) -> FieldValue` 同款 API。
+
+2. **三个 Network 变体加进 `FilterExpr`**：`NetworkFieldCmp { field, op, value }` / `NetworkRegex { field, re, case_insensitive }` / `NetworkIn { field, values }`。`NetworkIn` 是 NetworkField 独有的（`in` 操作符），process 系暂不支持（surgical：仅在 Flow 视图要求）。
+
+3. **`NetworkEvalCtx`**：与 `EvalCtx` 平级的新 ctx，持 `&ProcessFlow` 而非 `&ProcessInfo`。
+
+4. **`FilterExpr::apply_network(&NetworkEvalCtx) -> bool`**：与 `apply` 对称的执行入口。And/Or/Not 递归两边都走 apply_network；process 系变体（`FieldCmp` / `Regex`）在本 ctx 下返 false（NetworkEvalCtx 不持 ProcessInfo）；network 系变体在 `apply`（process ctx）下也返 false。这样类型系统保证字段不会跨 ctx 误用。
+
+5. **设计取舍：分两个变体而非合并到 `FieldCmp`**：ProcessField 作用于 `&ProcessInfo`（List view），NetworkField 作用于 `&ProcessFlow`（Flow view），**作用对象不同**。合并需要泛型 Field / Value 提取器，复杂度跳一档；分两个 ctx + 两个 apply 方法让类型系统保证字段不会跨 ctx 误用——`sni =~ /evil/` 在 List 视图（无 flow）不会拿到 flow 数据，因为 List 视图根本不调 apply_network。
+
+6. **Parser 扩展**：`parse_field` 返回 `ParsedField` 枚举（Process(Field) | Network(NetworkField)），dispatch 在 `leaf` 内部按 ParsedField 变体构造对应 FilterExpr 变体。`in` 操作符走新 `parse_in_list` parser（`("(" val ("," val)* ")"`），闭合 `)` 用 `cut` 让错误不被 alt 吞。
+
+7. **错误中文化增强**：未知字段错误（`AlphaNumeric` ErrorKind）锚点从 `after_ident` 改回 `i`（字段名起点），`to_parse_error` 在该 ErrorKind 上从 `input[off..]` 提取未知标识符拼出友好提示：「未知字段名：xxx（支持 cpu/mem/.../sni/dns_name/remote_addr/...）」。原 v0.8 阶段 2 的 `error_kind_to_chinese` 兜底映射保留。
+
+8. **CLI 接入**：`proc flows --filter '<expr>'` 与 `proc ls --filter` 同款 parser，但走 `apply_network`。语义：先 collect 全部 → filter → truncate limit（典型「找前 N 个命中 X 的 flow」）。
+
+9. **TUI 接入**：PortPanel 加 `flow_search: SearchState` 字段。Flow 子视图（`F` 进入）按 `:` 激活 FilterExpr 模式（与 List / Tree / AppGroup 视图同款 UI 契约）；`flow_filtered_indices(flows)` 按 mode 分支返回可见索引；标题栏显示当前表达式 + parse 错误（与 List view 同款）。
+
+代价：
+
+- FilterExpr enum 加 3 个变体；NetworkField enum 7 个变体；mod.rs +90 行；parser.rs +120 行（含 in 操作符 + 测试）。
+- PanelContext 加 `flows: &'a [ProcessFlow]` 字段，App 两处 PanelContext 构造点同步。
+- PortPanel 加 `flow_search` 字段 + `flow_filtered_indices` 方法（`pub`，集成测试需要）。
+- `flow_clamp_cursor` 调用点改用过滤后总数（搜索 / FilterExpr 收窄后光标不越界）。
+- 新增 `tests/test_filter_expr_v2.rs`（25 case）覆盖 parser + apply_network + PortPanel 集成。
+
 ## Implementation Notes
 
 - 入口：`src/filter/mod.rs::FilterExpr::apply(&ProcessInfo) -> bool`
+- v0.11 阶段 3：`src/filter/mod.rs::FilterExpr::apply_network(&NetworkEvalCtx) -> bool`
 - Parser：`src/filter/parser.rs::parse(&str) -> Result<FilterExpr, ParseError>`
 - SearchState 接入：`src/search.rs::SearchState.mode: QueryMode`
 - ProcessPanel dispatch：`src/view_models/process_panel.rs::filter`（match mode 分支）
+- v0.11 阶段 3 Flow 子视图接入：`src/view_models/port_panel.rs::{handle_flow_view_key, flow_filtered_indices}`
 - CLI 接入：`src/cli/ls.rs::run_ls(--filter <expr>)`
-- 测试：`tests/test_filter_expr.rs`（15+ case）
+- v0.11 阶段 3 CLI 接入：`src/cli/flows.rs::run_flows(filter: Option<&str>)`
+- 测试：`tests/test_filter_expr.rs`（15+ case）+ `tests/test_filter_expr_v2.rs`（v0.11 阶段 3 新增 25 case）
 
 ## Examples
 

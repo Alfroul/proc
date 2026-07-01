@@ -154,6 +154,8 @@ fn test_process_info_disk_fields() {
         run_time: 0,
         name_lower: std::sync::Arc::from("test.exe"),
         throttled: proc::throttle::EcoQoSState::default(),
+        signature_status: proc::security::SignatureStatus::default(),
+        parent_chain: Vec::new(),
     };
     assert_eq!(proc.disk_usage.0, 1_000_000);
     assert_eq!(proc.disk_usage.1, 500_000);

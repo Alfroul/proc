@@ -246,6 +246,11 @@ pub struct PanelContext<'a> {
     /// 阶段 9 E2：DockerPanel 按 `e` 进入容器 exec 模式时设置容器名，
     /// App::handle_key 看到 `SwitchMode(ContainerExec)` 后取出启动 PTY。
     pub pending_container_exec: &'a mut Option<String>,
+
+    /// v0.11 阶段 3：当前 ProcessFlow 快照（`App::flows` 的引用）。Flow 子视图
+    /// 在 FilterExpr 模式下用此切片走 `apply_network` 过滤；substring 模式下
+    /// 走 sni/dns_name/comm/remote_addr 子串匹配。
+    pub flows: &'a [crate::ebpf::flow::ProcessFlow],
 }
 
 /// Trait for a TUI panel that owns its own state.

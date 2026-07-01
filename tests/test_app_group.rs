@@ -27,6 +27,8 @@ fn make_proc(pid: u32, name: &str, exe: &str, cpu: f32, mem: u64) -> ProcessInfo
         run_time: 0,
         name_lower: std::sync::Arc::from(name_arc.to_lowercase().as_str()),
         throttled: proc::throttle::EcoQoSState::default(),
+        signature_status: proc::security::SignatureStatus::default(),
+        parent_chain: Vec::new(),
     }
 }
 
@@ -75,6 +77,8 @@ fn make_proc_with_cmd(
         run_time: 0,
         name_lower: std::sync::Arc::from(name_arc.to_lowercase().as_str()),
         throttled: proc::throttle::EcoQoSState::default(),
+        signature_status: proc::security::SignatureStatus::default(),
+        parent_chain: Vec::new(),
     }
 }
 

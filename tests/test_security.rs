@@ -33,6 +33,8 @@ fn make_proc(
         run_time: 0,
         name_lower: std::sync::Arc::from(name_arc.to_lowercase().as_str()),
         throttled: proc::throttle::EcoQoSState::default(),
+        signature_status: proc::security::SignatureStatus::default(),
+        parent_chain: Vec::new(),
     }
 }
 
@@ -48,11 +50,22 @@ fn test_signature_status_display() {
 #[test]
 fn test_signature_unknown_deducts() {
     use proc::security::signature::signature_risk_factor;
+    // v0.11 阶段 8 REVIEW-13 P1-3：Unknown 在 Windows 上扣 5 分（非管理员降级，
+    // ADR-0021 设计），在非 Windows 上不扣分（无 WinVerifyTrust 概念）。
     let factor = signature_risk_factor(SignatureStatus::Unknown);
-    assert!(factor.is_some(), "Unknown should produce a risk factor");
-    let f = factor.unwrap();
-    assert_eq!(f.weight, 5);
-    assert_eq!(f.name, "signature_unverified");
+    #[cfg(target_os = "windows")]
+    {
+        let f = factor.expect("Unknown should produce a factor on Windows");
+        assert_eq!(f.weight, 5);
+        assert_eq!(f.name, "signature_unverified");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        assert!(
+            factor.is_none(),
+            "非 Windows 上 Unknown 不应扣分（无 WinVerifyTrust）"
+        );
+    }
 }
 
 #[test]

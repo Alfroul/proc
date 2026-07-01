@@ -5,10 +5,13 @@
 //! # 架构
 //!
 //! - [`DnsLogCollector`] trait 抽象平台数据源（参考阶段 6/7 的 trait 模式）
-//! - Windows 实现 [`windows_dns`] 走 PowerShell 子进程订阅
+//! - Windows 主路径 [`etw`]（v0.11 阶段 2 / ADR-0020）：手写 ETW 实时 session
+//!   抓 `Microsoft-Windows-DNS-Client` event 3008/3010，< 50ms 延迟 + 100% 完整性
+//! - Windows fallback [`windows_dns`]：PowerShell `Get-WinEvent` 子进程订阅
 //!   `Microsoft-Windows-DNS-Client/Operational` channel（event 3010 含
-//!   QueryName/QueryType/QueryStatus/QueryResults + ProcessId）
-//! - Linux/macOS 当前 [`windows_dns`] 在非 Windows 平台 alias 到 [`unsupported`]，
+//!   QueryName/QueryType/QueryStatus/QueryResults + ProcessId）。仅在 ETW 启动
+//!   失败时启用（非管理员 / session 占用 / x86）
+//! - Linux/macOS [`windows_dns`] 在非 Windows 平台 alias 到 [`unsupported`]，
 //!   [`detect_collector`] 返回 `None`。Linux 走 DBus 路线在 stage-8.md 被列为
 //!   推荐方案，但 systemd-resolved 的 DBus 接口不暴露 per-query 信号 —— 实际
 //!   需要走 libpcap 抓 53 端口 + DNS 协议解析 + PID 关联，工程量超出单
@@ -28,10 +31,12 @@
 //!
 //! `DnsQuery` 含 `start_time` 字段（阶段 11 P1-A5：之前没有，PID 复用场景下
 //! UI Network Tab 会显示旧进程的 DNS 历史）。`PowershellDnsCollector::reader_loop`
-//! 从 sysinfo 查 PID 的 `start_time` 填入；UI 用 `(pid, start_time)` 元组
-//! 过滤避免误显示。`record/frame.rs` 不序列化 `DnsQuery`（ADR-0006 隐私），
-//! 新字段不影响录屏格式。
+//! 与 `EtwDnsCollector::drain` 都从 sysinfo 查 PID 的 `start_time` 填入；UI 用
+//! `(pid, start_time)` 元组过滤避免误显示。`record/frame.rs` 不序列化 `DnsQuery`
+//! （ADR-0006 隐私），新字段不影响录屏格式。
 
+#[cfg(target_os = "windows")]
+pub mod etw;
 pub mod unsupported;
 #[cfg(target_os = "windows")]
 pub mod windows_dns;
@@ -159,16 +164,63 @@ pub trait DnsLogCollector: Send + Sync {
     fn provider_name(&self) -> &'static str;
 }
 
-/// 按平台返回合适的 collector。无可用 collector 时返回 `None`（worker 不启动，
-/// UI 显示「DNS 日志采集在此平台不可用」）。
+/// DNS collector 类型（v0.11 阶段 2 新增）。让 `proc diag` 输出当前实际使用
+/// 的 collector，便于 bug 诊断（用户报「DNS 日志缺数据」时附上 collector 类型）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DnsCollectorKind {
+    /// Windows ETW `Microsoft-Windows-DNS-Client` real-time session（v0.11 阶段 2 主路径）。
+    Etw,
+    /// Windows PowerShell `Get-WinEvent` 子进程（fallback；ETW 失败时启用）。
+    PowerShell,
+    /// 平台不支持 / 所有 collector 启动失败。
+    None,
+}
+
+impl DnsCollectorKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Etw => "etw",
+            Self::PowerShell => "powershell",
+            Self::None => "none",
+        }
+    }
+}
+
+impl fmt::Display for DnsCollectorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 按平台 + 权限返回合适的 collector。Windows 上先尝试 ETW（v0.11 阶段 2 主路径），
+/// 失败 fallback PowerShell；其它平台返回 `(None, None)`。
+///
+/// 返回 tuple `(collector, kind)`：调用方需把 kind 存到 App 字段供 `proc diag`
+/// 输出（worker spawn 时 collector move 进 worker body，kind 需独立保留）。
 #[must_use]
-pub fn detect_collector() -> Option<Box<dyn DnsLogCollector>> {
+pub fn detect_collector() -> (Option<Box<dyn DnsLogCollector>>, DnsCollectorKind) {
     #[cfg(target_os = "windows")]
     {
-        match self::windows_dns::PowershellDnsCollector::new() {
-            Ok(c) => return Some(Box::new(c)),
+        // 主路径：ETW（v0.11 阶段 2 / ADR-0020）
+        match self::etw::EtwDnsCollector::new() {
+            Ok(c) => {
+                tracing::info!("DNS collector: windows-etw (主路径)");
+                return (Some(Box::new(c)), DnsCollectorKind::Etw);
+            }
             Err(e) => {
-                tracing::warn!("Windows PowerShell DNS collector 初始化失败，DNS 日志为空: {e}")
+                tracing::warn!("DNS ETW collector 启动失败，尝试 PowerShell fallback: {e}");
+            }
+        }
+        // Fallback：PowerShell（v0.5.0 阶段 8 路径，ADR-0006）
+        match self::windows_dns::PowershellDnsCollector::new() {
+            Ok(c) => {
+                tracing::info!("DNS collector: windows-powershell (fallback)");
+                return (Some(Box::new(c)), DnsCollectorKind::PowerShell);
+            }
+            Err(e) => {
+                tracing::warn!("Windows PowerShell DNS collector 也失败，DNS 日志为空: {e}");
             }
         }
     }
@@ -180,7 +232,7 @@ pub fn detect_collector() -> Option<Box<dyn DnsLogCollector>> {
         tracing::debug!("DNS log collector: 此平台暂不支持，UI 将显示空列表");
     }
 
-    None
+    (None, DnsCollectorKind::None)
 }
 
 // ------------ 纯函数解析器（单元测试 anchor） ------------

@@ -2,6 +2,9 @@
 //!
 //! 输出所有后台 worker 的 metrics（avg_us / max_us / polls / drops），
 //! 用户报 bug 时附上。
+//!
+//! v0.11 阶段 2：human-readable 模式末尾追加 `dns_collector` 行，反映 DNS
+//! collector 实际选用的类型（etw / powershell / none）。详见 ADR-0020。
 
 use colored::Colorize;
 
@@ -46,5 +49,8 @@ pub fn run_diag(json: bool) {
                 s.channel_full,
             );
         }
+        // v0.11 阶段 2：DNS collector 类型（ADR-0020）。用户报「DNS 日志缺数据」
+        // 时附上此行——etw / powershell / none 三态对应不同诊断路径。
+        println!("\n  dns_collector: {}", app.workers.dns_collector_kind);
     }
 }

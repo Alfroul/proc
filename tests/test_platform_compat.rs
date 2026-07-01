@@ -69,6 +69,8 @@ fn sample_process() -> ProcessInfo {
         run_time: 3600,
         name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
         throttled: proc::throttle::EcoQoSState::default(),
+        signature_status: proc::security::SignatureStatus::default(),
+        parent_chain: Vec::new(),
     }
 }
 
@@ -106,6 +108,8 @@ mod non_windows_stubs {
             run_time: 0,
             name_lower: std::sync::Arc::from("stub"),
             throttled: proc::throttle::EcoQoSState::default(),
+            signature_status: proc::security::SignatureStatus::default(),
+            parent_chain: Vec::new(),
         }
     }
 

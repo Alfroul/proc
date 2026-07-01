@@ -195,6 +195,14 @@ pub enum Command {
         /// 输出 JSON（默认 human-readable 表格）
         #[arg(long)]
         json: bool,
+
+        /// v0.11 阶段 3：过滤表达式（ADR-0011 v2）。作用于 ProcessFlow 字段：
+        /// `sni` / `dns_name` / `remote_addr` / `remote_port` / `bytes_out` /
+        /// `bytes_in` / `source`。例：`sni =~ /google\.com$/`、
+        /// `remote_addr in ("1.2.3.4","5.6.7.8")`、`source = schannel`。
+        /// 与 TUI Flow 子视图（`:` 激活）用同款 parser。
+        #[arg(long)]
+        filter: Option<String>,
     },
 
     /// 录制系统快照

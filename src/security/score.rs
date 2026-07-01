@@ -157,6 +157,15 @@ pub struct SecurityScorer {
     /// `Some(空)` = 用户显式建空文件，所有 dns_name 都视为不在白名单。
     /// 加载自 `~/.config/proc/sni_whitelist.txt`，构造时一次性读取。
     sni_whitelist: Option<super::flow::SniWhitelist>,
+    /// v0.11 阶段 5 R17：用户自定义父子链规则。加载自
+    /// `~/.config/proc/lineage_rules.toml`，文件不存在 → 空 Vec（只用内置 3 种 pattern）。
+    lineage_rules: Vec<super::lineage::LineageRule>,
+    /// v0.11 阶段 6 R18：用户自定义可疑路径规则。加载自
+    /// `~/.config/proc/path_rules.toml`，文件不存在 → 空 Vec（只用内置 4 种 SuspiciousPathKind）。
+    path_rules: Vec<super::path_rules::PathRule>,
+    /// v0.11 阶段 6 R18：当前进程环境变量展开后的用户目录缓存。SecurityScorer
+    /// 构造时一次性展开，每次 score 调用复用（避免每进程读 env var）。
+    user_dirs: super::path_rules::UserDirs,
 }
 
 impl Default for SecurityScorer {
@@ -175,6 +184,13 @@ impl SecurityScorer {
             hash_reputation: super::hash_cache::HashReputation::new(),
             // 文件不存在 → None，R15 自动跳过；解析失败也降级为 None 避免误报。
             sni_whitelist: super::flow::SniWhitelist::load(),
+            // v0.11 阶段 5 R17：文件不存在 → 空 Vec，只用内置 OfficeToShell /
+            // BrowserToShell / ScriptInterpreter 三种 pattern。
+            lineage_rules: super::lineage::load_lineage_rules(),
+            // v0.11 阶段 6 R18：文件不存在 → 空 Vec，只用内置 4 种 SuspiciousPathKind
+            // （Temp / AppData / LocalAppData / UserProfileDownloads）。
+            path_rules: super::path_rules::load_path_rules(),
+            user_dirs: super::path_rules::UserDirs::from_env(),
         }
     }
 
@@ -303,6 +319,36 @@ impl SecurityScorer {
             super::flow::check_flow_risk(&flows_for_pid, self.sni_whitelist.as_ref(), now)
         {
             factors.push(risk);
+        }
+
+        // 17. R17：可疑父子链（v0.11 阶段 5）。基于 ProcessInfo.parent_chain
+        // 字段（由 HeavyWorker collect 时填实）+ 当前进程名判定 Office/Browser
+        // → Shell / ScriptInterpreter / 用户自定义规则。空 chain 或非 shell 名
+        // → check_lineage_risk 返回空 Vec，no-op。stage-5.md 任务 3。
+        //
+        // 注：R16（v0.11 阶段 4 原方案）已合并到第 1 步 signature verification
+        // ——见 ADR-0021。这里命名保留 R17（历史编号），实际是 score 函数第 16
+        // 个被调用的检查（R15 后第 1 个新增）。
+        factors.extend(super::lineage::check_lineage_risk(
+            std::slice::from_ref(proc),
+            &self.lineage_rules,
+        ));
+
+        // 18. R18：可疑启动路径（v0.11 阶段 6）。基于 `ProcessInfo.exe` + 用户目录
+        // 缓存判定 Temp / AppData / LocalAppData / UserProfileDownloads / Custom。
+        // 与 v0.6 path_check 第 3 步 temp_dir / downloads_dir **叠加扣分**
+        // （同 R17 与 v0.7 office_spawning_shell 的 surgical 原则——安全评分偏向严格）。
+        // stage-6.md 任务 2：协同扣分——R16（未签名 / 吊销，第 1 步 sig_status）
+        // 同时命中 R18 时额外扣 10 分（双重特征强信号）。
+        let r18_hit = super::path_rules::check_path_risk(
+            std::slice::from_ref(proc),
+            &self.user_dirs,
+            &self.path_rules,
+        );
+        let r18_matched = !r18_hit.is_empty();
+        factors.extend(r18_hit);
+        if let Some(coop) = r18_cooperation_factor(sig_status, r18_matched) {
+            factors.push(coop);
         }
 
         let total_deduction: u32 = factors.iter().map(|f| f.weight).sum();
@@ -559,4 +605,91 @@ fn check_network_behavior(
     }
 
     factors
+}
+
+/// v0.11 阶段 6：R16（未签名 / 吊销）+ R18（可疑路径）协同扣分纯函数。
+///
+/// 抽出 free function 让单元测试能直接验证状态机（score 函数内 sig_status 由
+/// verify_signature 实时算出，无法注入 mock；这里把决策逻辑分离出来）。
+///
+/// 命中条件（stage-6.md 任务 2）：`r18_matched` 且 `sig_status` 是 Unsigned /
+/// Revoked → 返回额外 -10 分 RiskFactor。其他状态（Trusted / Signed / Pending /
+/// Unknown）不触发协同（Pending / Unknown 不强信号；Signed 已正常扣分）。
+#[must_use]
+pub(crate) fn r18_cooperation_factor(
+    sig_status: super::signature::SignatureStatus,
+    r18_matched: bool,
+) -> Option<RiskFactor> {
+    if r18_matched
+        && matches!(
+            sig_status,
+            super::signature::SignatureStatus::Unsigned
+                | super::signature::SignatureStatus::Revoked
+        )
+    {
+        Some(RiskFactor {
+            category: RiskCategory::FilePath,
+            name: "unsigned_in_suspicious_path".to_string(),
+            weight: 10,
+            description: "未签名 + 可疑路径协同命中（双重特征强信号）".to_string(),
+        })
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! v0.11 阶段 6：R16 + R18 协同扣分状态机单元测试。
+    //! score 函数内 sig_status 由 verify_signature 实时算出无法注入 mock，
+    //! 协同决策逻辑抽成 `r18_cooperation_factor` 纯函数在此覆盖。
+    use super::*;
+
+    #[test]
+    fn coop_unsigned_r18_hit_returns_factor_10() {
+        let f = r18_cooperation_factor(super::super::signature::SignatureStatus::Unsigned, true);
+        assert!(f.is_some());
+        let f = f.unwrap();
+        assert_eq!(f.weight, 10);
+        assert_eq!(f.name, "unsigned_in_suspicious_path");
+        assert_eq!(f.category, RiskCategory::FilePath);
+    }
+
+    #[test]
+    fn coop_revoked_r18_hit_returns_factor_10() {
+        let f = r18_cooperation_factor(super::super::signature::SignatureStatus::Revoked, true);
+        assert!(f.is_some());
+        assert_eq!(f.unwrap().weight, 10);
+    }
+
+    #[test]
+    fn coop_trusted_r18_hit_returns_none() {
+        let f = r18_cooperation_factor(super::super::signature::SignatureStatus::Trusted, true);
+        assert!(f.is_none());
+    }
+
+    #[test]
+    fn coop_signed_r18_hit_returns_none() {
+        // Signed（已签名但非受信 CA）已经 -10 分，不再加协同扣分。
+        let f = r18_cooperation_factor(super::super::signature::SignatureStatus::Signed, true);
+        assert!(f.is_none());
+    }
+
+    #[test]
+    fn coop_pending_r18_hit_returns_none() {
+        let f = r18_cooperation_factor(super::super::signature::SignatureStatus::Pending, true);
+        assert!(f.is_none());
+    }
+
+    #[test]
+    fn coop_unknown_r18_hit_returns_none() {
+        let f = r18_cooperation_factor(super::super::signature::SignatureStatus::Unknown, true);
+        assert!(f.is_none());
+    }
+
+    #[test]
+    fn coop_unsigned_r18_not_hit_returns_none() {
+        let f = r18_cooperation_factor(super::super::signature::SignatureStatus::Unsigned, false);
+        assert!(f.is_none());
+    }
 }

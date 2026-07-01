@@ -178,6 +178,10 @@ pub struct App {
     /// worker 崩溃后保留的最近 N 条 crash，TUI 在顶部渲染 banner。
     /// `tick()` 时 drain `crash_rx` 追加；用户按 `D` 在 `handle_key` 里清空。
     pub active_crashes: Vec<crate::metrics::crash::WorkerCrash>,
+    /// v0.11.0 阶段 1（ADR-0019）：App 保留的 `crash_tx` 副本，用于 worker
+    /// restart 路径给 respawn 的新 worker clone。`tick_poll_crashes` /
+    /// `restart_tick` 通过此 sender 让新 worker 仍能把后续 panic 推给主线程。
+    pub crash_tx: Option<std::sync::mpsc::Sender<crate::metrics::crash::WorkerCrash>>,
 
     // v0.7.0 阶段 3：命令面板 Ctrl+P + AppLayer 状态机。
     /// 当前显式激活的层。Normal / Search 是逻辑层（从 panel search 状态派生），
@@ -232,10 +236,12 @@ impl App {
 
         // v0.6.0 阶段 3：crash channel —— 给所有 SnapshotWorker 共享。
         // v0.6.0 阶段 5：4 个直管 worker 的 spawn 统一进 WorkerManager。
+        // v0.11.0 阶段 1：App 保留 crash_tx 副本用于 worker restart 路径
+        // （respawn 的新 worker 需 clone 这份 sender），详见 ADR-0019。
         let (crash_tx, crash_rx) = crate::metrics::crash::channel();
         let workers = crate::workers::WorkerManager::new(Some(&crash_tx));
         let mut docker_panel = DockerPanel::new();
-        docker_panel.crash_tx = Some(crash_tx);
+        docker_panel.crash_tx = Some(crash_tx.clone());
         let docker_panel = DockerPanelController::new(docker_panel);
 
         Ok(Self {
@@ -292,6 +298,7 @@ impl App {
             sidebar_expanded: crate::ui_state::load_sidebar_expanded(),
             crash_rx: Some(crash_rx),
             active_crashes: Vec::new(),
+            crash_tx: Some(crash_tx),
             active_layer: AppLayer::Normal,
             command_palette: CommandPalette::new(),
         })
@@ -336,23 +343,54 @@ impl App {
 
     /// 主循环 tick 调一次：drain `crash_rx`，新到的 `WorkerCrash` 追加到
     /// `active_crashes`，触发 TUI 顶部 banner 渲染。
+    ///
+    /// v0.11.0 阶段 1（ADR-0019）：drain 同时调 `workers.restart(name, now, crash_tx)`
+    /// 记录 restart 状态 + 触发指数退避 respawn 决策。
     pub fn poll_crashes(&mut self) {
         let Some(rx) = &self.crash_rx else {
             return;
         };
+        let now = std::time::SystemTime::now();
+        let mut new_crashes: Vec<crate::metrics::crash::WorkerCrash> = Vec::new();
         while let Ok(crash) = rx.try_recv() {
             tracing::error!(
                 worker = crash.worker,
                 panic = %crash.message,
                 "worker crashed (banner shown)"
             );
-            self.active_crashes.push(crash);
+            // v0.11.0 阶段 1：通知 WorkerManager 记录 + 尝试 respawn。
+            // crash_tx 必须从 self.crash_tx 借，不能从 self.crash_rx（不同字段）。
+            let crash_tx_ref = self
+                .crash_tx
+                .as_ref()
+                .map(|s| s as &std::sync::mpsc::Sender<crate::metrics::crash::WorkerCrash>);
+            let _ = self.workers.restart(crash.worker, now, crash_tx_ref);
+            new_crashes.push(crash);
+        }
+        if !new_crashes.is_empty() {
+            self.active_crashes.extend(new_crashes);
             // 上限 10 条防止失忆式增长 —— 用户按 D 清空。
-            if self.active_crashes.len() > 10 {
+            while self.active_crashes.len() > 10 {
                 self.active_crashes.drain(0..1);
             }
             self.pending_redraw = true;
         }
+    }
+
+    /// v0.11.0 阶段 1（ADR-0019）：每 1s 调一次。检查 `restart_history` 中
+    /// pending crash 的 worker，backoff 到期就 respawn。返回值是本 tick 触发
+    /// respawn 的 worker 列表（thread_name），用于 status_message 反馈。
+    pub fn restart_tick(&mut self) -> Vec<&'static str> {
+        let now = std::time::SystemTime::now();
+        let crash_tx_ref = self
+            .crash_tx
+            .as_ref()
+            .map(|s| s as &std::sync::mpsc::Sender<crate::metrics::crash::WorkerCrash>);
+        let restarted = self.workers.restart_tick(now, crash_tx_ref);
+        if !restarted.is_empty() {
+            self.pending_redraw = true;
+        }
+        restarted
     }
 
     /// 清空所有 banner（用户按 D 触发）。
@@ -606,6 +644,7 @@ impl App {
                 op_history: &mut self.op_history,
                 dns_log_recent: &mut self.dns_log_recent,
                 pending_container_exec: &mut self.pending_container_exec_target,
+                flows: &self.flows,
             };
             match self.mode {
                 AppMode::ProcessList => self.process_panel.handle_key(key, &mut ctx),
@@ -1263,6 +1302,10 @@ impl App {
             self.tick_dns_log();
             self.tick_flows_ebpf();
             self.overlay_flow_sni_schannel();
+            // v0.11.0 阶段 1（ADR-0019）：每 1s 检查 restart_history，
+            // backoff 到期的 worker 触发 respawn。restart 状态变化触发 banner
+            // 重绘（pending_redraw）。
+            self.restart_tick();
             self.tick_panels();
             self.tick_usb_monitor_docker();
             self.tick_self_monitor();
@@ -1352,6 +1395,19 @@ impl App {
         }
 
         if let Some(scores) = self.background_scorer.poll_results() {
+            // v0.11 阶段 4（ADR-0021）：poll 后把 score.signature 反向同步到
+            // cached_processes[*].signature_status，让 UI（进程列表 emoji /
+            // Inspector Summary）能显示最新结果而非 ProcessInfo 默认值 Pending。
+            // Arc::make_mut：scoring 持有旧 Arc 时触发一次 COW 复制（每 heavy
+            // refresh 至多一次），与 update_disk_speeds 同款 zero-cost 路径。
+            let procs = Arc::make_mut(&mut self.cached_processes);
+            for proc in procs {
+                if let Some(score) = scores.get(&proc.pid)
+                    && score.signature != proc.signature_status
+                {
+                    proc.signature_status = score.signature;
+                }
+            }
             self.security_scores.extend(scores);
             self.scoring_pending = false;
         }
@@ -1495,8 +1551,12 @@ impl App {
         // reaper_tick 必须每 tick 跑：无新事件时也要清过期 ghost。
         let _reaped = self.flow_aggregator.reaper_tick(now);
         self.flows = self.flow_aggregator.drain();
-        // flows 列表变化后 clamp 光标，避免端口面板 Flow 子视图越界。
-        let total = self.flows.len();
+        // v0.11 阶段 3：clamp 到过滤后总数，搜索 / FilterExpr 收窄后光标不越界。
+        let total = self
+            .port_panel
+            .panel
+            .flow_filtered_indices(&self.flows)
+            .len();
         self.port_panel.panel.flow_clamp_cursor(total);
     }
 
@@ -1587,7 +1647,12 @@ impl App {
         let now = std::time::SystemTime::now();
         crate::ebpf::flow::reap_expired_schannel_flows(&mut self.flows, now);
 
-        let total = self.flows.len();
+        // v0.11 阶段 3：clamp 到过滤后总数（与 tick_flows_ebpf 同款）。
+        let total = self
+            .port_panel
+            .panel
+            .flow_filtered_indices(&self.flows)
+            .len();
         self.port_panel.panel.flow_clamp_cursor(total);
     }
 
@@ -1755,6 +1820,7 @@ impl App {
             op_history: &mut self.op_history,
             dns_log_recent: &mut self.dns_log_recent,
             pending_container_exec: &mut self.pending_container_exec_target,
+            flows: &self.flows,
         };
         if self.mode == AppMode::ProcessList {
             self.process_panel.panel.tick(&mut ctx);

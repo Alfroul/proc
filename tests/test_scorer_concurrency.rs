@@ -91,6 +91,8 @@ fn test_scorer_round_trip() {
         run_time: 0,
         name_lower: std::sync::Arc::from("test.exe"),
         throttled: proc::throttle::EcoQoSState::default(),
+        signature_status: proc::security::SignatureStatus::default(),
+        parent_chain: Vec::new(),
     }]);
     let ports = Arc::new(Vec::<PortEntry>::new());
     let flows = Arc::new(Vec::<ProcessFlow>::new());
@@ -190,6 +192,8 @@ fn big_request() -> ScorerRequest {
                 run_time: 0,
                 name_lower: std::sync::Arc::from(name.to_lowercase().as_str()),
                 throttled: proc::throttle::EcoQoSState::default(),
+                signature_status: proc::security::SignatureStatus::default(),
+                parent_chain: Vec::new(),
             }
         })
         .collect();
