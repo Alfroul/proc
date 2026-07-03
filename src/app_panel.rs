@@ -250,7 +250,7 @@ pub struct PanelContext<'a> {
     /// v0.11 阶段 3：当前 ProcessFlow 快照（`App::flows` 的引用）。Flow 子视图
     /// 在 FilterExpr 模式下用此切片走 `apply_network` 过滤；substring 模式下
     /// 走 sni/dns_name/comm/remote_addr 子串匹配。
-    pub flows: &'a [crate::ebpf::flow::ProcessFlow],
+    pub flows: &'a [crate::flow::ProcessFlow],
 }
 
 /// Trait for a TUI panel that owns its own state.

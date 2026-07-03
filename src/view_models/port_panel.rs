@@ -719,7 +719,7 @@ impl PortPanel {
     fn handle_flow_view_key(
         &mut self,
         key: KeyEvent,
-        flows: &[crate::ebpf::flow::ProcessFlow],
+        flows: &[crate::flow::ProcessFlow],
     ) -> KeyResult {
         // 搜索激活时优先消费
         if self.flow_search.is_active() {
@@ -782,7 +782,7 @@ impl PortPanel {
     /// FilterExpr 模式：走 [`crate::filter::FilterExpr::apply_network`]，作用于
     /// ProcessFlow 字段（sni / dns_name / remote_addr / remote_port / bytes_out /
     /// bytes_in / source）。parse 失败保留上一次成功 AST（与 List view 同款契约）。
-    pub fn flow_filtered_indices(&self, flows: &[crate::ebpf::flow::ProcessFlow]) -> Vec<usize> {
+    pub fn flow_filtered_indices(&self, flows: &[crate::flow::ProcessFlow]) -> Vec<usize> {
         match self.flow_search.mode {
             crate::search::QueryMode::Substring => {
                 let q = self.flow_search.query().trim().to_lowercase();

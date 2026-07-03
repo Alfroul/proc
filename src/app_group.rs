@@ -135,15 +135,6 @@ fn ver_string(buf: &[u8], lang_cp: &str, key: &str) -> Option<String> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn query_version_info(_exe_path: &str) -> Option<VersionInfo> {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        tracing::warn!("query_version_info is not supported on this platform; app grouping falls back to file name")
-    });
-    None
-}
-
 // ── Role hint inference ──
 
 fn infer_role_hint(proc: &ProcessInfo) -> Option<String> {

@@ -159,75 +159,6 @@ fn format_smart_badge(smart_data: &[crate::smart::SmartData], _label: &str) -> S
     s
 }
 
-/// v0.7 阶段 6：根据 PSI avg10 选色（ADR-0013）。
-/// - < 5% → 绿（无压力）
-/// - 5-20% → 黄（轻度）
-/// - 20-50% → 橙 / danger（明显）
-/// - > 50% → 红 + BOLD（严重）
-///
-/// 纯函数 + pub，让单元测试直接覆盖分级边界。
-fn psi_avg10_style(avg10: f32) -> ratatui::style::Style {
-    if avg10 >= 50.0 {
-        theme::style_danger().add_modifier(Modifier::BOLD)
-    } else if avg10 >= 20.0 {
-        theme::style_danger()
-    } else if avg10 >= 5.0 {
-        theme::style_warning()
-    } else {
-        theme::style_success()
-    }
-}
-
-/// 把 PSI 段写入 sidebar 行集合（ADR-0013）。
-///
-/// `None` 表示平台不支持 / PSI 不可用，写入一行降级提示。
-/// `Some(stats)` 写 4 行：标题 + CPU/MEM/IO 三行，每行 some/full avg10。
-fn push_psi_lines(lines: &mut Vec<Line<'static>>, psi: Option<&crate::psi::PsiStats>) {
-    let Some(stats) = psi else {
-        lines.push(Line::from(Span::styled(
-            "PSI: Linux 4.20+ only",
-            theme::style_muted(),
-        )));
-        return;
-    };
-
-    lines.push(Line::from(Span::styled("Pressure:", theme::style_muted())));
-
-    // CPU 只有 some，没 full（内核设计）
-    lines.push(Line::from(vec![
-        Span::raw("  CPU "),
-        Span::styled(
-            format!("some {:>4.1}%", stats.cpu_some.avg10),
-            psi_avg10_style(stats.cpu_some.avg10),
-        ),
-    ]));
-
-    // MEM / IO 有 some + full
-    for (label, some, full) in [
-        ("MEM", stats.mem_some, stats.mem_full),
-        ("IO ", stats.io_some, stats.io_full),
-    ] {
-        let mut spans = vec![
-            Span::raw(format!("  {} ", label)),
-            Span::styled(
-                format!("some {:>4.1}%", some.avg10),
-                psi_avg10_style(some.avg10),
-            ),
-        ];
-        match full {
-            Some(f) => {
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    format!("full {:>4.1}%", f.avg10),
-                    psi_avg10_style(f.avg10),
-                ));
-            }
-            None => spans.push(Span::styled(" full  ---", theme::style_muted())),
-        }
-        lines.push(Line::from(spans));
-    }
-}
-
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::RIGHT)
@@ -376,11 +307,6 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
-
-    // v0.7 阶段 6：Linux PSI 段（ADR-0013）。
-    // 非 Linux 平台 / 内核 < 4.20 / CONFIG_PSI=n → snapshot.psi_stats() = None
-    // → 降级显示 "PSI: Linux 4.20+ only"。
-    push_psi_lines(&mut lines, app.snapshot.psi_stats());
 
     lines.push(Line::from(""));
 

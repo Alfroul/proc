@@ -249,50 +249,6 @@ pub use windows_impl::{
     scan_device_locks_with_processes,
 };
 
-#[cfg(not(target_os = "windows"))]
-mod stub_impl {
-    use super::{HandleLock, RemovableDevice};
-    use crate::error::{ProcError, Result};
-
-    const UNSUPPORTED: &str = "Linux/macOS 不支持 USB 助手，详见 README 平台支持表";
-
-    pub fn scan_all_devices() -> Result<Vec<RemovableDevice>> {
-        Err(ProcError::usb_detect(UNSUPPORTED))
-    }
-
-    pub fn scan_device_locks(
-        _drive_letter: char,
-    ) -> Result<Vec<(HandleLock, super::classify::HandleRisk)>> {
-        Err(ProcError::usb_detect(UNSUPPORTED))
-    }
-
-    pub fn scan_device_locks_with_processes(
-        _drive_letter: char,
-        _processes: &[crate::collect::ProcessInfo],
-    ) -> Result<Vec<(HandleLock, super::classify::HandleRisk)>> {
-        Err(ProcError::usb_detect(UNSUPPORTED))
-    }
-
-    pub fn kill_safe_processes(_drive_letter: char) -> Result<(u32, u32, Vec<String>)> {
-        Err(ProcError::usb_detect(UNSUPPORTED))
-    }
-
-    pub fn cli_list_devices() -> Result<()> {
-        eprintln!("Linux/macOS 不支持 USB 助手，详见 README 平台支持表");
-        Ok(())
-    }
-
-    pub fn cli_check_drive(_drive_str: &str, _find_locks_only: bool) -> Result<()> {
-        Err(ProcError::usb_detect(UNSUPPORTED))
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-pub use stub_impl::{
-    cli_check_drive, cli_list_devices, kill_safe_processes, scan_all_devices, scan_device_locks,
-    scan_device_locks_with_processes,
-};
-
 fn parse_drive_letter(drive_str: &str) -> Result<char> {
     let cleaned = drive_str
         .trim()

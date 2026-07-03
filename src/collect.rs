@@ -83,15 +83,6 @@ fn query_process_memory_winapi(pid: u32) -> Option<u64> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn query_process_memory_winapi(_pid: u32) -> Option<u64> {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        tracing::warn!("query_process_memory_winapi is not supported on this platform")
-    });
-    None
-}
-
 /// Collect processes that sysinfo misses (e.g., vmmemWSL in Session 0).
 /// Uses CreateToolhelp32Snapshot to enumerate all PIDs, then for any PID
 /// not in sysinfo's list, queries name + memory via Windows API.
@@ -262,18 +253,6 @@ fn collect_missing_processes(
     result
 }
 
-#[cfg(not(target_os = "windows"))]
-fn collect_missing_processes(
-    _existing_pids: &std::collections::HashSet<u32>,
-    _tasklist_memory: &HashMap<u32, u64>,
-) -> Vec<ProcessInfo> {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        tracing::warn!("collect_missing_processes is not supported on this platform")
-    });
-    Vec::new()
-}
-
 /// 磁盘信息（用于侧边栏展示）
 #[derive(Debug, Clone)]
 pub struct DiskInfo {
@@ -389,15 +368,6 @@ fn query_adapter_ipv4_addresses() -> Vec<NetAdapterInfo> {
     adapters
 }
 
-#[cfg(not(target_os = "windows"))]
-fn query_adapter_ipv4_addresses() -> Vec<NetAdapterInfo> {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        tracing::warn!("query_adapter_ipv4_addresses is not supported on this platform; net_adapters() will return empty until sysinfo path is wired")
-    });
-    Vec::new()
-}
-
 /// 查询 TCP 连接状态统计（轻量版，只计数不关联进程）+ 传输质量计数。
 ///
 /// 传输质量指标（`retransmitted_segs` / `reset_segs` / `failed_connections`）
@@ -444,43 +414,6 @@ fn query_tcp_stats() -> TcpStats {
         stats.reset_segs += raw.dwOutRsts as u64;
         stats.failed_connections += raw.dwAttemptFails as u64;
         stats.out_segs += raw.dw64OutSegs;
-    }
-
-    stats
-}
-
-#[cfg(not(target_os = "windows"))]
-fn query_tcp_stats() -> TcpStats {
-    use crate::port_map::TcpState;
-
-    let mut stats = TcpStats::default();
-
-    // 连接状态计数：Linux 上 netstat2 同样能跑（走 /proc/net/tcp），所以
-    // 与 Windows 一样在状态机里统计。失败时降级为 0。
-    let af_flags = netstat2::AddressFamilyFlags::IPV4 | netstat2::AddressFamilyFlags::IPV6;
-    let proto_flags = netstat2::ProtocolFlags::TCP;
-    if let Ok(sockets_info) = netstat2::get_sockets_info(af_flags, proto_flags) {
-        for si in &sockets_info {
-            if let netstat2::ProtocolSocketInfo::Tcp(tcp) = &si.protocol_socket_info {
-                let state_str = format!("{}", tcp.state);
-                match TcpState::from_state_str(Some(&state_str)) {
-                    TcpState::Established => stats.established += 1,
-                    TcpState::TimeWait => stats.time_wait += 1,
-                    TcpState::CloseWait => stats.close_wait += 1,
-                    TcpState::Listen => stats.listen += 1,
-                    TcpState::Other => {}
-                }
-            }
-        }
-    }
-
-    // 传输质量：/proc/net/snmp 路径有则解析，无则静默保留 0。
-    if let Ok(snmp) = std::fs::read_to_string("/proc/net/snmp") {
-        let parsed = crate::port_map::parse_proc_net_snmp_tcp(&snmp);
-        stats.retransmitted_segs += parsed.retrans_segs;
-        stats.reset_segs += parsed.out_rsts;
-        stats.failed_connections += parsed.attempt_fails;
-        stats.out_segs += parsed.out_segs;
     }
 
     stats
@@ -1076,9 +1009,6 @@ struct LightSnapshot {
     /// 当前实现：sysinfo 的 Components 通常只给一个全局 CPU 温度，无法分核；
     /// 把全局温度填到第 0 核，其余留 None。Sidebar 折叠模式仍用 `temperatures`。
     per_core_temp: Vec<Option<f32>>,
-    /// v0.7 阶段 6：Linux PSI（Pressure Stall Information）。Linux only；
-    /// 其他平台恒为 `None`，监控面板降级显示。详见 ADR-0013。
-    psi: Option<crate::psi::PsiStats>,
 }
 
 struct LightWorker {
@@ -1244,10 +1174,6 @@ fn light_worker_loop(
             .map(|d| (d.total_space() - d.available_space(), d.total_space()))
             .unwrap_or((0, 0));
 
-        // v0.7 阶段 6：Linux PSI 1s tick 采集（详见 ADR-0013）。
-        // 其他平台 read_psi() 返回 None，无开销。
-        let psi = crate::psi::read_psi();
-
         let snapshot = LightSnapshot {
             gpu_info,
             temperatures: (cpu_temp, gpu_temp),
@@ -1257,7 +1183,6 @@ fn light_worker_loop(
             throttle_info,
             per_core_freq,
             per_core_temp,
-            psi,
         };
 
         match snap_tx.try_send(snapshot) {
@@ -1411,9 +1336,6 @@ pub struct SystemSnapshot {
     per_core_freq_cache: Vec<u64>,
     /// Per-core CPU 温度（°C，None=该核不可用）—— 由 worker 推送
     per_core_temp_cache: Vec<Option<f32>>,
-    /// v0.7 阶段 6：Linux PSI 缓存 —— 由 LightWorker 推送。Linux only；
-    /// 其他平台恒为 None。详见 ADR-0013。
-    psi_cache: Option<crate::psi::PsiStats>,
     /// SMART 数据缓存 —— 由 SmartWorker 30s 推送一次
     smart_cache: Vec<crate::smart::SmartData>,
     // Replay mode overrides
@@ -1459,15 +1381,6 @@ fn query_all_process_memories_tasklist() -> HashMap<u32, u64> {
     tracing::debug!("tasklist parsed {} processes", map.len());
 
     map
-}
-
-#[cfg(not(target_os = "windows"))]
-fn query_all_process_memories_tasklist() -> HashMap<u32, u64> {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        tracing::warn!("query_all_process_memories_tasklist is not supported on this platform")
-    });
-    HashMap::new()
 }
 
 impl SystemSnapshot {
@@ -1534,7 +1447,6 @@ impl SystemSnapshot {
                 .as_ref()
                 .map(|s| s.per_core_temp.clone())
                 .unwrap_or_default(),
-            psi_cache: first_snap.as_ref().and_then(|s| s.psi.clone()),
             smart_cache: first_smart.unwrap_or_default(),
             replay_cpu: None,
             replay_memory: None,
@@ -1579,7 +1491,6 @@ impl SystemSnapshot {
             self.throttle_info = s.throttle_info;
             self.per_core_freq_cache = s.per_core_freq;
             self.per_core_temp_cache = s.per_core_temp;
-            self.psi_cache = s.psi;
         }
 
         // SMART 数据 —— 30s 推一次,这里只是 try_recv 缓存覆盖。
@@ -1855,14 +1766,6 @@ impl SystemSnapshot {
         &self.per_core_temp_cache
     }
 
-    /// v0.7 阶段 6：Linux PSI（Pressure Stall Information）缓存。
-    /// 非 Linux 平台 / 内核 < 4.20 / `CONFIG_PSI=n` 时返回 `None`。
-    /// 详见 ADR-0013。
-    #[must_use]
-    pub fn psi_stats(&self) -> Option<&crate::psi::PsiStats> {
-        self.psi_cache.as_ref()
-    }
-
     /// 获取上次刷新时间
     #[must_use]
     pub fn last_refresh(&self) -> Instant {
@@ -1959,15 +1862,6 @@ pub fn is_elevated() -> bool {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn is_elevated() -> bool {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        tracing::warn!("is_elevated is not supported on this platform; returning false")
-    });
-    false
-}
-
 /// 轻量刷新间隔（CPU/内存/GPU/网络等指标）
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 /// 重量刷新间隔（进程列表、端口扫描等）
@@ -1999,36 +1893,11 @@ pub fn parse_scaling_cur_freq(content: &str) -> Option<u64> {
 
 /// 读 per-core CPU 频率（MHz），与 `sysinfo::System::cpus()` 顺序对齐。
 ///
-/// 跨平台实现：
-/// - **Linux**：优先走 sysfs `/sys/devices/system/cpu/cpu{N}/cpufreq/scaling_cur_freq`，
-///   拿不到（虚拟机 / 无 cpufreq 驱动）退回 sysinfo 的 `Cpu::frequency()`（启动时读
-///   `/proc/cpuinfo`，运行期不变）。
-/// - **Windows**：sysinfo 走 `RegQueryValueEx` 读 `~MHz` 注册表项，per-processor。
-/// - **macOS**：sysinfo 走 sysctl，per-core。返回空 Vec 时 sidebar 显示"不可用"。
+/// Windows：sysinfo 走 `RegQueryValueEx` 读 `~MHz` 注册表项，per-processor。
 fn collect_per_core_freq(sys: &sysinfo::System) -> Vec<u64> {
     let cpus = sys.cpus();
     if cpus.is_empty() {
         return Vec::new();
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        // 尝试 sysfs 读每个逻辑核；任一失败就退回 sysinfo 频率。
-        let mut from_sysfs: Vec<Option<u64>> = (0..cpus.len()).map(|_| None).collect();
-        let mut all_ok = true;
-        for (idx, _) in cpus.iter().enumerate() {
-            let path = format!("/sys/devices/system/cpu/cpu{idx}/cpufreq/scaling_cur_freq");
-            if let Ok(content) = std::fs::read_to_string(&path)
-                && let Some(mhz) = parse_scaling_cur_freq(&content)
-            {
-                from_sysfs[idx] = Some(mhz);
-            } else {
-                all_ok = false;
-            }
-        }
-        if all_ok {
-            return from_sysfs.into_iter().map(Option::unwrap).collect();
-        }
     }
 
     cpus.iter().map(|c| c.frequency()).collect()

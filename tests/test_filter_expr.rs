@@ -53,6 +53,16 @@ fn ctx<'a>(p: &'a ProcessInfo, score: Option<u32>) -> EvalCtx<'a> {
     EvalCtx {
         process: p,
         security_score: score,
+        total_memory: 0,
+    }
+}
+
+/// v0.12 阶段 4（TD-30）：带 total_memory 的 EvalCtx 构造，用于 mem% 语义测试。
+fn ctx_with_mem<'a>(p: &'a ProcessInfo, score: Option<u32>, total_memory: u64) -> EvalCtx<'a> {
+    EvalCtx {
+        process: p,
+        security_score: score,
+        total_memory,
     }
 }
 
@@ -730,4 +740,180 @@ fn app_group_substring_mode_unchanged() {
 #[allow(dead_code)]
 fn _silence_unused() {
     let _ = app_group::build_visual_items;
+}
+
+// ===== v0.12 阶段 4：TD-30 mem% 语义修复 =====
+//
+// 现状（修复前）：`mem > 5%` 解析为 `FieldCmp(Mem, Gt, Percent(5))`，apply 时
+// 走 `(Num(p.memory), Percent(5)) => op.apply_num(p.memory as f64, 5.0)` ——
+// 字节值与百分号数字直接比较，几乎所有进程命中（silent bug）。
+//
+// 修复后：mem + Percent 时，按 total_memory 换算 `mem / total_memory * 100`
+// 再与百分号字面量比较。其他字段（cpu / pid / disk_read / ...）+ Percent 仍走
+// 旧行为（cpu 自身就是 0-100 标度；disk_read / net_sent 等没有自然除数）。
+// total_memory == 0（测试 / 未知容量）也退回旧行为，避免 div by zero。
+
+#[test]
+fn td30_mem_percent_uses_total_memory_divisor() {
+    // 16GB 系统：`mem > 50%` 等价于 `mem > 8GB`。
+    let total = 16 * 1024 * 1024 * 1024_u64;
+    let expr = parse("mem > 50%").unwrap();
+    let big = make_proc("big", 0.0, 10 * 1024 * 1024 * 1024, 1); // 10GB > 50%
+    let small = make_proc("small", 0.0, 4 * 1024 * 1024 * 1024, 2); // 4GB < 50%
+    assert!(expr.apply(&ctx_with_mem(&big, None, total)));
+    assert!(!expr.apply(&ctx_with_mem(&small, None, total)));
+}
+
+#[test]
+fn td30_mem_percent_no_longer_matches_tiny_processes() {
+    // 1KB 进程在 16GB 系统上占 0.000006%，远低于 5% 阈值。
+    // 旧行为：apply_num(1024, 5.0) = true（1024 > 5）→ silent bug 命中。
+    // 新行为：1024 / (16GB) * 100 ≈ 0.000006% < 5% → false。
+    let total = 16 * 1024 * 1024 * 1024_u64;
+    let expr = parse("mem > 5%").unwrap();
+    let tiny = make_proc("tiny", 0.0, 1024, 1);
+    assert!(!expr.apply(&ctx_with_mem(&tiny, None, total)));
+}
+
+#[test]
+fn td30_cpu_percent_still_equivalent_to_bare_number() {
+    // cpu 自身就是 0-100 标度，`cpu > 5%` 与 `cpu > 5` 必须仍等价（不变）。
+    let bare = parse("cpu > 5").unwrap();
+    let pct = parse("cpu > 5%").unwrap();
+    let p = make_proc("hot", 10.0, 0, 1);
+    // 即便 total_memory 很大，cpu + Percent 不应受影响。
+    assert_eq!(
+        bare.apply(&ctx_with_mem(&p, None, 16 * 1024 * 1024 * 1024)),
+        pct.apply(&ctx_with_mem(&p, None, 16 * 1024 * 1024 * 1024))
+    );
+}
+
+#[test]
+fn td30_mem_bare_bytes_unaffected_by_total_memory() {
+    // 不带 % 的 mem 字面量始终按字节比较，total_memory 不参与。
+    let expr = parse("mem > 1mb").unwrap();
+    let big = make_proc("big", 0.0, 2 * 1024 * 1024, 1);
+    let small = make_proc("small", 0.0, 1024, 2);
+    assert!(expr.apply(&ctx_with_mem(&big, None, 16 * 1024 * 1024 * 1024)));
+    assert!(!expr.apply(&ctx_with_mem(&small, None, 16 * 1024 * 1024 * 1024)));
+}
+
+#[test]
+fn td30_mem_percent_zero_total_memory_falls_back_to_legacy() {
+    // total_memory == 0（测试场景 / 未知容量）：退回旧行为（字节值直接与
+    // 百分号数字比较），避免 div by zero。让 panel_with_procs 类测试
+    // （传 0 给 init_tree）继续按旧契约工作。
+    let expr = parse("mem > 5%").unwrap();
+    let p = make_proc("x", 0.0, 1024, 1); // 1024 字节 > 5（旧行为下命中）
+    assert!(expr.apply(&ctx_with_mem(&p, None, 0)));
+}
+
+#[test]
+fn td30_disk_read_percent_unaffected_no_natural_divisor() {
+    // disk_read 字段没有自然除数（不是字节总数而是字节/秒），Percent 沿用旧行为。
+    // surgical 原则：不在 EvalCtx 加 disk_total / net_total 等字段（spec 没要求）。
+    let expr = parse("disk_read > 5%").unwrap();
+    let busy = make_proc_full("busy", 0.0, 0, 1, &[], 10_000, 0, 0, 0);
+    let idle = make_proc_full("idle", 0.0, 0, 2, &[], 1, 0, 0, 0);
+    // 旧行为：apply_num(10_000, 5.0) = true；apply_num(1, 5.0) = false。
+    assert!(expr.apply(&ctx_with_mem(&busy, None, 16 * 1024 * 1024 * 1024)));
+    assert!(!expr.apply(&ctx_with_mem(&idle, None, 16 * 1024 * 1024 * 1024)));
+}
+
+// ===== v0.12 阶段 4：TD-28 regex \/ escape =====
+//
+// 现状（修复前）：parse_regex_lit 用 `take_till1(|c| c == '/')`，第一个 `/`
+// 就停止 → CIDR / URL / 路径 pattern 写不出来。
+//
+// 修复后：状态机扫描，遇 `\` 转义下一个字符（包括 `/`），遇非转义 `/` 停止。
+// 旧表达式（无 `\/`）行为不变。
+
+#[test]
+fn td28_regex_escape_slash_cidr_pattern() {
+    // CIDR pattern：`/192\.168\.1\.0\/24/` → pattern `192\.168\.1\.0/24`
+    let e = parse(r"name =~ /192\.168\.1\.0\/24/").unwrap();
+    if let FilterExpr::Regex {
+        field: _,
+        re,
+        case_insensitive: false,
+    } = e
+    {
+        // Pattern 内部的 `/` 应原样保留。
+        assert!(
+            re.is_match("192.168.1.0/24"),
+            "pattern should match CIDR string: {:?}",
+            re.as_str()
+        );
+        assert!(
+            !re.is_match("192.168.1.0"),
+            "pattern should not match bare IP: {:?}",
+            re.as_str()
+        );
+    } else {
+        panic!("expected Regex variant, got {:?}", e);
+    }
+}
+
+#[test]
+fn td28_regex_escape_slash_url_pattern() {
+    // URL pattern：`/https:\/\/example\.com/` → pattern `https://example\.com`
+    let e = parse(r"name =~ /https:\/\/example\.com/").unwrap();
+    if let FilterExpr::Regex { re, .. } = e {
+        assert!(re.is_match("https://example.com/path"));
+        assert!(!re.is_match("ftp://example.com"));
+    } else {
+        panic!("expected Regex variant, got {:?}", e);
+    }
+}
+
+#[test]
+fn td28_regex_legacy_pattern_unaffected() {
+    // 旧表达式（无 `\/`）行为不变。
+    let e = parse("name =~ /chrome/").unwrap();
+    if let FilterExpr::Regex { re, .. } = e {
+        assert!(re.is_match("chrome.exe"));
+        assert!(!re.is_match("firefox.exe"));
+    } else {
+        panic!("expected Regex variant, got {:?}", e);
+    }
+}
+
+#[test]
+fn td28_regex_escape_backslash_keeps_regex_semantics() {
+    // `\.` 在 regex 是「字面 .」转义，与 `\/` 不同语义。`\/` 在 regex 不是
+    // 特殊转义（`/` 不是 regex 元字符），但 pattern 内的 `\/` 字面就是 `/`，
+    // 所以传给 regex crate 时，`\/` 会被 regex 视为「无效转义」并 panic。
+    //
+    // 修复策略：parse_regex_lit 的状态机把 `\/` 拆成单 `/`（drop 反斜杠），
+    // 其他 `\X` 转义（如 `\.` `\d` `\w`）原样保留，让 regex crate 解释。
+    let e = parse(r"name =~ /a\.b\/c/").unwrap();
+    if let FilterExpr::Regex { re, .. } = e {
+        // pattern = `a\.b/c` —— `.` 已转义为字面句点，`/` 字面斜杠。
+        assert!(re.is_match("a.b/c"));
+        assert!(!re.is_match("axb/c")); // `.` 被转义，不应匹配任意字符
+    } else {
+        panic!("expected Regex variant, got {:?}", e);
+    }
+}
+
+#[test]
+fn td28_regex_escape_with_case_insensitive_flag() {
+    // `\/` + `i` flag 组合仍能正常解析。
+    let e = parse(r"name =~ /PATH\/TO/i").unwrap();
+    if let FilterExpr::Regex {
+        re,
+        case_insensitive: true,
+        ..
+    } = e
+    {
+        assert!(re.is_match("path/to/file"));
+    } else {
+        panic!("expected Regex (ci=true) variant, got {:?}", e);
+    }
+}
+
+#[test]
+fn td28_regex_escape_at_end_still_unterminated() {
+    // `\` 在 pattern 末尾 → 仍未闭合 → parse 失败（与旧行为一致）。
+    assert!(parse(r"name =~ /foo\").is_err());
 }

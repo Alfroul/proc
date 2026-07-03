@@ -1,6 +1,10 @@
 # proc
 
-Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中。Windows 主开发平台，Linux/macOS 可降级运行。
+Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中。**Windows-only 应用**（Windows 10 1809+ / Windows 11 x64，详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。
+
+> **v0.12.0（2026-07-04）** Windows-only 平台定位 + UX polish cycle：**ADR-0022 锁定 Windows-only 决策**（移除全部 Linux/macOS 代码——src/ebpf/ 整模块 + src/psi.rs + nvtop / nethogs / unsupported.rs 删 + ~25 文件 cfg gate 清理）/ **签名验证完整度**（SignatureStatus 9 状态机加 Expired/UntrustedRoot/ChainError + TRUSTED_SIGNERS 扩到 24 vendor + 用户配置 `trusted_signers.toml`）/ **FilterExpr 修复**（`mem > 50%` 按总内存换算 silent bug + regex `\/` escape 让 CIDR / URL pattern 能写）/ **6 个 v0.11 REVIEW-13 P2 修复**（diag JSON 加 dns_collector / NetworkIn HashSet O(1) / R17 系统启动白名单 / R18 Downloads 去重 / property_at_index lifetime 修正 / MCP DNS 持久 collector）。全量回归 1115 tests passed / 0 failed。详见 [CHANGELOG](CHANGELOG.md)。
+
+> **已知限制**：**Windows-only 平台**（v0.12 起 proc 转为 Windows-only，Linux / macOS 用户迁移路径 `git checkout v0.11.0`）；Win10 < 1809 admin 下 Schannel event 1793 不 fire；worker restart 3 次失败后仍永久死亡；DNS ETW 仅 Windows 管理员启用（非 admin 走 PowerShell fallback）。详见 [tech-debt](docs/tech-debt.md)。
 
 > **v0.11.0（2026-07-01）** 安全 + 可靠性大版本：**Worker Restart 真正实装**（TD-4 清零，panic 后指数退避 5s/30s/5min 自动重启，3 次失败永久死亡）/ **DNS ETW 替代 PowerShell probe**（CPU 3-5% → < 0.5%，延迟 500ms-1s → < 50ms，PowerShell fallback 保留）/ **FilterExpr v2 网络字段**（`sni/dns_name/remote_addr/remote_port/bytes_out/bytes_in/source`）/ **进程签名验证 R16**（WinVerifyTrust 6 状态机 + BackgroundScorer 异步）/ **进程父子链 R17**（Office → shell / Browser → shell / ScriptInterpreter 三档扣分）/ **可疑启动路径 R18**（%TEMP% / %APPDATA% / Downloads + R16 协同扣分）。全量回归 1146 tests passed / 0 failed。详见 [CHANGELOG](CHANGELOG.md)。
 
@@ -428,46 +432,48 @@ proc docker exec <container> bash -lc "env"       # exec 指定命令
 
 ## 平台支持
 
-Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的功能不可用，启动时状态栏会一次性提示降级清单。
+**v0.12.0 起 Windows-only**（详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。Windows 10 1809+ / Windows 11 x64。Linux / macOS 用户迁移路径：`git checkout v0.11.0`（最后含 Linux 代码的 release）。
 
-**release CI 覆盖 5 个 target**（v0.6.0+）：`x86_64-pc-windows-msvc` / `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-gnu` / `aarch64-apple-darwin` / `x86_64-apple-darwin`。`cargo binstall proc` / `winget install Alfroul.proc` / `scoop install proc` 任选一种安装。
+**release CI 仅覆盖 1 个 target**（v0.12.0+）：`x86_64-pc-windows-msvc`。`cargo binstall proc` / `winget install Alfroul.proc` / `scoop install proc` 任选一种安装（Linux / macOS 的 binstall / winget / scoop 包不再发布，详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。
 
-| 功能 | Windows | Linux | macOS |
-|---|---|---|---|
-| 进程列表 / 树 | ✅ | ⚠️ 基础 | ⚠️ 基础 |
-| 进程分类（用户/系统/服务） | ✅ Win32 | ⚠️ 启发式 | ⚠️ 启发式 |
-| 安全评分（签名） | ✅ WinVerifyTrust R16<sup>v0.11.0</sup> | ⚠️ 仅行为（无 WinVerifyTrust） | ⚠️ 仅行为 |
-| USB 助手 | ✅ | ❌ | ❌ |
-| 降频检测 | ✅ | ❌ | ❌ |
-| per-core 频率<sup>v0.5.0</sup> | ✅ | ✅ sysfs cpufreq | ❌ |
-| per-core 温度<sup>v0.5.0</sup> | ✅ ACPI | ✅ hwmon | ❌ |
-| 每磁盘 I/O 速率 | ✅ | ❌ | ❌ |
-| 每进程磁盘 I/O | ✅ sysinfo（IO 性能计数器） | ✅ | ✅ |
-| **每进程磁盘 I/O（ETW 高精度）**<sup>v0.7.0</sup> | ✅ NT Kernel Logger + DiskIo TypeGroup1（管理员；非管理员降级到 sysinfo） | ❌ | ❌ |
-| **GPU（多厂商）**<sup>v0.5.0</sup> | ✅ NVIDIA via NVML | ✅ AMD/Intel/NVIDIA via nvtop | ❌ |
-| **SMART 磁盘健康**<sup>v0.5.0</sup> | ✅ smartctl + WMI 降级 | ✅ smartctl | ✅ smartctl |
-| **per-process 网络流量**<sup>v0.5.0</sup> | ✅ IP Helper | ✅ nethogs 子进程 | ❌ |
-| **DNS 查询日志**<sup>v0.5.0 · v0.11.0 ETW</sup> | ✅ ETW（默认）/ PowerShell（fallback，管理员判定 `proc diag` 看 `dns_collector`） | ❌（pcap 留 v0.7+） | ❌ |
-| **TCP 传输质量**<sup>v0.5.0</sup> | ✅ GetTcpStatisticsEx2 | ✅ /proc/net/snmp | ❌ |
-| **进程句柄 Tab**<sup>v0.5.0</sup> | ✅ NtQuerySystemInformation | ✅ /proc/\<pid\>/fd | ❌ |
-| **内存映射 Tab**<sup>v0.5.0</sup> | ✅ VirtualQueryEx | ✅ /proc/\<pid\>/maps | ❌ |
-| **进程优先级 / affinity**<sup>v0.5.0</sup> | ✅ SetPriorityClass / SetProcessAffinityMask | ✅ setpriority / sched_setaffinity | ❌ |
-| **Windows 11 EcoQoS 切换**<sup>v0.7.0</sup> | ✅ SetProcessInformation(ProcessPowerThrottling) + 进程列表 🍃 标记 | ❌（cgroup freezer / cpu.weight 留 v0.8+） | ❌ |
-| **Linux PSI 监控**<sup>v0.7.0</sup> | ❌ | ✅ /proc/pressure/{cpu,mem,io} + 监控面板 + 5 条 alert 规则 | ❌ |
-| **eBPF flow graph（端到端关联）**<sup>v0.7.0</sup> | ❌ | ⚠️ feature flag `ebpf`（内核 ≥ 5.10 + root / CAP_BPF）；端口面板按 `F` 进入 Flow 子视图 + `proc flows` CLI | ❌ |
-| **Schannel ETW TLS SNI**<sup>v0.10.0</sup> | ✅ `Microsoft-Windows-Schannel-Events` ETW event 1793（Win10 1809+ 管理员 + TDH 动态 schema） | ❌（Linux 走 eBPF uprobe 路径，v0.9 推迟） | ❌ |
-| **文件占用反查（who）**<sup>v0.5.0</sup> | ✅ filelocksmith | ⚠️ lsof 启发式 | ⚠️ lsof 启发式 |
-| **v0.6.0 安全加固**（self-mitigation / env mask / restricted spawn） | ✅ | ⚠️ self-mitigation 暂无（Linux prctl 留 v0.7+） | ⚠️ 同 Linux |
-| **v0.6.0 可观测性**（log rotate / crash report / worker metrics） | ✅ | ✅ | ✅ |
-| **Docker**（ps/inspect/top/logs/images/volumes/exec） | ✅ | ✅ | ✅ |
-| 进程级带宽（EStats） | ✅ | ❌ | ❌ |
-| Toast 通知 | ✅ | ❌ | ❌ |
-| 网络诊断 | ✅ | ✅ | ✅ |
-| 录屏 / 告警 / 监控 | ✅ | ✅ | ✅ |
+| 功能 | Windows 10 1809+ / Windows 11 x64 |
+|---|---|
+| 进程列表 / 树 | ✅ |
+| 进程分类（用户/系统/服务） | ✅ Win32 |
+| 安全评分（签名） | ✅ WinVerifyTrust R16<sup>v0.11.0</sup> + 9 状态机<sup>v0.12.0</sup> + trusted_signers.toml<sup>v0.12.0</sup> |
+| USB 助手 | ✅ |
+| 降频检测 | ✅ |
+| per-core 频率<sup>v0.5.0</sup> | ✅ CallNtPowerInformation |
+| per-core 温度<sup>v0.5.0</sup> | ✅ ACPI |
+| 每磁盘 I/O 速率 | ✅ |
+| 每进程磁盘 I/O | ✅ sysinfo（IO 性能计数器） |
+| **每进程磁盘 I/O（ETW 高精度）**<sup>v0.7.0</sup> | ✅ NT Kernel Logger + DiskIo TypeGroup1（管理员；非管理员降级到 sysinfo） |
+| **GPU（多厂商）**<sup>v0.5.0</sup> | ✅ NVIDIA via NVML + DXGI / PDH utilization |
+| **SMART 磁盘健康**<sup>v0.5.0</sup> | ✅ smartctl + WMI 降级 |
+| **per-process 网络流量**<sup>v0.5.0</sup> | ✅ IP Helper |
+| **DNS 查询日志**<sup>v0.5.0 · v0.11.0 ETW</sup> | ✅ ETW（默认）/ PowerShell（fallback，管理员判定 `proc diag` 看 `dns_collector`） |
+| **TCP 传输质量**<sup>v0.5.0</sup> | ✅ GetTcpStatisticsEx2 |
+| **进程句柄 Tab**<sup>v0.5.0</sup> | ✅ NtQuerySystemInformation |
+| **内存映射 Tab**<sup>v0.5.0</sup> | ✅ VirtualQueryEx |
+| **进程优先级 / affinity**<sup>v0.5.0</sup> | ✅ SetPriorityClass / SetProcessAffinityMask |
+| **Windows 11 EcoQoS 切换**<sup>v0.7.0</sup> | ✅ SetProcessInformation(ProcessPowerThrottling) + 进程列表 🍃 标记 |
+| **Schannel ETW TLS SNI**<sup>v0.10.0</sup> | ✅ `Microsoft-Windows-Schannel-Events` ETW event 1793（Win10 1809+ 管理员 + TDH 动态 schema） |
+| **文件占用反查（who）**<sup>v0.5.0</sup> | ✅ filelocksmith |
+| **v0.6.0 安全加固**（self-mitigation / env mask / restricted spawn） | ✅ |
+| **v0.6.0 可观测性**（log rotate / crash report / worker metrics） | ✅ |
+| **Docker**（ps/inspect/top/logs/images/volumes/exec） | ✅ |
+| 进程级带宽（EStats） | ✅ |
+| Toast 通知 | ✅ |
+| 网络诊断 | ✅ |
+| 录屏 / 告警 / 监控 | ✅ |
 
 ## FAQ
 
 **需要管理员权限吗？** 基本功能不需要。管理员权限可启用进程级带宽监控（EStats）、终止某些系统进程、完整句柄枚举。非管理员自动降级。
+
+**为什么 v0.12 移除 Linux / macOS 支持？**<sup>v0.12.0</sup> 详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)。简短理由：(1) **维护成本**——Linux eBPF flow graph（ADR-0016）+ Linux PSI 监控（ADR-0013）+ Linux nvtop GPU + Linux nethogs 网络流量这些「Linux 杀手锏」需要 Linux 真机环境持续验证，开发者主要在 Windows 开发，Linux 路径长期挂着 `未在本机验证` 标签（TD-19）成为债务黑洞；(2) **聚焦**——proc 的核心价值在 Windows 平台深度（WinVerifyTrust / ETW / Schannel / EcoQoS / NT Kernel Logger / Win32 API），把精力集中在 Windows 让 Windows 体验做到最佳；(3) **简化**——Cargo.toml 删 libc / aya / aya-log 等 Linux 依赖，CI / release 只跑 1 个 target（之前 5 个），工具链简化让迭代更快。Linux / macOS 用户如需 v0.12+ 新功能（如 trusted_signers / mem% 修复 / 9 状态机）欢迎 fork。
+
+**Linux / macOS 用户怎么办？**<sup>v0.12.0</sup> 三个选项：(1) **停留在 v0.11.0**——`git checkout v0.11.0` 或在 [releases](https://github.com/Alfroul/proc/releases) 下载 v0.11.0 二进制；v0.11.0 是最后含 Linux 代码的 release，含完整 eBPF / PSI / nvtop / nethogs 路径。(2) **fork 继续 Linux 维护**——proc 是 MIT 协议，欢迎社区 fork 维护 Linux 分支。(3) **替代方案**——Linux 推荐 [btop](https://github.com/aristocratos/btop)（TUI）/ [htop](https://htop.dev/)（TUI）/ [sysdig](https://sysdig.com/)（eBPF）；macOS 推荐 [Activity Monitor](https://support.apple.com/guide/mac-help/mchlp2529/mac)（内置）/ [iStat Menus](https://bjango.com/mac/istatmenus/)。详见 ADR-0022 migration path 段。
 
 **GPU 信息不显示？**
 - Windows：仅显示 NVIDIA（via NVML），其他显卡走 DXGI 显示 VRAM（utilization/temp/power 仅 NVIDIA）
@@ -478,7 +484,7 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 
 **容器 exec 跟直接 `docker exec` 有什么区别？** TUI 内按 `e` 进入的是嵌入式 PTY 视图（`portable-pty` + `vt100` crate），ANSI 渲染在 ratatui 内部；CLI `proc docker exec` 直接透传 stdio，等价 `docker exec -it`。两者底层都 spawn `docker exec -it <container> <shell>` 子进程，docker CLI 处理所有 daemon 通信。
 
-**smartctl 未安装？** Linux/macOS 必须装 `smartctl`（smartmontools 包）；Windows 装 smartctl 后 proc 自动用，未装时退化到 WMI `MSStorageDriver_FailurePredictStatus`（仅预测失败聚合状态，无详细属性）。
+**smartctl 未安装？** Windows 装 smartctl 后 proc 自动用，未装时退化到 WMI `MSStorageDriver_FailurePredictStatus`（仅预测失败聚合状态，无详细属性）。
 
 **录屏会泄漏什么？**<sup>v0.6.0</sup> 录屏（VT100 recording）会捕获屏幕所有内容含 DNS 域名 / 进程 cmd / env 真值（如果 reveal 打开）。v0.6.0 起按 `R` 触发录屏时**先弹确认对话框**（按 `y` 确认 / `n` 取消），并在录屏期间强制 Env Tab 走 mask 模式（即便 `env_reveal=true` 也强制 mask）。录屏文件存 `~/.config/proc/recordings/*.prec`，**永不自动上传**。
 
@@ -488,9 +494,9 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 
 **日志为什么不覆盖了？**<sup>v0.6.0</sup> v0.5.0 以前启动时 `File::create` truncate 覆盖旧日志，崩溃前最后一段全丢。v0.6.0 起改为 `tracing-appender::RollingFileAppender::daily`，每天一个文件 `proc.logYYYY-MM-DD`，自动清理 7 天前的日志。
 
-**如何启用 eBPF flow graph？**<sup>v0.7.0</sup> 仅 Linux 平台，需自行编译：`cargo install --features ebpf` 或本仓库 `cargo build --release --features ebpf`。release CI 在 `linux-musl` / `linux-arm` 两个 target 各产一份 `proc_ebpf-{target}.tar.gz` 后缀二进制（v0.7.0 已加），解压拿到 `proc_ebpf` 单独运行。启动后端口面板按 `F` 进入 Flow 子视图，CLI 用 `proc flows`。详见 [ADR-0016](docs/adr/0016-ebpf-flow-graph.md)。
+**如何启用 eBPF flow graph？**<sup>v0.7.0 · v0.12 移除</sup> ~~仅 Linux 平台，需自行编译~~。**v0.12 起 Windows-only，eBPF flow graph 路径已删（ADR-0022）**——`src/ebpf/` 整模块删除，Cargo.toml `ebpf` feature flag 删除。Linux 用户迁移路径：`git checkout v0.11.0` 仍可用旧 eBPF 路径（详见 ADR-0016，Status 改 Superseded by ADR-0022）。Windows 用户走 [ADR-0018 Schannel ETW TLS SNI](docs/adr/0018-windows-schannel-sni.md) 路径替代——端口面板按 `F` 进入 Flow 子视图，CLI 用 `proc flows`。
 
-**eBPF 需要什么权限？** root 或 `CAP_BPF` + `CAP_PERFMON` capability，内核 ≥ 5.10（CO-RE / BTF 支持）。Ubuntu 20.04+ / Debian 11+ / RHEL 9 默认满足。无权限 / 内核不满足 → `EbisuBpfWorker::try_spawn` 返回 `None`，UI 显示降级提示，proc 其它功能不受影响。
+**eBPF 需要什么权限？**<sup>v0.7.0 · v0.12 移除</sup> ~~root 或 `CAP_BPF` + `CAP_PERFMON` capability，内核 ≥ 5.10~~。**v0.12 起 Windows-only，eBPF 路径已删**（见上一条「如何启用 eBPF flow graph」与 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。
 
 **R15 安全评分（外联行为）怎么触发？**<sup>v0.7.0</sup> 默认不启用。需要显式创建 `~/.config/proc/sni_whitelist.txt`（一行一个允许的域名，`#` 开头注释），R15 才激活。两条命中条件（任一扣 30 分）：dns_name 不在白名单 / 10s 内 ≥ 50 个不同 IP（端口扫描特征）。空文件 = "所有 dns_name 都不在白名单"（用户自负）。详见 [ADR-0016](docs/adr/0016-ebpf-flow-graph.md#securityrule-r15-外联行为评分)。
 
@@ -537,7 +543,30 @@ Windows 是主开发平台。Linux/macOS 可编译运行，依赖 Win32 API 的�
 - **R18 可疑启动路径**（第 18 步）：`%TEMP%` 扣 20 / `%APPDATA%` / `%LOCALAPPDATA%` / `%USERPROFILE%\Downloads` 各扣 15；与 R16 协同（Unsigned/Revoked + 可疑路径同时命中）额外扣 10。系统目录（Program Files / Windows / System32）白名单不扣分。可在 `~/.config/proc/path_rules.toml` 加自定义目录。
 - 跨规则**叠加扣分**（surgical 原则——保留 v0.6 path_check / v0.7 office_spawning_shell 不动，R17/R18 作为独立入口叠加）：典型 macro attack 模式 `未签名 + 临时目录 + Word → cmd` 可累加扣到 100+ 分。
 
+**R16 状态机 9 个变体分别扣多少分？**<sup>v0.12.0</sup> v0.12 阶段 3 TD-26 扩 `WinVerifyTrust` HRESULT 状态机，从 v0.11 6 变体扩到 9 变体：
+- `Trusted` / `Pending`：不扣分（受信 CA 或尚未触发验证）
+- `Signed`：扣 10（已签名但非受信 CA）
+- `ChainError`：扣 10（证书链断裂 / 名称不匹配 / 签名无效——验证不完整）
+- `Expired` / `UntrustedRoot`：各扣 15（证书过期 / 不受信根，曾经受信但有问题）
+- `Unsigned`：扣 20（无签名）
+- `Revoked`：扣 35（签名被吊销，曾经受信但被 CA 撤销）
+- `Unknown`：扣 5（Windows 非管理员降级 / 验证 API 错误）
+
+badge 显示：🔒 Trusted / ⚠️ Unsigned / Revoked / Expired / UntrustedRoot / ❓ Unknown / ChainError / 空 Pending / Signed。详见 [ADR-0021](docs/adr/0021-process-signature-verification.md)。
+
+**proc 显示 Adobe / Docker / Cisco 等进程是 ⚠️ 或扣分（Signed），但我配了 `trusted_signers.toml` 还是不升级到 🔒？**<sup>v0.12.0</sup> v0.12 阶段 3 TD-27 落地，三步排查：(1) **CompanyName 字段值**：`trusted_signers.toml` 匹配的是 FileVersion Information 的 `CompanyName`（不是 X.509 certificate subject CN）。用 `sigcheck /a your.exe`（Sysinternals）或 PowerShell `(Get-Item your.exe).VersionInfo.CompanyName` 看真实值。(2) **regex 大小写**：用户 `vendor_pattern` 默认大小写敏感——需要不敏感请加 `(?i)` 前缀（如 `(?i)^adobe`）。内置 24 vendor 列表（v0.12 扩）已含 Adobe / Cisco / Oracle / VMWare / Docker / Red Hat / Apache / Python / GitHub / Electron / AMD 等，零配置即生效。(3) **配置文件位置 + 格式**：`~/.config/proc/trusted_signers.toml`（Windows = `C:\Users\{user}\.config\proc\trusted_signers.toml`），格式 `[[signer]] name / vendor_pattern / reason(可选)`，TOML 解析失败 / regex 编译失败会**静默降级为空**——查 `~/.config/proc/proc.log` 看 `trusted_signers rule「xxx」vendor_pattern 正则编译失败` 警告。示例：
+   ```toml
+   [[signer]]
+   name = "my_company"
+   vendor_pattern = "(?i)^MyCompany"  # (?i) 让匹配大小写不敏感
+   reason = "内部应用"
+   ```
+
 **终端异常？** 退出后执行 `reset` 恢复。
+
+**FilterExpr 怎么写 CIDR / URL / 含 `/` 的正则？**<sup>v0.12.0</sup> v0.12 阶段 4 TD-28 起支持 `\/` 转义。例子：`remote_addr =~ /192\.168\.1\.0\/24/`（CIDR）/ `sni =~ /https:\/\/example\.com/`（URL）/ `cmd =~ /C:\/Users\/admin/`（Windows 路径）。parser 把 `\/` 转成单 `/`（regex crate 不接受 `\/` 作为有效转义），其他 `\X`（如 `\.` `\d` `\w`）原样保留让 regex 解释。旧表达式（无 `\/`）行为不变。
+
+**FilterExpr `mem > 5%` 命中几乎全部进程？**<sup>v0.12.0</sup> v0.12 阶段 4 TD-30 修复 silent bug——v0.11 前 `mem > 5%` 字面量被解释为「mem_bytes > 5.0」（字节值与百分号数字直接比较），几乎全部进程命中。修复后 `mem + %` 按 `mem / total_memory * 100` 与百分号字面量比较（`mem > 50%` 在 16GB 系统上等价 `mem > 8GB`）。`cpu > 5%` 与 `cpu > 5` 仍等价（cpu 自身就是 0-100 标度）；`disk_read > 5%` / `net_sent > 5%` 等没有自然除数的字节字段保留 legacy 行为（surgical：不在 EvalCtx 加 disk_total / net_total 等字段）。total_memory 在测试场景（panel_with_procs 传 0）退回 legacy 行为避免 div by zero。
 
 **配置文件在哪？** `~/.config/proc/` 下：`theme.txt`（主题索引）、`ui.toml`（排序偏好）、`alerts.toml`（告警规则）、`proc.logYYYY-MM-DD`（运行日志，daily rotate 保留 7 天）、`crashes/`（panic crash report）、`recordings/`（默认录制路径）。
 

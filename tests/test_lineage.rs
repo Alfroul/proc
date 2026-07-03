@@ -256,3 +256,85 @@ fn r17_factor_preserved_on_cache_hit() {
     assert!(first.factors.iter().any(|f| f.name == "office_to_shell"));
     assert!(second.factors.iter().any(|f| f.name == "office_to_shell"));
 }
+
+// --- TD-32（v0.12 阶段 5）：ScriptInterpreter 系统启动白名单 ---
+
+/// ScriptInterpreter 直接父是 services.exe → 不扣 R17 ScriptInterpreter 15 分
+/// （系统登录脚本 / SCM 服务初始化路径，合法场景）。
+#[test]
+fn td32_r17_script_interpreter_whitelisted_when_parent_is_services() {
+    let wscript = make_proc(
+        1100,
+        "wscript.exe",
+        Some("C:\\Windows\\System32\\wscript.exe"),
+        vec![(500, "services.exe".to_string())],
+    );
+    let all = vec![wscript.clone()];
+    let mut scorer = SecurityScorer::new();
+    let score = scorer.score(&wscript, &all, &[], &[]);
+    assert!(
+        !score.factors.iter().any(|f| f.name == "script_interpreter"),
+        "services.exe → wscript.exe 应被白名单豁免，factors: {:?}",
+        score.factors
+    );
+}
+
+/// ScriptInterpreter 直接父是 svchost.exe → 不扣分（scheduled task / SCM trigger 路径）。
+#[test]
+fn td32_r17_script_interpreter_whitelisted_when_parent_is_svchost() {
+    let cscript = make_proc(
+        1101,
+        "cscript.exe",
+        Some("C:\\Windows\\System32\\cscript.exe"),
+        vec![(501, "svchost.exe".to_string())],
+    );
+    let all = vec![cscript.clone()];
+    let mut scorer = SecurityScorer::new();
+    let score = scorer.score(&cscript, &all, &[], &[]);
+    assert!(
+        !score.factors.iter().any(|f| f.name == "script_interpreter"),
+        "svchost.exe → cscript.exe 应被白名单豁免"
+    );
+}
+
+/// ScriptInterpreter 直接父是 wininit.exe → 不扣分（Session 0 初始化路径）。
+#[test]
+fn td32_r17_script_interpreter_whitelisted_when_parent_is_wininit() {
+    let mshta = make_proc(
+        1102,
+        "mshta.exe",
+        Some("C:\\Windows\\System32\\mshta.exe"),
+        vec![(502, "wininit.exe".to_string())],
+    );
+    let all = vec![mshta.clone()];
+    let mut scorer = SecurityScorer::new();
+    let score = scorer.score(&mshta, &all, &[], &[]);
+    assert!(
+        !score.factors.iter().any(|f| f.name == "script_interpreter"),
+        "wininit.exe → mshta.exe 应被白名单豁免"
+    );
+}
+
+/// 白名单只看直接父：间接祖先是 services.exe（chain[1]）不豁免，仍扣分。
+#[test]
+fn td32_r17_script_interpreter_whitelist_only_direct_parent() {
+    // 模拟攻击者伪造祖先链：wscript ← evil ← services
+    // 直接父 evil.exe 不在白名单 → 正常扣分。
+    let wscript = make_proc(
+        1103,
+        "wscript.exe",
+        Some("C:\\Windows\\System32\\wscript.exe"),
+        vec![
+            (200, "evil.exe".to_string()),
+            (100, "services.exe".to_string()),
+        ],
+    );
+    let all = vec![wscript.clone()];
+    let mut scorer = SecurityScorer::new();
+    let score = scorer.score(&wscript, &all, &[], &[]);
+    assert!(
+        score.factors.iter().any(|f| f.name == "script_interpreter"),
+        "间接祖先是 services.exe 不应豁免（只看直接父），factors: {:?}",
+        score.factors
+    );
+}

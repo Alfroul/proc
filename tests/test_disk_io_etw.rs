@@ -3,21 +3,12 @@
 //! 平台 cfg-gate：
 //! - **Windows**：spawn worker → 写一些文件 IO → 验证至少能采集到当前进程的非零字节
 //!   （需要管理员权限；CI / 普通用户跑此测试时 ETW 启动失败，test 走降级路径不 fail）
-//! - **其它平台**：`try_spawn` 返回 `None`，验证 stub 行为
 //!
-//! 测试文件本身跨平台编译；Windows-only 测试用 `#[cfg(target_os = "windows")]` 包。
+//! 测试文件本身仅 Windows 编译；Windows-only 测试用 `#[cfg(target_os = "windows")]` 包。
 
 use proc::disk_io_etw::{DiskIoStats, try_spawn};
 
-/// 跨平台 stub 测试：非 Windows `try_spawn` 必须返回 `None`。
-#[cfg(not(target_os = "windows"))]
-#[test]
-fn stub_returns_none_off_windows() {
-    assert!(try_spawn(None).is_none());
-}
-
 /// DiskIoStats 数据格式：read_bps / write_bps 都是 u64，Copy，Default 0。
-/// 全平台都跑——结构体在 stub 模块里也有定义。
 #[test]
 fn disk_io_stats_shape() {
     let s = DiskIoStats {

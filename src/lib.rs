@@ -10,11 +10,11 @@ pub mod diag;
 pub mod disk_io_etw;
 pub mod dns_log;
 pub mod docker;
-pub mod ebpf;
 pub mod eject;
 pub mod error;
 pub mod estats;
 pub mod filter;
+pub mod flow;
 pub mod format;
 pub mod gpu;
 pub mod inspect;
@@ -26,7 +26,6 @@ pub mod net_flow;
 pub mod port_map;
 pub mod port_worker;
 pub mod process_control;
-pub mod psi;
 pub mod record;
 pub mod replay;
 pub mod schannel_etw;
@@ -44,7 +43,6 @@ pub mod workers;
 
 /// Returns the local timezone offset from UTC in hours (e.g. +8 for CST).
 /// Uses Win32 `GetTimeZoneInformation` to avoid chrono dependency.
-#[cfg(target_os = "windows")]
 #[must_use]
 pub fn local_offset_hours() -> i64 {
     use windows::Win32::System::Time::GetTimeZoneInformation;
@@ -74,23 +72,6 @@ pub fn local_offset_hours() -> i64 {
 #[must_use]
 pub fn bias_minutes_to_offset_hours(bias_total: i32) -> i64 {
     -(bias_total as i64) / 60
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn local_offset_hours() -> i64 {
-    // Use libc::localtime_r to get the platform-aware UTC offset (seconds east of UTC).
-    // Returns 0 only if the underlying call fails — keep behavior deterministic for tests.
-    unsafe {
-        let mut now: libc::time_t = 0;
-        if libc::time(&mut now as *mut _) == -1 {
-            return 0;
-        }
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&now, &mut tm).is_null() {
-            return 0;
-        }
-        (tm.tm_gmtoff / 3600) as i64
-    }
 }
 
 /// Returns the proc config directory (~/.config/proc).

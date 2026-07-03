@@ -35,11 +35,6 @@ pub struct WorkerManager {
     /// v0.7 阶段 7：ETW per-process disk IO（Windows 管理员 / x64 only）。
     /// 其它场景为 None，主线程走 sysinfo delta fallback（v0.6 行为）。
     pub disk_io_etw_worker: Option<crate::disk_io_etw::DiskIoEtwWorker>,
-    /// v0.7 阶段 8：eBPF flow graph（Linux + feature `ebpf` only）。
-    /// 非 Linux / 无 feature / attach 失败时为 None，主线程走 fallback
-    /// （`App::flows` 保持空，UI 显示「需要 Linux + ebpf feature」提示）。
-    /// 详见 ADR-0016 + `src/ebpf/mod.rs`。
-    pub ebpf_worker: Option<crate::ebpf::EbisuBpfWorker>,
     /// v0.10 阶段 2：Schannel ETW SNI worker（Windows 管理员 + x64 only）。
     /// 其它场景为 None。worker drain 出 `Vec<SniRecord>`，阶段 3 接
     /// `App::overlay_flow_sni_schannel` merge 到 `ProcessFlow.sni`；阶段 2
@@ -47,8 +42,7 @@ pub struct WorkerManager {
     pub schannel_etw_worker: Option<crate::schannel_etw::SchannelEtwWorker>,
     /// v0.11.0 阶段 1：每个 worker 的 restart 状态机（ADR-0019）。
     /// key = thread_name（与 `WorkerCrash.worker` 同源），例如
-    /// `"port-snapshot-worker"` / `"dns-log-worker"`。ebpf_worker 不入此表
-    /// （Linux-only 路径，本 cycle 不动 ebpf）。
+    /// `"port-snapshot-worker"` / `"dns-log-worker"`。
     pub restart_history: HashMap<&'static str, RestartState>,
     /// v0.11.0 阶段 2：DNS collector 实际选用的类型（ADR-0020）。`detect_collector`
     /// 返回 `(collector, kind)` tuple，collector move 进 worker body 后此字段
@@ -70,7 +64,6 @@ impl WorkerManager {
         let dns_log_worker =
             dns_collector.map(|c| crate::dns_log::worker::spawn(c, crash_tx.cloned()));
         let disk_io_etw_worker = crate::disk_io_etw::try_spawn(crash_tx.cloned());
-        let ebpf_worker = crate::ebpf::try_spawn(crash_tx.cloned());
         let schannel_etw_worker = crate::schannel_etw::try_spawn(crash_tx.cloned());
         Self {
             port_worker,
@@ -78,7 +71,6 @@ impl WorkerManager {
             net_flow_worker,
             dns_log_worker,
             disk_io_etw_worker,
-            ebpf_worker,
             schannel_etw_worker,
             restart_history: HashMap::new(),
             dns_collector_kind,
@@ -131,8 +123,8 @@ impl WorkerManager {
     /// 在窗口到期时会触发实际 respawn。
     ///
     /// `name` 是 `WorkerCrash.worker` 字段值（thread_name，如
-    /// `"port-snapshot-worker"`）；不在已知 worker 列表中（如 ebpf_worker /
-    /// 测试用 mock thread_name）时直接返回 false。
+    /// `"port-snapshot-worker"`）；不在已知 worker 列表中（如测试用 mock
+    /// thread_name）时直接返回 false。
     pub fn restart(
         &mut self,
         name: &str,
@@ -274,7 +266,7 @@ impl WorkerManager {
 
 /// 把任意 thread_name 字符串规范化为已知的 worker thread_name 字面量。
 /// 与 `WorkerCrash.worker` / `SnapshotWorker::spawn(thread_name, ...)` 同源。
-/// 未知 thread_name（如 ebpf_worker / 测试 mock）返回 None。
+/// 未知 thread_name（如测试 mock）返回 None。
 fn canonical_worker_thread_name(name: &str) -> Option<&'static str> {
     match name {
         "port-snapshot-worker" => Some("port-snapshot-worker"),
@@ -301,7 +293,7 @@ mod tests {
             canonical_worker_thread_name("dns-log-worker"),
             Some("dns-log-worker")
         );
-        assert_eq!(canonical_worker_thread_name("ebpf-worker"), None);
+        assert_eq!(canonical_worker_thread_name("totally-fake"), None);
         assert_eq!(canonical_worker_thread_name(""), None);
     }
 

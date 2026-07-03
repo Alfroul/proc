@@ -150,11 +150,6 @@ fn widestring_to_string(ptr: windows::core::PWSTR) -> String {
         .into_owned()
 }
 
-#[cfg(not(target_os = "windows"))]
-fn build_service_cache() -> HashMap<u32, String> {
-    HashMap::new()
-}
-
 fn get_service_cache() -> &'static HashMap<u32, String> {
     SERVICE_CACHE.get_or_init(build_service_cache)
 }
@@ -177,38 +172,6 @@ pub fn classify_process(proc: &ProcessInfo) -> ProcessClass {
     }
 
     ProcessClass::UserApp
-}
-
-/// 非 Windows 启发式分类：按 exe 路径前缀推断。
-/// - pid 0 → Kernel（idle/swapper）
-/// - `/init`、`/usr/`、`/sbin`、`/bin`、`/lib` → SystemProcess
-/// - `/home/`、`/root` → UserApp
-/// - 其他 → Unknown
-#[cfg(not(target_os = "windows"))]
-pub fn classify_process(proc: &ProcessInfo) -> ProcessClass {
-    if proc.pid == 0 {
-        return ProcessClass::Kernel;
-    }
-
-    let path = match proc.exe.as_deref() {
-        Some(p) => p,
-        None => return ProcessClass::Unknown,
-    };
-
-    if path.starts_with("/init")
-        || path.starts_with("/usr/")
-        || path.starts_with("/sbin")
-        || path.starts_with("/bin")
-        || path.starts_with("/lib")
-    {
-        return ProcessClass::SystemProcess;
-    }
-
-    if path.starts_with("/home/") || path.starts_with("/root") {
-        return ProcessClass::UserApp;
-    }
-
-    ProcessClass::Unknown
 }
 
 #[must_use]

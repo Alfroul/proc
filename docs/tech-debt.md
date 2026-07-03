@@ -167,7 +167,7 @@
 **修复（已落地）**：`tests/test_filter_expr.rs` 加 3 个中文契约 case（`cpu >` → 含「缺少」、`name =` → 含「缺少」、`(cpu > 5` → 含「括号」），并强化 `err_missing_value` / `err_unbalanced_open_paren` 断言排除 nom 内部枚举名泄漏。
 **验证**：`cargo run --release -- ls --filter 'cpu >'` 输出「filter 语法错误: filter parse error at offset 5: 缺少字段名/值」。
 
-### TD-17：eBPF TLS SNI / JA4 指纹采集 — v0.7.0 阶段 8 遗留 ⏸ v0.10 cycle 部分覆盖（SNI 字段已扩，eBPF uprobe 实装推迟）
+### TD-17：eBPF TLS SNI / JA4 指纹采集 — v0.7.0 阶段 8 遗留 ✅ Fixed in v0.12.0 阶段 1（平台决策不再追 Linux eBPF 路径）
 
 **位置**：`src/ebpf/` 整个模块
 **现状**：v0.7 阶段 8 MVP 只关联 DNS + connect（[`ProcessFlow`] 的 `dns_name` 通过 [`FlowAggregator`] 的 5s 窗口向前查 DnsQuery 填入）。TLS SNI 需要在 `SSL_write` / `SSL_read` 上挂 uprobe（OpenSSL / BoringSSL / LibreSSL 多个版本分支 + offset 不同），第一版未做。`bytes_out` / `bytes_in` 也留 0（要 hook `tcp_sendmsg` / `tcp_recvmsg`）。
@@ -181,13 +181,19 @@
 **验证**：curl https://example.com 后，端口面板 Flow 子视图该 flow 的 `dns_name == "example.com"` + `bytes_out > 0` + JA4 hash 字段。
 **v0.10 cycle 推进**：ProcessFlow.sni 字段已在 v0.10 阶段 1 扩上（v0.9 推迟范围一并完成），但 eBPF 路径仍填 `None`——uprobe 实装需要 Linux 真机环境（与 TD-19 同款推迟到 v0.11+）。Windows 路径已通过 Schannel ETW（ADR-0018）覆盖 SNI 字段（`source = Schannel`）。ja4 / bytes 字段未扩（用户明确「ja4 留 ebpf 那边」）。
 
+> **v0.12.0 阶段 1 标 ✅ Fixed**：[ADR-0022](adr/0022-windows-only-platform.md) 决策 proc 转为 Windows-only 应用，整个 `src/ebpf/` 模块（含 uprobe / kprobe / TLS SNI / JA4 / bytes 计数 path）在 stage 2 整体删除。
+>
+> - SNI 字段（`ProcessFlow.sni`）已由 v0.10 Schannel ETW（ADR-0018）覆盖 Windows 路径，v0.12 仅保留 `FlowSource::Schannel` 变体，删除 `FlowSource::Ebpf`。
+> - JA4 指纹 / bytes_out / bytes_in 计数不再实装——属于纯 Linux eBPF 范畴，平台决策不追这个方向 = TD 自动清零。
+> - Linux 用户迁移路径：`git checkout v0.11.0` 仍可用旧 eBPF 路径；如需新功能欢迎 fork（v0.11.0 是最后含 Linux 代码的 release）。
+
 ### TD-18：Windows ETW Schannel 抓 SNI（同名功能 Win 版本）— v0.7.0 阶段 8 遗留 ✅ Fixed in v0.10.0 阶段 3
 
 **位置**：`src/schannel_etw/`（v0.10 阶段 1-3 新增，Windows cfg-gate）
 **现状**：**已修复**。v0.10 cycle 落地完整路径：阶段 1 ADR-0018 + 骨架 → 阶段 2 实测修订 provider GUID `{91CC1150-71AA-47E2-AE18-C96E61736B6F}`（原 `{37D2C3CD-...}` 不 fire）+ event ID 1793（原推测 196 实测不出现）+ 字段名 `TargetName`（原推测 `ServerName`）+ TDH 动态 schema 解析 + `SnapshotWorker<Vec<SniRecord>>` + WorkerManager 集成 → **阶段 3** `ProcessFlow.source` 字段（`FlowSource` enum）+ `App::overlay_flow_sni_schannel` 把 worker drain 的 SniRecord 关联到 ProcessFlow（pid 匹配覆盖 / 新建 Schannel flow）+ UI 跨平台对齐（`port_table::draw_flow_view` 标题动态切换 ebpf / schannel）+ R15 白名单跨平台（同时检查 sni + dns_name）+ `proc flows` CLI 跨平台（表格加「来源」列 + JSON 加 source 字段）。
 **验证**（用户 admin 下自测）：Windows 上 `proc` 后 curl https://example.com → 端口面板按 F 切到 Flow 子视图显示 SNI = "example.com"（来源 Schannel）+ `proc flows` 表格显示「来源 = schannel」列。stage 3 阶段 2 集成测试 `spawn_collects_self_sni_when_admin` 已落地（admin 下验证），用户没在 admin 下跑过（UAC 反复取消），但 stage 3 落地时若用户 admin 跑 proc 看到 SNI 显示正常即间接验证 stage 2 fix 正确。
 
-### TD-19：eBPF Linux 真实编译验证缺失 — v0.7.0 阶段 8 遗留 ⏸ v0.10.0 cycle 主动推迟到 v0.11.0+
+### TD-19：eBPF Linux 真实编译验证缺失 — v0.7.0 阶段 8 遗留 ✅ Fixed in v0.12.0 阶段 1（平台决策不再追 Linux eBPF 路径）
 
 **位置**：`src/ebpf/{worker.rs,elf_loader.rs}` + `src/ebpf/ebpf-ebpf/src/main.rs`
 **现状**：Part A + Part B 都在 Windows 会话落地，未在真实 Linux + root + 内核 5.10+ 环境验证：aya `TracePoint::attach` 真实签名、`RingBuf::try_from` API、tracepoint arg offset（`sys_enter_connect` 偏移 16 / `sched_process_exit` 偏移 24 在不同内核可能不同）、`include_bytes!` ELF 路径硬编码、内核态 `bpf_current_task_start_time` 占位 0（需 aya-tool BTF binding 补完）。
@@ -195,6 +201,12 @@
 **修复**（v0.7 收尾或 v0.8）：Linux 会话跑 `cargo +nightly build --target bpfel-unknown-none -p proc-ebpf` + `cargo build --release --features ebpf` + `sudo cargo test --release --features ebpf --test test_ebpf_flow -- --ignored`，按报错修。
 **验证**：Linux 真实环境 `proc flows` 显示活跃 flow；端口面板按 F 切换 Flow 子视图有数据。
 **v0.8.0 / v0.10.0 cycle 推进**：用户主要用 Windows 开发，stage 1（WSL2 / Linux 真机验证）主动推迟到 **v0.11.0+ cycle 启动前再评估**（v0.8.0 / v0.10.0 都不依赖 ebpf 路径，推迟无成本）。stage 4 review（REVIEW-9 / REVIEW-11）已确认此推迟不影响 cycle 收尾；Linux 验收标准（`cargo +nightly build -p proc-ebpf --target bpfel-unknown-none --release` / `cargo build --release --features ebpf`）跟随 stage 1 跳过；release CI `proc_ebpf` 后缀二进制构建步骤的 `continue-on-error=true` 设计让 Linux 编译失败不阻断主 release（5 target 主二进制优先发货）。README banner + CHANGELOG 显式标注此 known limitation。
+
+> **v0.12.0 阶段 1 标 ✅ Fixed**：[ADR-0022](adr/0022-windows-only-platform.md) 决策 proc 转为 Windows-only 应用，整个 Linux eBPF 路径（src/ebpf/ + ebpf feature flag + workspace ebpf-ebpf sub-project）在 stage 2 整体删除。「Linux 真实编译验证」不再有意义——平台决策直接放弃 Linux 支持，TD 自动清零。
+>
+> - v0.12 起 `cargo build` 不再尝试编译 ebpf 路径（feature flag 已在 stage 1 改为空 stub，stage 2 删代码时一并清）。
+> - release CI 简化：5 target → 1 target（x86_64-pc-windows-msvc），不再有 `proc_ebpf` 后缀二进制 build step。
+> - Linux 用户迁移路径：`git checkout v0.11.0` 仍可用旧 eBPF 路径，但 v0.11.0 是最后含 Linux 代码的 release；如需 v0.12+ 新功能欢迎 fork。
 
 ---
 
@@ -233,7 +245,7 @@
 
 > 源：`docs/reviews/REVIEW-13.md` P2 段（15 项）。与 P0/P1 区分：P0/P1 阻断 v0.11.0 发布，已在阶段 8 修；P2 不阻断，归档到下个 cycle。
 
-### TD-23（REVIEW-13 P2-1）：DNS ETW diag JSON 输出不含 dns_collector 字段
+### TD-23（REVIEW-13 P2-1）：DNS ETW diag JSON 输出不含 dns_collector 字段 ✅ Fixed in v0.12.0 阶段 5
 
 **位置**：`src/cli/diag.rs:54`（human-readable 模式有 dns_collector 行，JSON 模式无）
 **现状**：用户用 `proc diag --json` 报 bug 时附上的 JSON 缺 collector 类型信息。JSON 是 bug report 的主要格式，工程化场景几乎都用 JSON。
@@ -260,7 +272,7 @@
 **验证**：ADR-0019 文档明确 docker 例外；或 docker worker panic 后也走 restart 路径。
 **v0.11.0 stage 8 决策**：不修。理由：(1) ADR 文档补充；(2) docker worker 接入 restart 需重构 DockerPanel（影响大）。归档为 v0.12+ 文档候选。
 
-### TD-26（REVIEW-13 P2-4）：HRESULT 映射不完整，CERT_E_EXPIRED / CERT_E_UNTRUSTEDROOT 都归 Unknown
+### TD-26（REVIEW-13 P2-4）：HRESULT 映射不完整，CERT_E_EXPIRED / CERT_E_UNTRUSTEDROOT 都归 Unknown ✅ Fixed in v0.12.0 阶段 3
 
 **位置**：`src/security/signature.rs:83-93`（`from_wintrust_result`）
 **现状**：仅映射 3 个 HRESULT：0 → Signed / TRUST_E_SUBJECT_NOT_SIGNED → Unsigned / CRYPT_E_REVOKED → Revoked。其他都归 Unknown 扣 5 分（仅 Windows）。
@@ -275,7 +287,9 @@
 **验证**：mock 各 HRESULT → 验证 SignatureStatus 映射 + 扣分 weight。
 **v0.11.0 stage 8 决策**：不修。理由：(1) 当前 6 状态机已能区分主要场景；(2) 扩状态机需改 badge / Display / risk_factor 多处连锁；(3) 影响窄（CERT_E_EXPIRED 等不常见）。归档为 v0.12+ 候选。
 
-### TD-27（REVIEW-13 P2-5）：TRUSTED_SIGNERS 列表较短，缺常见 vendor
+> **v0.12.0 阶段 3 标 ✅ Fixed**：SignatureStatus 扩到 9 变体（加 Expired / UntrustedRoot / ChainError），from_wintrust_result 扩 5 HRESULT 映射（CERT_E_EXPIRED / CERT_E_UNTRUSTEDROOT / CERT_E_CHAINING / CERT_E_WRONG_NAME / TRUST_E_CERT_SIGNATURE），badge / Display / risk_factor 全部连锁更新。tests/test_signature.rs 扩到 38 case 覆盖新变体。详见 CONTEXT.md 术语演进历史 v0.12.0 阶段 3 行。
+
+### TD-27（REVIEW-13 P2-5）：TRUSTED_SIGNERS 列表较短，缺常见 vendor ✅ Fixed in v0.12.0 阶段 3
 
 **位置**：`src/security/signature.rs:50-59`
 **现状**：仅 8 个 vendor：Microsoft / Google / Mozilla / Apple / Intel / NVIDIA。
@@ -285,7 +299,9 @@
 **验证**：常见 vendor 进程显示 🔒 而非空 badge。
 **v0.11.0 stage 8 决策**：不修。理由：(1) 列表扩充争议（哪些 vendor 算「trusted」主观）；(2) 用户配置入口 `trusted_signers.toml` 需新 schema + UI 反馈机制，优先级低于 P1 修复。归档为 v0.12+ 候选（与 path_rules / lineage_rules 一同设计统一用户规则系统）。
 
-### TD-28（REVIEW-13 P2-6）：regex 中不能 escape `/`，影响 CIDR / URL pattern
+> **v0.12.0 阶段 3 标 ✅ Fixed**：TRUSTED_SIGNERS 内置列表扩到 24 vendor（加 Adobe / Cisco / Oracle / VMWare / Docker / Red Hat / Apache / Python / GitHub / Electron / AMD 等）；新建 `src/security/trusted_signers.rs`（~190 行）实装 `TrustedSignersRule` + `load_trusted_signers()` 读 `~/.config/proc/trusted_signers.toml`；`verify_signature_with_policy` 加 `trusted_rules` 参数集成；SecurityScorer 加 `trusted_signers_rules` 字段构造时一次性加载。用户零配置即可正确评分 24 个常见 vendor。
+
+### TD-28（REVIEW-13 P2-6）：regex 中不能 escape `/`，影响 CIDR / URL pattern ✅ Fixed in v0.12.0 阶段 4
 
 **位置**：`src/filter/parser.rs:425-431`（`parse_regex_lit` 用 `take_till1(|c| c == '/')`）
 **现状**：用户写 `remote_addr =~ /127\.0\.0\.1\/8/` 想匹配 CIDR `127.0.0.1/8`，但 parser 在第一个 `/` 停止，pattern 变成 `127\.0\.0\.1\`，剩余 `/8/` 被当成 trailing input 报错。
@@ -294,7 +310,9 @@
 **验证**：`remote_addr =~ /127\.0\.0\.1\/8/` 正确解析为 pattern `127\.0\.0\.1/8`。
 **v0.11.0 stage 8 决策**：不修。理由：(1) 影响 narrow（CIDR 用得少）；(2) `[\/]` workaround 可用；(3) parser 改动需考虑转义序列连锁（`\d` / `\w` 等是否也支持）。归档为 v0.12+ 候选。
 
-### TD-29（REVIEW-13 P2-7）：NetworkIn 用 Vec 线性查找
+> **v0.12.0 阶段 4 标 ✅ Fixed**：`parse_regex_lit` 改用状态机扫描——遇 `\` + `/` → pattern 追加单 `/`（drop 反斜杠）；`\` + 其他字符 → `\X` 原样保留让 regex crate 解释；非转义 `/` → pattern 结束。兼容性：旧表达式（无 `\/`）行为不变。tests/test_filter_expr.rs 加 6 case 覆盖 CIDR / URL / 路径场景。
+
+### TD-29（REVIEW-13 P2-7）：NetworkIn 用 Vec 线性查找 ✅ Fixed in v0.12.0 阶段 5
 
 **位置**：`src/filter/mod.rs:270-280`（`FilterExpr::apply_network` 的 NetworkIn 分支用 `values.iter().any(...)`）
 **现状**：N 个值的 in 列表，每个 flow 检查 O(N)。N 通常 < 10，但极端用户写 100 个 IP 黑名单 + 1000 个 flow → 100K 操作每 tick。
@@ -302,7 +320,7 @@
 **验证**：benchmark NetworkIn 100 values × 1000 flows 不超过 1ms。
 **v0.11.0 stage 8 决策**：不修。理由：(1) N 通常 < 10，性能差异微秒级；(2) 当前 50ms tick 预算充足。归档为 v0.12+ 性能候选。
 
-### TD-30（REVIEW-13 P2-8）：`%` 单位与 cpu / mem 字段交互语义不清
+### TD-30（REVIEW-13 P2-8）：`%` 单位与 cpu / mem 字段交互语义不清 ✅ Fixed in v0.12.0 阶段 4
 
 **位置**：`src/filter/parser.rs:406-414`（`parse_number_value` 的 `%` 分支）
 **现状**：`mem > 5%` 解析为 `Value::Percent(5)`，与 `mem > 5`（字节）在 `apply_num` 下等价（5 == 5）。用户期望 `mem > 5%` 是「内存占用 > 5%」（基于总内存），实际是「内存字节数 > 5 字节」。
@@ -310,6 +328,8 @@
 **修复**：在 `Field::Mem::extract` 中把字节转 % 总内存（需 `System::total_memory()`），或者在 parser 阶段拒绝 `mem%` 组合（更严格）。
 **验证**：`mem > 50%` 在 16GB 系统上等价于 `mem > 8GB`。
 **v0.11.0 stage 8 决策**：不修。理由：(1) cpu 字段本身就是 %，与 mem 字段单位不一致是历史问题；(2) 修复需 EvalCtx 加 total_memory 字段或 parser 严格化（破坏向后兼容）。归档为 v0.12+ UX 候选（与 FilterExpr v3 字段单位语义重构一同设计）。
+
+> **v0.12.0 阶段 4 标 ✅ Fixed**：EvalCtx 加 `total_memory: u64` 字段；apply 在 `(Num, Percent)` 分支检测 `field == Mem && total_memory > 0` 走换算路径 `mem / total_memory * 100.0` 与百分号字面量比较；total_memory == 0（测试 / 未知容量）退回 legacy 避免 div by zero。ProcessPanel 加 `total_memory` 字段 init_tree / refresh_tree 同步刷新。cpu 字段本身就是 0-100 标度不变；disk_read/write / net_sent/recv 字段没有自然除数保留 legacy。tests/test_filter_expr.rs 加 6 case 覆盖 mem% 换算 + 边界条件。
 
 ### TD-31（REVIEW-13 P2-9）：跨 ctx 表达式不支持（如 `cpu > 5 AND sni =~ /evil/`）
 
@@ -320,7 +340,7 @@
 **验证**：`cpu > 5 AND sni =~ /evil/` 在 Flow 视图下命中 chrome 高 CPU + evil.com SNI 的 flow。
 **v0.11.0 stage 8 决策**：不修。理由：(1) 类型系统分离是 ADR-0011 v0.11 阶段 3 设计选择（保证字段不跨 ctx 误用）；(2) 修复破坏 surgical 原则，与 stage-3 doc 任务指令「类型系统保证字段不跨 ctx 误用」冲突。归档为 v0.12+ 设计候选（需重新评估 FilterExpr 整体架构）。
 
-### TD-32（REVIEW-13 P2-10）：R17 ScriptInterpreter 不分场景扣分（系统登录脚本也命中）
+### TD-32（REVIEW-13 P2-10）：R17 ScriptInterpreter 不分场景扣分（系统登录脚本也命中） ✅ Fixed in v0.12.0 阶段 5
 
 **位置**：`src/security/lineage.rs:179-182`（`detect_suspicious_chain` 的 ScriptInterpreter 优先级）
 **现状**：当前进程是 wscript/cscript/mshta 即扣 15 分，不看祖先。系统登录脚本 / IT 部门部署脚本都命中。
@@ -329,7 +349,7 @@
 **验证**：mock chain [services.exe → wscript.exe] → 不命中 ScriptInterpreter。
 **v0.11.0 stage 8 决策**：不修。理由：(1) 15 分扣分较轻，不影响用户使用；(2) 修复需扩 lineage_rules.toml schema 支持白名单（与 TD-27 trusted_signers.toml 一同设计）。归档为 v0.12+ UX 候选。
 
-### TD-33（REVIEW-13 P2-11）：R18 + path_check 叠加扣分导致 Downloads 等合法路径扣 30 分
+### TD-33（REVIEW-13 P2-11）：R18 + path_check 叠加扣分导致 Downloads 等合法路径扣 30 分 ✅ Fixed in v0.12.0 阶段 5
 
 **位置**：`src/security/score.rs` 第 3 步（path_check）+ 第 18 步（R18）
 **现状**：用户从 Downloads 运行合法安装包（如 VS Code installer），同时命中：
@@ -351,7 +371,7 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **验证**：stage-7.md 任务清单第 7 项描述与 plan.md 实际风格匹配。
 **v0.11.0 stage 8 决策**：不修。理由：(1) stage-7.md 已落 ✅，本次 cycle 不再触发；(2) 文档风格调整优先级低。归档为 v0.12+ 文档候选。
 
-### TD-35（REVIEW-13 P2-13）：`property_at_index` 的 `'static` lifetime 不正确（DNS ETW 版本）
+### TD-35（REVIEW-13 P2-13）：`property_at_index` 的 `'static` lifetime 不正确（DNS ETW 版本） ✅ Fixed in v0.12.0 阶段 5
 
 **位置**：`src/dns_log/etw.rs:510-526`
 **现状**：返回 `&'static` 但实际生命周期与 `info_ptr` 指向的 buffer 绑定（调用方 info_buf 保活）。严格说应改为 `Option<&'a EVENT_PROPERTY_INFO>` + 加生命周期参数。实际不会触发 use-after-free（info_buf 在调用栈保活），但是 API 契约不准确。**与 TD-22 同款问题（schannel_etw 版本）**。
@@ -360,7 +380,7 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **验证**：`cargo clippy --release --all-targets -- -D warnings` 仍 0 warnings。
 **v0.11.0 stage 8 决策**：不修。理由：与 TD-22 同款（不引发 UB / 修复增加代码但语义不变）。归档为 v0.12+ 代码质量候选。
 
-### TD-36（REVIEW-13 P2-14）：MCP DNS tool 拿不到历史（每次调用重启 ETW session）
+### TD-36（REVIEW-13 P2-14）：MCP DNS tool 拿不到历史（每次调用重启 ETW session） ✅ Fixed in v0.12.0 阶段 5
 
 **位置**：`src/mcp/handler.rs:891-910`（`make_dns_json`）
 **现状**：MCP 每次调用 `proc_dns` 都创建一个临时 `EtwDnsCollector`（启动 ETW session + spawn ProcessTrace 线程），drain 一次拿现有数据，然后 collector drop（关闭 session）。**启动前发生的 DNS 查询无法被捕获**——session 启动后到 drain 之间的查询（短暂窗口）才能拿到。
@@ -379,6 +399,67 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **v0.11.0 stage 8 决策**：✅ **已修复**（合并到 P1-3 修复）。`signature_risk_factor` 的 `_ => None` 已改为显式 `SignatureStatus::Trusted => None`，未来加新变体时编译器会强制穷尽 match。本 TD 标 ✅ Fixed in v0.11.0 阶段 8。
 
 ---
+
+## v0.13.0+ 候选（v0.12.0 stage 6 REVIEW-14 P2 归档）
+
+> v0.12.0 cycle stage 6 全局 Review（详见 [`docs/reviews/REVIEW-14.md`](reviews/REVIEW-14.md)）产出 7 个 P2，归档为 TD-38 ~ TD-43。覆盖跨平台残留 cfg gate 清理 / regex DoS 防护 / SYSTEM_BOOT_ENTRIES 严格化 / CI workflow 更新等方向。
+
+### TD-38（REVIEW-14 P2-1）：`signature.rs` mock policy 路径 cfg gate 残留
+
+**位置**：`src/security/signature.rs:232`（`#[cfg(not(target_os = "windows"))]` 块）
+**现状**：v0.11 stage 4 ADR-0021 设计的 mock policy 测试入口——`policy_override` 路径让非 Windows CI 也能跑 mock HRESULT。v0.12 Windows-only 后此块永不编译（mock 路径在 Windows 分支 `if let Some(result) = policy_override` 已短路）。
+**影响**：代码冗余（约 10 行 dead branch），不影响功能；保留更安全（让代码能在非 Windows cargo check 通过）。
+**修复**：surgical 清理——删除 `#[cfg(not(target_os = "windows"))]` 块；mock policy 路径合并到 Windows 分支前的 `if let Some(result) = policy_override` 短路逻辑。
+**验证**：`cargo build --release` + 7 个 mock_policy_* unit test 全过。
+**v0.12.0 stage 6 决策**：不修。理由：(1) 不影响功能；(2) 保留让代码跨平台 cargo check 友好；(3) surgical 原则下「保留更安全」（stage 6 doc 跨平台审查项明确建议）。归档为 v0.13+ 代码质量候选。
+
+### TD-39（REVIEW-14 P2-2）：`tests/test_inspect.rs` macOS stub 测试 mod cfg gate 残留
+
+**位置**：`tests/test_inspect.rs:97`（`#[cfg(not(any(target_os = "windows", target_os = "linux")))]`）
+**现状**：macOS / 其他非 Win/Linux 平台的 stub 测试 mod（env / dlls / handles / memory 在不支持平台返 PermissionDenied）。v0.12 Windows-only 后此 mod 永不编译。
+**影响**：约 30 行测试代码冗余，不影响功能；保留让代码能在 macOS cargo check 通过（贡献者用 macOS 开发时 cargo test 不报错）。
+**修复**：删除整个 `non_target_stubs` mod。
+**验证**：`cargo test --release` 全过（无 macOS 测试需要保留）。
+**v0.12.0 stage 6 决策**：不修。理由：(1) 不影响功能；(2) macOS 贡献者友好；(3) surgical 原则下「保留更安全」。归档为 v0.13+ 测试清理候选。
+
+### TD-40（REVIEW-14 P2-3）：`trusted_signers.toml` regex 无复杂度限制
+
+**位置**：`src/security/trusted_signers.rs:74`（`regex::Regex::new(&raw.vendor_pattern)`）
+**现状**：用户在 `~/.config/proc/trusted_signers.toml` 配置的 `vendor_pattern` 直接传给 `regex::Regex::new`，无 size / 复杂度限制。
+**影响**：理论 ReDoS 风险（如 `(?i)^.*a.*b.*c.*$` 在长字符串上慢）。实际匹配对象是 `CompanyName` 字段（一般 < 100 字符），风险低。
+**修复**：加 regex 复杂度 lint 或 size limit（如 `regex::RegexBuilder::size_limit(64 * 1024)`）。
+**验证**：构造极端 regex 验证 RegexBuilder 拒绝。
+**v0.12.0 stage 6 决策**：不修。理由：(1) regex crate 自身有 NFA simulation 防回溯爆炸；(2) 实际匹配对象长度短，风险低；(3) 修复需评估 size_limit 阈值（过严误报 / 过松无效）。归档为 v0.13+ 安全候选。
+
+### TD-41（REVIEW-14 P2-4）：SYSTEM_BOOT_ENTRIES 白名单按 process name 不严格
+
+**位置**：`src/security/lineage.rs:134`（`SYSTEM_BOOT_ENTRIES = ["services.exe", "wininit.exe", "svchost.exe"]`）
+**现状**：TD-32 实装的白名单按 process name 匹配（lowercase），不按 image path。攻击者需先 privilege escalation 才能 spawn 这些名字的进程，PID 复用风险存在但极低。
+**影响**：理论攻击场景（attacker 已有 privilege escalation → spawn `services.exe` 在非系统目录 → 绕过 R17 系统启动白名单）。实际触发需先攻破其他防线。
+**修复**：加 image path 校验（调 `QueryFullProcessImageName` 拿全路径，要求 `C:\Windows\System32\services.exe`）。
+**验证**：构造非系统目录的 `services.exe` → 验证不被白名单命中。
+**v0.12.0 stage 6 决策**：不修。理由：(1) 攻击场景需先 privilege escalation，安全评分已是事后防线；(2) 修复需引入新的 windows-rs API 调用 + 缓存机制（性能影响）；(3) surgical 原则下当前实现可接受。归档为 v0.13+ 安全候选。
+
+### TD-42（REVIEW-14 P2-6）：`.github/workflows/ci.yml` 仍有 `check-linux` job
+
+**位置**：`.github/workflows/ci.yml:36-42`（`check-linux` job 在 ubuntu-latest 上跑全量 cargo test）
+**现状**：v0.12 Windows-only 后 Linux CI 永远失败（src/ Linux 路径已删，ubuntu-latest 上 cargo build 不通过）。stage 2 doc 任务 7 应删但未删。
+**影响**：GitHub Actions PR check 永远红叉，掩盖真正的 CI 问题；contributor 困惑。
+**修复**：删除整个 `check-linux` job。
+**验证**：GitHub Actions PR check 不再有 Linux job。
+**v0.12.0 stage 6 决策**：不修。理由：(1) 用户主要本地 Windows 开发，GitHub Actions 是次要 CI；(2) 修复需评估是否同时删 `.github/workflows/release.yml` 的 Linux target（stage 2 doc 任务 7 也要求但未做）；(3) 归档为 v0.13+ CI 整理候选（连同 release.yml 一并处理）。**注**：本 TD 在用户确认 v0.12 release 流程前可手动 skip。
+
+### TD-43（REVIEW-14 P2-7）：`.github/workflows/release.yml` Linux / macOS target 应删
+
+**位置**：`.github/workflows/release.yml`（如有 Linux / macOS build matrix target）
+**现状**：v0.12 Windows-only 后 Linux / macOS build target 永远失败（src/ Linux 路径已删）。stage 2 doc 任务 7 应删但未删。
+**影响**：release workflow 触发时 Linux / macOS build 步骤失败，整个 release 卡住。
+**修复**：删 Linux / macOS build target，仅保留 `x86_64-pc-windows-msvc`。
+**验证**：触发 release workflow 全过。
+**v0.12.0 stage 6 决策**：不修。理由：(1) v0.12.0 tag 不 push（stage 6 doc 任务 10），release workflow 不触发；(2) 修复需评估 release.yml 完整结构（可能涉及 binary rename / archive 命名）；(3) 归档为 v0.13+ release 整理候选（与 TD-42 一同处理）。
+
+---
+
 
 ## 历史回顾
 

@@ -121,6 +121,18 @@ const BROWSER_PROCESSES: &[&str] = &[
 
 const SCRIPT_INTERPRETERS: &[&str] = &["wscript.exe", "cscript.exe", "mshta.exe"];
 
+/// TD-32（v0.12 阶段 5）：系统启动入口白名单。当 ScriptInterpreter（wscript/
+/// cscript/mshta）的直接父进程是这里列出的系统 service host 时，视为合法系统
+/// 登录脚本 / 服务初始化脚本，不扣 R17 ScriptInterpreter 15 分。
+///
+/// 来源：Windows 服务管理器启动 service → service 启动 Session 0 → Session 0 里
+/// 跑的登录脚本 / scheduled task / SCM trigger 直接 spawn wscript 是合法路径
+/// （如组策略登录脚本、管理性 scheduled task）。侦测这种场景扣分会导致
+/// 企业域控 + SCCM 部署环境的用户体验不可接受（每个登录都报警）。
+///
+/// 大小写不敏感（`name_in_list` 自带 lowercase 归一）。
+const SYSTEM_BOOT_ENTRIES: &[&str] = &["services.exe", "wininit.exe", "svchost.exe"];
+
 fn name_in_list(list: &[&str], name: &str) -> bool {
     let name_lower = name.to_lowercase();
     list.iter().any(|s| *s == name_lower)
@@ -170,6 +182,11 @@ pub fn build_parent_chain(pid: u32, processes: &HashMap<u32, ProcessInfo>) -> Ve
 /// - `custom_rules`：来自 `lineage_rules.toml` 的用户配置。
 ///
 /// 检测顺序（先命中先返回）：ScriptInterpreter → OfficeToShell → BrowserToShell → Custom。
+///
+/// **TD-32（v0.12 阶段 5）**：ScriptInterpreter 命中前先检查直接父（`chain[0]`）
+/// 是否在 [`SYSTEM_BOOT_ENTRIES`] 白名单里（services.exe / wininit.exe / svchost.exe）；
+/// 命中白名单 → 视为系统登录脚本 / SCM 服务初始化脚本，不扣 ScriptInterpreter 15 分。
+/// Custom 规则仍照常评估（不在 ScriptInterpreter 早返回路径里）。
 #[must_use]
 pub fn detect_suspicious_chain(
     chain: &[(u32, String)],
@@ -177,8 +194,13 @@ pub fn detect_suspicious_chain(
     custom_rules: &[LineageRule],
 ) -> Option<SuspiciousPattern> {
     // ScriptInterpreter 优先（无论祖先）：wscript/cscript/mshta 直接运行。
+    // TD-32：但若直接父是系统启动入口（services/wininit/svchost），视为合法系统
+    // 登录脚本，跳过 ScriptInterpreter 扣分（仍可被 Custom 规则评估）。
     if name_in_list(SCRIPT_INTERPRETERS, current_name) {
-        return Some(SuspiciousPattern::ScriptInterpreter);
+        let direct_parent_name = chain.first().map(|(_, n)| n.as_str()).unwrap_or("");
+        if !name_in_list(SYSTEM_BOOT_ENTRIES, direct_parent_name) {
+            return Some(SuspiciousPattern::ScriptInterpreter);
+        }
     }
 
     // Office/Browser → Shell：当前进程必须是 shell 才能命中。
@@ -443,6 +465,81 @@ mod tests {
         let pat = detect_suspicious_chain(&[], "wscript.exe", &[]);
         assert_eq!(pat, Some(SuspiciousPattern::ScriptInterpreter));
         assert_eq!(pat.unwrap().default_weight(), 15);
+    }
+
+    // --- TD-32（v0.12 阶段 5）：ScriptInterpreter 系统启动白名单 ---
+
+    #[test]
+    fn td32_script_interpreter_whitelisted_when_parent_is_services() {
+        // services.exe → wscript.exe（典型 SCM 登录脚本路径）→ 不扣分。
+        let chain = vec![(100, "services.exe".to_string())];
+        let pat = detect_suspicious_chain(&chain, "wscript.exe", &[]);
+        assert!(
+            pat.is_none(),
+            "services.exe → wscript.exe 应被白名单豁免，got {pat:?}"
+        );
+    }
+
+    #[test]
+    fn td32_script_interpreter_whitelisted_when_parent_is_wininit() {
+        let chain = vec![(100, "wininit.exe".to_string())];
+        let pat = detect_suspicious_chain(&chain, "cscript.exe", &[]);
+        assert!(pat.is_none(), "wininit.exe → cscript.exe 应被白名单豁免");
+    }
+
+    #[test]
+    fn td32_script_interpreter_whitelisted_when_parent_is_svchost() {
+        let chain = vec![(100, "svchost.exe".to_string())];
+        let pat = detect_suspicious_chain(&chain, "mshta.exe", &[]);
+        assert!(pat.is_none(), "svchost.exe → mshta.exe 应被白名单豁免");
+    }
+
+    #[test]
+    fn td32_script_interpreter_whitelist_is_case_insensitive() {
+        // Windows 进程名大小写不固定（services.exe 也可能写作 SERVICES.EXE）。
+        let chain = vec![(100, "SERVICES.EXE".to_string())];
+        let pat = detect_suspicious_chain(&chain, "WScript.exe", &[]);
+        assert!(
+            pat.is_none(),
+            "大小写不敏感：SERVICES.EXE → WScript.exe 应豁免"
+        );
+    }
+
+    #[test]
+    fn td32_script_interpreter_whitelist_only_direct_parent() {
+        // 间接祖先是 services.exe（chain[1]）不算白名单——只看直接父（chain[0]）。
+        // 例如 evil.exe ← services.exe ← wscript.exe：典型恶意 macro attack
+        // 把 services.exe 伪造为祖先（PID 复用 / 用户态混淆）。
+        let chain = vec![
+            (100, "evil.exe".to_string()),
+            (50, "services.exe".to_string()),
+        ];
+        let pat = detect_suspicious_chain(&chain, "wscript.exe", &[]);
+        assert_eq!(
+            pat,
+            Some(SuspiciousPattern::ScriptInterpreter),
+            "间接祖先是 services.exe 不豁免，应正常扣分"
+        );
+    }
+
+    #[test]
+    fn td32_whitelist_does_not_affect_custom_rule_evaluation() {
+        // 即使 ScriptInterpreter 被白名单豁免，Custom 规则仍照常评估。
+        let chain = vec![(100, "services.exe".to_string())];
+        let rule = LineageRule {
+            name: "test".to_string(),
+            parent_regex: regex::Regex::new("(?i)services").unwrap(),
+            child_regex: regex::Regex::new("(?i)wscript").unwrap(),
+            weight: 30,
+        };
+        let pat = detect_suspicious_chain(&chain, "wscript.exe", &[rule]);
+        match pat {
+            Some(SuspiciousPattern::Custom { name, weight }) => {
+                assert_eq!(name, "test");
+                assert_eq!(weight, 30);
+            }
+            other => panic!("expected Custom rule hit even with whitelist, got {other:?}"),
+        }
     }
 
     #[test]

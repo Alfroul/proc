@@ -6,6 +6,8 @@
 //!
 //! 详细设计见 ADR-0009 与 `docs/stages/v0.7-stage-2.md`。
 
+use std::sync::{Arc, Mutex};
+
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::wrapper::Parameters,
@@ -16,13 +18,17 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::collect::{self, SortField};
+use crate::dns_log::DnsLogCollector;
 
 /// MCP server 主入口（runtime 已在 [`super::run_mcp_serve`] 起好）。
 ///
 /// `serve_server(handler, (stdin, stdout))` 阻塞直到 client 关闭流。
+///
+/// **TD-36（v0.12 阶段 5）**：用 [`ProcMcpHandler::new`] 构造（启动持久 DNS
+/// collector），不再用 unit struct 字面量。
 pub async fn serve() -> anyhow::Result<()> {
     let (stdin, stdout) = rmcp::transport::io::stdio();
-    let service = serve_server(ProcMcpHandler, (stdin, stdout))
+    let service = serve_server(ProcMcpHandler::new(), (stdin, stdout))
         .await
         .map_err(|e| anyhow::anyhow!("MCP server init failed: {e:?}"))?;
     service.waiting().await.ok();
@@ -39,12 +45,58 @@ pub fn list_tool_names() -> Vec<String> {
         .collect()
 }
 
-/// MCP handler 空状态：每个 tool 都现场采集，不需要长驻上下文。
+/// MCP handler。
 ///
-/// v0.7 阶段 2 不持有 worker 句柄（worker 是 TUI 路径的，MCP 走独立分支）。
-/// 阶段 6/7/8 落地后若要复用 net_flow / dns_log worker，这里再扩字段。
-#[derive(Clone, Default)]
-pub struct ProcMcpHandler;
+/// **TD-36（v0.12 阶段 5）**：handler 加持久 DNS collector 字段。v0.7 阶段 2
+/// 设计为「每个 tool 现场采集」，但 `proc_dns` 的「现场 spawn EtwDnsCollector」
+/// 路径让 collector 启动前的 DNS 查询抓不到（ProcessTrace 起来后才能采事件）。
+/// 持久 collector 与 server 同生命周期，client 任何时刻调 `proc_dns` 都能 drain
+/// 到 server 启动以来累积的所有 DNS 事件（`App::workers.dns_log_worker` 同款
+/// 行为）。
+///
+/// - `Arc<Mutex<...>>` 让 rmcp 内部每次 tool call clone handler 时共享同一
+///   collector 实例（不重复 spawn / 不丢事件）。
+/// - `Option<...>` 让 [`Default`]（测试路径）不强制 spawn collector——避免单测
+///   里跑 ETW session / PowerShell 子进程污染输出。
+/// - 生产入口是 [`ProcMcpHandler::new`]（[`serve`] 调用），构造时调
+///   `detect_collector()` 一次，结果 move 进 Arc。
+pub struct ProcMcpHandler {
+    /// TD-36：持久 DNS collector。生产入口 [`ProcMcpHandler::new`] 启动 collector；
+    /// [`Default`]（测试路径）保持 `None`。`pub` 让集成测试能访问（验证 Arc 共享
+    /// 语义）；生产代码不应直接修改。
+    pub dns_collector: Arc<Mutex<Option<Box<dyn DnsLogCollector>>>>,
+}
+
+impl Clone for ProcMcpHandler {
+    fn clone(&self) -> Self {
+        Self {
+            dns_collector: Arc::clone(&self.dns_collector),
+        }
+    }
+}
+
+impl Default for ProcMcpHandler {
+    fn default() -> Self {
+        // 测试 / 未启用 DNS 路径用：不 spawn collector，proc_dns 调用走「无 collector」
+        // 错误返回。生产路径必须用 [`Self::new`]。
+        Self {
+            dns_collector: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+impl ProcMcpHandler {
+    /// 生产入口：spawn 持久 DNS collector（Windows admin → ETW；Windows 非 admin
+    /// → PowerShell fallback；其它平台 → None）。collector 与 handler 同生命周期，
+    /// `proc_dns` tool call 通过 `Arc::clone` 共享同一实例。
+    #[must_use]
+    pub fn new() -> Self {
+        let (collector, _kind) = crate::dns_log::detect_collector();
+        Self {
+            dns_collector: Arc::new(Mutex::new(collector)),
+        }
+    }
+}
 
 // ===========================================================================
 // Args structs — 每个 tool 一个，rmcp 用 schemars 生成 JSON Schema 给 LLM 看。
@@ -288,12 +340,13 @@ impl ProcMcpHandler {
         description = "Drain recent DNS queries from the in-memory buffer (Windows: PowerShell Get-WinEvent; other platforms return ok=false). tail=true is rejected — use the CLI for streaming. Privacy: queries are kept in memory only, never persisted. Returns JSON { ok, count, queries[] } with { query_name, query_type, pid, process_name, timestamp_unix }."
     )]
     fn proc_dns(&self, Parameters(args): Parameters<DnsArgs>) -> Result<CallToolResult, McpError> {
-        ok_result(make_dns_json(args.tail))
+        // TD-36（v0.12 阶段 5）：从 handler 持久 collector drain，不再现场 spawn。
+        ok_result(make_dns_json_from_collector(&self.dns_collector, args.tail))
     }
 
     #[tool(
         name = "proc_diag",
-        description = "Worker diagnostics: avg/max poll latency, poll count, channel-full drops, last error for every background worker (port/usb/net_flow/dns_log/docker). Returns JSON { ok, workers[] }. Attach to bug reports — see ADR-0009."
+        description = "Worker diagnostics: avg/max poll latency, poll count, channel-full drops, last error for every background worker (port/usb/net_flow/dns_log/docker). Returns JSON { ok, workers[], dns_collector }. Attach to bug reports — see ADR-0009."
     )]
     fn proc_diag(&self) -> Result<CallToolResult, McpError> {
         ok_result(make_diag_json())
@@ -895,7 +948,45 @@ pub fn make_dns_json(tail: bool) -> Value {
         );
     };
     let queries = collector.drain();
-    let arr: Vec<Value> = queries
+    let arr = dns_queries_to_json(&queries);
+    json!({ "ok": true, "count": arr.len(), "queries": arr })
+}
+
+/// TD-36（v0.12 阶段 5）：从 handler 持久 collector drain DNS 查询并 JSON-ify。
+///
+/// 与 [`make_dns_json`] 的差异：不 spawn 新 collector，直接 drain 入参的 Arc
+/// collector。collector 为 `None`（Default / 非 Windows / spawn 失败）→ 与旧版
+/// 一致的「unavailable」错误信息；Mutex 中毒（panic while holding lock）→ 同样
+/// 返 unavailable（panic 不期望出现，但兜底防止 MCP server 整体挂）。
+///
+/// `pub`（非 `pub(crate)`）让集成测试能直接验证 Arc 共享语义，不在生产代码
+/// 文档里暴露（[`ProcMcpHandler::proc_dns`] 是入口）。
+pub fn make_dns_json_from_collector(
+    dns_collector: &Arc<Mutex<Option<Box<dyn DnsLogCollector>>>>,
+    tail: bool,
+) -> Value {
+    if tail {
+        return err(
+            "tail mode is streaming-only — use the proc CLI (`proc dns --tail`) instead. MCP tools are one-shot.",
+        );
+    }
+    let Ok(mut guard) = dns_collector.lock() else {
+        return err("DNS log collector unavailable (internal: mutex poisoned)");
+    };
+    let Some(collector) = guard.as_mut() else {
+        return err(
+            "DNS log collector unavailable on this platform (Windows: ETW primary / PowerShell fallback; see ADR-0020)",
+        );
+    };
+    let queries = collector.drain();
+    let arr = dns_queries_to_json(&queries);
+    json!({ "ok": true, "count": arr.len(), "queries": arr })
+}
+
+/// 把 drain 出的 `Vec<DnsQuery>` JSON-ify——共享给 [`make_dns_json`]（fresh spawn
+/// 路径）和 [`make_dns_json_from_collector`]（persistent 路径）。
+fn dns_queries_to_json(queries: &[crate::dns_log::DnsQuery]) -> Vec<Value> {
+    queries
         .iter()
         .map(|q| {
             json!({
@@ -906,8 +997,7 @@ pub fn make_dns_json(tail: bool) -> Value {
                 "timestamp_unix": q.start_time,
             })
         })
-        .collect();
-    json!({ "ok": true, "count": arr.len(), "queries": arr })
+        .collect()
 }
 
 pub fn make_diag_json() -> Value {
@@ -922,6 +1012,7 @@ pub fn make_diag_json() -> Value {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     let metrics = app.worker_metrics();
+    let dns_kind = app.workers.dns_collector_kind;
     let arr: Vec<Value> = metrics
         .iter()
         .map(|m| {
@@ -940,7 +1031,7 @@ pub fn make_diag_json() -> Value {
             })
         })
         .collect();
-    json!({ "ok": true, "workers": arr })
+    json!({ "ok": true, "workers": arr, "dns_collector": dns_kind })
 }
 
 pub fn make_monitor_list_json() -> Value {

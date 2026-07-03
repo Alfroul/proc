@@ -67,9 +67,6 @@ fn enable_debug_privilege() {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn enable_debug_privilege() {}
-
 pub fn kill_process(pid: u32, force: bool) -> Result<KillResult> {
     enable_debug_privilege();
 
@@ -104,19 +101,6 @@ fn kill_single(pid: u32) -> Result<KillResult> {
         } else {
             Ok(KillResult::AccessDenied)
         }
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn kill_single(pid: u32) -> Result<KillResult> {
-    let pid_obj = sysinfo::Pid::from_u32(pid);
-    // Option: None = PID 不在快照中（视为 AlreadyGone）, Some(b) = kill() 调用结果
-    let outcome: Option<bool> =
-        crate::collect::sysinfo_with(|sys| sys.process(pid_obj).map(|proc| proc.kill()));
-    match outcome {
-        Some(true) => Ok(KillResult::Killed),
-        Some(false) => Ok(KillResult::AccessDenied),
-        None => Ok(KillResult::AlreadyGone),
     }
 }
 

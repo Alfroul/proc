@@ -16,6 +16,8 @@ pub mod restricted_spawn;
 pub mod score;
 pub mod self_mitigation;
 pub mod signature;
+/// v0.12 阶段 3：用户配置的受信签名 vendor 列表（TD-27）。
+pub mod trusted_signers;
 
 pub use flow::{SniWhitelist, check_flow_risk};
 pub use lineage::{LineageRule, SuspiciousPattern, check_lineage_risk, load_lineage_rules};
@@ -30,4 +32,7 @@ pub use score::{BackgroundScorer, RiskCategory, RiskFactor, SecurityScore, Secur
 pub use signature::{
     SignatureStatus, from_wintrust_result, is_trusted_signer, signature_risk_factor,
     verify_signature,
+};
+pub use trusted_signers::{
+    TrustedSignersRule, load_trusted_signers, load_trusted_signers_from, matches_any_rule,
 };

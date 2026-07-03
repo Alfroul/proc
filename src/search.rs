@@ -347,6 +347,7 @@ mod tests {
         let ctx = crate::filter::EvalCtx {
             process: &p,
             security_score: None,
+            total_memory: 0,
         };
         assert!(!expr.apply(&ctx));
     }

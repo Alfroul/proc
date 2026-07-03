@@ -53,19 +53,9 @@ fn test_signature_unknown_deducts() {
     // v0.11 阶段 8 REVIEW-13 P1-3：Unknown 在 Windows 上扣 5 分（非管理员降级，
     // ADR-0021 设计），在非 Windows 上不扣分（无 WinVerifyTrust 概念）。
     let factor = signature_risk_factor(SignatureStatus::Unknown);
-    #[cfg(target_os = "windows")]
-    {
-        let f = factor.expect("Unknown should produce a factor on Windows");
-        assert_eq!(f.weight, 5);
-        assert_eq!(f.name, "signature_unverified");
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        assert!(
-            factor.is_none(),
-            "非 Windows 上 Unknown 不应扣分（无 WinVerifyTrust）"
-        );
-    }
+    let f = factor.expect("Unknown should produce a factor");
+    assert_eq!(f.weight, 5);
+    assert_eq!(f.name, "signature_unverified");
 }
 
 #[test]
@@ -506,7 +496,7 @@ fn test_score_cache_pid_reuse_isolation() {
 /// 因此本测试不依赖 `~/.config/proc/sni_whitelist.txt` 文件状态。
 #[test]
 fn test_r15_port_scan_integration() {
-    use proc::ebpf::flow::ProcessFlow;
+    use proc::flow::ProcessFlow;
 
     let mut scorer = SecurityScorer::new();
     let mut proc = make_proc(4321, "scanner.exe", Some("C:\\scanner.exe"), vec![], None);
@@ -526,7 +516,6 @@ fn test_r15_port_scan_integration() {
             bytes_in: 0,
             dns_name: None,
             sni: None,
-            source: proc::ebpf::flow::FlowSource::Ebpf,
             first_seen: now,
             last_seen: now,
             exit_time: None,

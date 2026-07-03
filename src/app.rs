@@ -93,12 +93,11 @@ pub struct App {
     // `self.workers.dns_log_worker`；这里只存数据。cap=1000 FIFO；仅内存缓冲，
     // 录屏（record/）路径不序列化任何 DNS 数据（隐私）。
     pub dns_log_recent: VecDeque<crate::dns_log::DnsQuery>,
-    // v0.7 阶段 8：eBPF flow graph（Linux + feature `ebpf`，ADR-0016）。
-    // ebpf worker 在 `self.workers.ebpf_worker`；这里存聚合后的 flows 快照 +
-    // FlowAggregator（累积 ring_buf 推上来的 FlowEvent，1s tick drain 一次）。
-    // 非 Linux / 无 feature / attach 失败 → worker 为 None，flows 保持空 Vec。
-    pub flows: Vec<crate::ebpf::flow::ProcessFlow>,
-    pub flow_aggregator: crate::ebpf::flow::FlowAggregator,
+    // v0.7 阶段 8 / v0.12 阶段 2：Flow graph（Windows-only Schannel 路径，ADR-0022）。
+    // schannel_etw worker 在 `self.workers.schannel_etw_worker`；这里存从 worker
+    // drain 出的 SniRecord 关联构造的 ProcessFlow 快照（无 source 字段，全部
+    // 来自 Schannel）。worker 为 None（非管理员 / x86）→ flows 保持空 Vec。
+    pub flows: Vec<crate::flow::ProcessFlow>,
 
     // 阶段 9 E2：容器 exec 嵌入式 PTY。
     // container_exec = Some 仅在 AppMode::ContainerExec 时；其他模式必须为 None。
@@ -260,7 +259,6 @@ impl App {
             workers,
             dns_log_recent: VecDeque::new(),
             flows: Vec::new(),
-            flow_aggregator: crate::ebpf::flow::FlowAggregator::new(),
             container_exec: None,
             container_exec_vt: None,
             pending_container_exec_target: None,
@@ -1300,7 +1298,6 @@ impl App {
             self.tick_history_sample(had_heavy);
             self.tick_alert_evaluate();
             self.tick_dns_log();
-            self.tick_flows_ebpf();
             self.overlay_flow_sni_schannel();
             // v0.11.0 阶段 1（ADR-0019）：每 1s 检查 restart_history，
             // backoff 到期的 worker 触发 respawn。restart 状态变化触发 banner
@@ -1359,19 +1356,14 @@ impl App {
                         .retain(|pid, _| alive_pids.contains(pid));
 
                     // v0.10 阶段 4（REVIEW-11 P1-1）：Schannel-only flow 退出感知。
-                    // Schannel event 自带 PID 但无进程退出事件——Schannel-only flow
-                    // （source = Schannel）永远不会被 FlowAggregator::reaper_tick
-                    // 触及（它们直接在 App::flows 里，不在 aggregator 内）。这里在
-                    // heavy refresh 拿到 alive_pids 时同步打 exit_time，后续
-                    // overlay_flow_sni_schannel 内的 reaper 段按 GHOST_FLOW_TTL
-                    // 移除。Linux 上 schannel_etw_worker 恒为 None → 跳过。
+                    // Schannel event 自带 PID 但无进程退出事件——所有 flow 都直接
+                    // 在 App::flows 里（v0.12 移除 ebpf 路径后无 aggregator）。
+                    // 这里在 heavy refresh 拿到 alive_pids 时同步打 exit_time，
+                    // 后续 overlay_flow_sni_schannel 内的 reaper 段按 GHOST_FLOW_TTL
+                    // 移除。schannel_etw_worker 为 None 时跳过。
                     if self.workers.schannel_etw_worker.is_some() {
                         let now = std::time::SystemTime::now();
-                        crate::ebpf::flow::mark_dead_schannel_flows(
-                            &mut self.flows,
-                            &alive_pids,
-                            now,
-                        );
+                        crate::flow::mark_dead_flows(&mut self.flows, &alive_pids, now);
                     }
 
                     // v0.6.0 阶段 5：detail_process 维护 + priority/affinity 缓存
@@ -1527,52 +1519,15 @@ impl App {
         }
     }
 
-    /// v0.7 阶段 8：从 [`crate::ebpf`] drain FlowEvents（Linux + feature
-    /// `ebpf` only），ingest 到 `flow_aggregator` + DNS 关联，drain 出
-    /// ProcessFlow 快照贴到 `App::flows`。worker 不存在时跳过。
-    ///
-    /// 节奏：与 `tick_dns_log` / REFRESH_INTERVAL 同款（1s），主线程非阻塞。
-    /// 隐私：与 dns_log_recent 同源——`ProcessFlow.dns_name` 不持久化。
-    ///
-    /// **Part B 任务 9（exit-accounting）**：即使本 tick 无新事件，
-    /// 只要 aggregator 非空就跑一次 [`FlowAggregator::reaper_tick`]，把
-    /// 超过 [`GHOST_FLOW_TTL`] 的幽灵 flow 移除。否则进程退出后 ghost
-    /// 会一直挂在 `App::flows` 里。
-    fn tick_flows_ebpf(&mut self) {
-        let events = crate::ebpf::drain_events(self.workers.ebpf_worker.as_ref());
-        if events.is_empty() && self.flow_aggregator.is_empty() {
-            return;
-        }
-        let now = std::time::SystemTime::now();
-        if !events.is_empty() {
-            self.flow_aggregator
-                .ingest_events(events, &self.dns_log_recent, now);
-        }
-        // reaper_tick 必须每 tick 跑：无新事件时也要清过期 ghost。
-        let _reaped = self.flow_aggregator.reaper_tick(now);
-        self.flows = self.flow_aggregator.drain();
-        // v0.11 阶段 3：clamp 到过滤后总数，搜索 / FilterExpr 收窄后光标不越界。
-        let total = self
-            .port_panel
-            .panel
-            .flow_filtered_indices(&self.flows)
-            .len();
-        self.port_panel.panel.flow_clamp_cursor(total);
-    }
-
-    /// v0.10 阶段 3：从 [`schannel_etw_worker`] drain 最新一份 `Vec<SniRecord>`，
-    /// 把 SNI 覆盖到匹配 pid 的 `ProcessFlow.sni` 上 + 标 `source = Schannel`。
-    /// 没匹配上的 record 直接 push 一条新的 `source = Schannel` flow（Windows 上
-    /// 没有 eBPF 路径，Schannel 是唯一来源）。
+    /// v0.10 阶段 3 / v0.12 阶段 2：从 [`schannel_etw_worker`] drain 最新一份
+    /// `Vec<SniRecord>`，把 SNI 覆盖到匹配 pid 的 `ProcessFlow.sni` 上。
+    /// 没匹配上的 record 直接 push 一条新的 flow（Windows-only 后 Schannel
+    /// 是唯一来源）。
     ///
     /// 设计：
     /// - **匹配键：pid**（Schannel event 自带 `EVENT_HEADER.ProcessId`，与
     ///   `ProcessFlow.pid` 直接对齐，不需要 thread_map）。同一 pid 多条 flow 时
     ///   **全部覆盖**——Schannel event 没给 remote_addr，无法精确关联到具体 flow。
-    /// - **顺序**：在 [`tick_flows_ebpf`] 之后调用（先跑 eBPF aggregator，再用
-    ///   Schannel SNI 覆盖匹配 flow）。Linux 上 ebpf_worker 给完整 flow，Schannel
-    ///   不存在（worker 为 None）→ no-op；Windows 上 ebpf 路径空，Schannel 直接
-    ///   新建 flow。
     /// - **PID 复用**：从 `cached_processes` 查 pid → (start_time, comm)；
     ///   找不到的 record（进程已退 / sysinfo 未刷到）start_time 留 0、comm 留空。
     /// - drain 后 worker 内部 sync_channel(1) 空，下一次 tick 不会有「旧帧」污染。
@@ -1588,8 +1543,7 @@ impl App {
         }
 
         // 用 cached_processes 建 pid → (start_time, comm) map（O(1) 查询，
-        // 避免每个 record 全量 scan）。comm 走 owned String（Schannel 新建 flow
-        // 时填进 ProcessFlow.comm，与 ebpf 路径风格一致）。
+        // 避免每个 record 全量 scan）。
         let pid_info: HashMap<u32, (u64, String)> = self
             .cached_processes
             .iter()
@@ -1601,22 +1555,20 @@ impl App {
             for flow in self.flows.iter_mut() {
                 if flow.pid == rec.pid {
                     flow.sni = Some(rec.sni.clone());
-                    flow.source = crate::ebpf::flow::FlowSource::Schannel;
                     // Schannel event 时间戳更精确（来自 EVENT_HEADER.TimeStamp），
-                    // 比 aggregator 的内核 ts 更可靠，刷新 last_seen。
+                    // 刷新 last_seen。
                     flow.last_seen = rec.ts;
                     matched = true;
                 }
             }
             if !matched {
-                // Windows 上没有 ebpf 路径，直接新建 source = Schannel flow。
-                // remote_addr / remote_port / bytes / dns_name 留空 / None
-                // （Schannel event 不给 socket 元数据 + 不参与 DNS 关联）。
+                // 新建 flow。remote_addr / remote_port / bytes / dns_name 留空 /
+                // None（Schannel event 不给 socket 元数据 + 不参与 DNS 关联）。
                 let (start_time, comm) = pid_info
                     .get(&rec.pid)
                     .map(|(st, n)| (*st, n.clone()))
                     .unwrap_or((0, String::new()));
-                self.flows.push(crate::ebpf::flow::ProcessFlow {
+                self.flows.push(crate::flow::ProcessFlow {
                     pid: rec.pid,
                     start_time,
                     comm,
@@ -1627,7 +1579,6 @@ impl App {
                     bytes_in: 0,
                     dns_name: None,
                     sni: Some(rec.sni.clone()),
-                    source: crate::ebpf::flow::FlowSource::Schannel,
                     first_seen: rec.ts,
                     last_seen: rec.ts,
                     exit_time: None,
@@ -1635,19 +1586,16 @@ impl App {
             }
         }
 
-        // drain 出来时已按 last_seen 倒序；新 push 后需重排保持顺序。
+        // 新 push 后需重排保持 last_seen 倒序。
         self.flows.sort_by_key(|f| std::cmp::Reverse(f.last_seen));
 
-        // v0.10 阶段 4（REVIEW-11 P1-1）：reaper expired Schannel ghost flows。
-        // ebpf 路径走 FlowAggregator::reaper_tick；Schannel-only flow 不在聚合器
-        // 里（直接 push 到 self.flows），这里直接对 self.flows 跑同款 30s 保留
-        // 窗口逻辑。exit_time 由 tick_light_refresh 在 alive_pids 不含其 pid 时
-        // 打上；30s 后这里 retain 移除。Linux 上 schannel_etw_worker 恒为 None
-        // → 此方法早返回，reaper 段不执行。
+        // v0.10 阶段 4（REVIEW-11 P1-1）：reaper expired ghost flows。
+        // exit_time 由 tick_light_refresh 在 alive_pids 不含其 pid 时打上；
+        // 30s 后这里 retain 移除。
         let now = std::time::SystemTime::now();
-        crate::ebpf::flow::reap_expired_schannel_flows(&mut self.flows, now);
+        crate::flow::reap_expired_flows(&mut self.flows, now);
 
-        // v0.11 阶段 3：clamp 到过滤后总数（与 tick_flows_ebpf 同款）。
+        // v0.11 阶段 3：clamp 到过滤后总数，搜索 / FilterExpr 收窄后光标不越界。
         let total = self
             .port_panel
             .panel
@@ -1883,6 +1831,7 @@ impl App {
             crate::search::QueryMode::FilterExpr => match &search.filter_expr {
                 Some(expr) => {
                     let security_scores = &self.security_scores;
+                    let total_memory = self.snapshot.memory_usage().1;
                     processes
                         .iter()
                         .filter(|p| {
@@ -1890,6 +1839,7 @@ impl App {
                             let ctx = crate::filter::EvalCtx {
                                 process: p,
                                 security_score: score,
+                                total_memory,
                             };
                             expr.apply(&ctx)
                         })

@@ -1,6 +1,6 @@
 [package]
 name = "proc"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.85"
 description = "交互式 TUI 系统进程管理器，集成进程/网络/USB/Docker/安全评分/录屏"
@@ -103,41 +103,13 @@ filelocksmith = "2"
 version = "0.12"
 optional = true
 
-[target.'cfg(not(target_os = "windows"))'.dependencies]
-libc = "0.2"
-
-# v0.7 阶段 8：eBPF flow graph（ADR-0016）。
-# aya / aya-log 是纯 Rust eBPF 库，仅 Linux 编译；其它平台走 cfg-gate stub。
-# feature flag `ebpf` 默认关闭：`cargo build` 不带这俩依赖；用户显式
-# `cargo build --release --features ebpf` 启用（Linux only）。
-[target.'cfg(target_os = "linux")'.dependencies]
-aya = { version = "0.13", optional = true }
-aya-log = { version = "0.2", optional = true }
-
 [features]
-default = ["nvidia", "nvtop", "nethogs"]
+default = ["nvidia"]
 nvidia = ["nvml-wrapper"]
-# nvtop 走子进程（无新 native 依赖）；feature 关闭时 NvtopProvider 不编译。
-nvtop = []
-# nethogs 走子进程（无新 native 依赖）；feature 关闭时 NethogsCollector 不编译。
-# 仅 Linux 平台生效；Windows / macOS 上 detect_collector 直接返回 None。
-nethogs = []
-# v0.7 阶段 8：eBPF flow graph（Linux only）。
-# 启用 aya / aya-log userspace 加载器 + EbisuBpfWorker 实装；其它平台 /
-# 不启用时走 stub（`try_spawn` 返回 None，UI 显示降级提示）。
-# 内核态 ELF（src/ebpf/ebpf-ebpf）是独立 sub-project，由 bpf-linker 单独
-# 编译后 include_bytes! 嵌入；详见该子项目 Cargo.toml。
-ebpf = ["dep:aya", "dep:aya-log"]
 
-# v0.7 阶段 8：eBPF 内核态 sub-project（ADR-0016）。
-# - members：把 src/ebpf/ebpf-ebpf 纳入 workspace，方便 `cargo metadata`
-#   统一索引；但 default-members 只含根包，`cargo build`（无 -p）不会
-#   尝试编译内核态（其 no_std + bpfel-unknown-none target 需要 nightly +
-#   bpf-linker，Windows / 默认 toolchain 不具备）。
-# - 显式编译内核态：`cargo build -p proc-ebpf --target bpfel-unknown-none`。
-[workspace]
-members = ["src/ebpf/ebpf-ebpf"]
-default-members = ["."]
+# v0.12.0 阶段 1（ADR-0022）：proc 转为 Windows-only。
+# v0.12.0 阶段 2：移除 nvtop / nethogs / ebpf 空 feature stub
+# （对应模块 NvtopProvider / NethogsCollector / src/ebpf/ 已在 stage 2 删除）。
 
 [dev-dependencies]
 tempfile = "3"

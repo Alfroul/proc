@@ -406,7 +406,7 @@ fn parse_sni_via_tdh(record: &EVENT_RECORD) -> Option<SniRecord> {
     let mut offset_in_user_data = 0usize;
     let top_count = info.TopLevelPropertyCount as usize;
     for i in 0..top_count {
-        let prop = property_at_index(info_ptr, i)?;
+        let prop = property_at_index(&info_buf, i)?;
 
         // property 名字在 buffer 里以 UTF-16 LE 存（NameOffset 是字节 offset）
         let name = read_wide_string_at_offset(&info_buf, prop.NameOffset as usize);
@@ -473,15 +473,21 @@ fn tdh_get_event_info_buffer(record: &EVENT_RECORD) -> Option<Vec<u8>> {
 ///
 /// windows-rs 的 `TRACE_EVENT_INFO.EventPropertyInfoArray` 是 `[EVENT_PROPERTY_INFO; 1]`
 /// 占位字段（C 端是 trailing flexible array），实际长度由 `PropertyCount` 决定。
-fn property_at_index(
-    info_ptr: *const TRACE_EVENT_INFO,
-    idx: usize,
-) -> Option<&'static EVENT_PROPERTY_INFO> {
-    if info_ptr.is_null() {
+///
+/// **TD-35（v0.12 阶段 5）lifetime 修正**：返回的引用生命周期绑到 `info_buf`
+/// （TdhGetEventInformation 返回的 `Vec<u8>` owner），不再撒谎说 `&'static`。
+/// 之前签名声明 `'static` 但实际只在 owner buffer 活着时有效——buffer drop 后
+/// 引用悬空。现在 `info_buf: &[u8]` → `Option<&EVENT_PROPERTY_INFO>`（Rust
+/// lifetime elision：唯一输入 lifetime 自动 propagate 到输出），借用检查器
+/// 自动保证引用不会逃出 owner。callers 之前传 `info_ptr` 改成传 `info_buf`，
+/// info_ptr 在函数内派生。
+fn property_at_index(info_buf: &[u8], idx: usize) -> Option<&EVENT_PROPERTY_INFO> {
+    if info_buf.is_empty() {
         return None;
     }
-    // SAFETY: info_ptr 来自成功的 TdhGetEventInformation；PropertyCount 是 buffer
-    // 内合法 property 数。我们只读 idx < PropertyCount 的 entry。
+    let info_ptr = info_buf.as_ptr() as *const TRACE_EVENT_INFO;
+    // SAFETY: caller 承诺 info_buf 是 TdhGetEventInformation 成功返回的 buffer，
+    // 按 TRACE_EVENT_INFO 对齐且长度足够；我们只读 idx < PropertyCount 的 entry。
     let info = unsafe { &*info_ptr };
     if idx as u32 >= info.PropertyCount {
         return None;
@@ -520,8 +526,7 @@ fn tdh_get_property_size_for_index(
     info_buf: &[u8],
     idx: usize,
 ) -> Option<usize> {
-    let info_ptr = info_buf.as_ptr() as *const TRACE_EVENT_INFO;
-    let prop = property_at_index(info_ptr, idx)?;
+    let prop = property_at_index(info_buf, idx)?;
     let name_offset = prop.NameOffset as usize;
     if name_offset + 2 > info_buf.len() {
         return None;

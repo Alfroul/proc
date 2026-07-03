@@ -5,6 +5,10 @@
 //!
 //! v0.11 阶段 2：human-readable 模式末尾追加 `dns_collector` 行，反映 DNS
 //! collector 实际选用的类型（etw / powershell / none）。详见 ADR-0020。
+//!
+//! v0.12 阶段 5（TD-23）：JSON 模式从裸数组 `[...]` 改为 object
+//! `{"workers": [...], "dns_collector": "..."}`，与 MCP `proc_diag` 输出结构
+//! 对齐（详见 src/mcp/handler.rs::make_diag_json）；human-readable 模式不变。
 
 use colored::Colorize;
 
@@ -26,8 +30,15 @@ pub fn run_diag(json: bool) {
     }
 
     let metrics = app.worker_metrics();
+    let dns_kind = app.workers.dns_collector_kind;
     if json {
-        match serde_json::to_string_pretty(&metrics) {
+        // TD-23（v0.12 阶段 5）：wrap 成 object，加 dns_collector 字段，与 MCP
+        // make_diag_json 输出结构一致（除了 MCP 多一个 ok: true 包装层）。
+        let json_value = serde_json::json!({
+            "workers": metrics,
+            "dns_collector": dns_kind,
+        });
+        match serde_json::to_string_pretty(&json_value) {
             Ok(s) => println!("{s}"),
             Err(e) => eprintln!("{} 序列化失败: {}", "错误:".red(), e),
         }

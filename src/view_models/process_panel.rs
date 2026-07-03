@@ -39,6 +39,12 @@ pub struct ProcessPanel {
     pub app_group_sort: AppGroupSortField,
     pub app_group_search: crate::search::SearchState,
     pub version_info_cache: HashMap<String, Option<VersionInfo>>,
+
+    /// v0.12 阶段 4（TD-30）：系统总内存（来自 `snapshot.memory_usage().1`），
+    /// 供 FilterExpr 的 `mem > 50%` 字面量换算成字节阈值。`init_tree` /
+    /// `refresh_tree` 同步刷新。测试场景（panel_with_procs）传 0 → EvalCtx
+    /// 的 mem + Percent 路径退回旧行为（字节值直接与百分号数字比较）。
+    pub total_memory: u64,
 }
 
 impl ProcessPanel {
@@ -66,10 +72,12 @@ impl ProcessPanel {
             app_group_sort: AppGroupSortField::Cpu,
             app_group_search: crate::search::SearchState::new(),
             version_info_cache: HashMap::new(),
+            total_memory: 0,
         }
     }
 
     pub fn init_tree(&mut self, processes: &[ProcessInfo], total_mem: u64) {
+        self.total_memory = total_mem;
         self.tree_nodes = tree::build_process_tree(processes, total_mem);
     }
 
@@ -157,6 +165,7 @@ impl ProcessPanel {
                     let header_ctx = crate::filter::EvalCtx {
                         process: &synth,
                         security_score: None,
+                        total_memory: self.total_memory,
                     };
                     let header_match = expr.apply(&header_ctx);
 
@@ -186,6 +195,7 @@ impl ProcessPanel {
                                     let ctx = crate::filter::EvalCtx {
                                         process: proc,
                                         security_score: None,
+                                        total_memory: self.total_memory,
                                     };
                                     expr.apply(&ctx)
                                 })
@@ -362,6 +372,7 @@ impl ProcessPanel {
                             let ctx = crate::filter::EvalCtx {
                                 process: p,
                                 security_score: None,
+                                total_memory: self.total_memory,
                             };
                             expr.apply(&ctx)
                         })
@@ -865,6 +876,7 @@ impl ProcessPanel {
     }
 
     pub fn refresh_tree(&mut self, processes: &[ProcessInfo], total_mem: u64) {
+        self.total_memory = total_mem;
         let expanded_pids = tree::collect_expanded_pids(&self.tree_nodes);
         self.tree_nodes = tree::build_process_tree(processes, total_mem);
         tree::restore_expanded_pids(&mut self.tree_nodes, &expanded_pids);

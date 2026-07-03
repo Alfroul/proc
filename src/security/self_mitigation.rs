@@ -26,7 +26,7 @@ use std::ffi::c_void;
 #[cfg(windows)]
 pub fn apply_self_mitigations() -> Vec<&'static str> {
     use windows::Win32::System::Threading::{
-        GetProcessMitigationPolicy, GetCurrentProcess, ProcessASLRPolicy, ProcessDEPPolicy,
+        GetCurrentProcess, GetProcessMitigationPolicy, ProcessASLRPolicy, ProcessDEPPolicy,
         ProcessDynamicCodePolicy, ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy,
         SetProcessMitigationPolicy,
     };

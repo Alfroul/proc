@@ -223,41 +223,6 @@ fn format_win32_protection(
     s
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn collect_memory(pid: u32) -> Result<Vec<MemoryRegion>> {
-    #[cfg(target_os = "linux")]
-    {
-        let path = format!("/proc/{pid}/maps");
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| ProcError::permission_denied_with(format!("读取 {path} 失败"), e))?;
-        Ok(parse_proc_maps(&text))
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        Err(ProcError::permission_denied(
-            "此平台（非 Windows/Linux）暂不支持内存映射采集",
-        ))
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn parse_proc_maps(text: &str) -> Vec<MemoryRegion> {
-    text.lines()
-        .filter_map(|line| parse_maps_line(line))
-        .map(|p| MemoryRegion {
-            base_addr: p.base,
-            size: p.size,
-            // Linux maps 没有 commit/reserve/free 概念 —— 列出来的都是已分配的，
-            // 统一标 Commit 让 UI 的「按 state 分组」能跑起来。
-            state: MemoryState::Commit,
-            protection: p.protection,
-            name: p.name,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,17 +269,6 @@ mod tests {
         assert!(parse_maps_line("7f0000000000-7f0000001000").is_none());
         // start > end（不可能的行）
         assert!(parse_maps_line("7f0000002000-7f0000001000 rwxp 0 fd:00 1  /x").is_none());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn parse_proc_maps_collects_multiple_regions() {
-        let text = "7f0000000000-7f0000001000 r-xp 00000000 fd:00 1  /usr/lib/libfoo.so\n\
-                    7f0000001000-7f0000002000 rw-p 00001000 fd:00 1  [heap]\n";
-        let regions = parse_proc_maps(text);
-        assert_eq!(regions.len(), 2);
-        assert_eq!(regions[0].name, "/usr/lib/libfoo.so");
-        assert_eq!(regions[1].name, "[heap]");
     }
 
     #[test]

@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use super::{RiskCategory, RiskFactor};
-use crate::ebpf::flow::ProcessFlow;
+use crate::flow::ProcessFlow;
 
 /// R15 命中权重。一击扣 30（与 v0.6 已知 C2 端口 R5 同档）。
 pub const R15_WEIGHT: u32 = 30;
@@ -201,7 +201,6 @@ mod tests {
             bytes_in: 0,
             dns_name: dns_name.map(str::to_string),
             sni: None,
-            source: crate::ebpf::flow::FlowSource::Ebpf,
             first_seen: last_seen,
             last_seen,
             exit_time: None,

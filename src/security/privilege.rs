@@ -118,10 +118,4 @@ pub fn check_privilege_tokens(pid: u32, user_id: Option<&str>) -> Option<RiskFac
             description: format!("持有高危特权: {}", found_dangerous.join(", ")),
         })
     }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (pid, user_id);
-        None
-    }
 }

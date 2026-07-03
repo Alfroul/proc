@@ -6,20 +6,13 @@
 //!   （`ObjectTypeInformation` 快）。Name 字段对非 File 类型留空；File 类型
 //!   在反查 `find_lockers` 路径下走 filelocksmith（更稳，避免同步
 //!   `NtQueryObject(ObjectNameInformation)` 的阻塞风险）。
-//! - **Linux**：解析 `/proc/<pid>/fd/*` —— 每个 fd 都是一个 File 句柄，
-//!   readlink 拿目标路径。
-//! - **macOS**：返回 `PermissionDenied`。
 //!
 //! 反查 `find_lockers(path)`：
 //! - Windows：`filelocksmith::find_processes_locking_path(path)` 返回 PID
 //!   列表（内部已用线程 + 超时规避 NtQueryObject 阻塞），再用 sysinfo 补
 //!   进程名。
-//! - Linux：遍历 `/proc/*/fd/*`，对每个 fd `readlink` 匹配目标路径。
 
 use crate::error::Result;
-
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
-use crate::error::ProcError;
 
 use super::{HandleInfo, HandleKind};
 
@@ -32,17 +25,6 @@ pub fn collect_handles(pid: u32) -> Result<Vec<HandleInfo>> {
     {
         windows_impl::collect(pid)
     }
-    #[cfg(target_os = "linux")]
-    {
-        linux_impl::collect(pid)
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        let _ = pid;
-        Err(ProcError::permission_denied(
-            "此平台（非 Windows/Linux）暂不支持句柄枚举",
-        ))
-    }
 }
 
 /// 反查「谁占用 `path`」。返回所有持有该路径句柄的进程。
@@ -53,17 +35,6 @@ pub fn find_lockers(path: &std::path::Path) -> Result<Vec<HandleInfo>> {
     #[cfg(target_os = "windows")]
     {
         windows_impl::find_lockers(path)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        linux_impl::find_lockers(path)
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        let _ = path;
-        Err(ProcError::permission_denied(
-            "此平台（非 Windows/Linux）暂不支持反查",
-        ))
     }
 }
 
@@ -102,81 +73,6 @@ pub fn parse_handle_kind(type_name: &str) -> HandleKind {
 #[must_use]
 pub fn format_raw_handle(raw: u64) -> String {
     format!("0x{raw:X}")
-}
-
-// ── Linux impl ──────────────────────────────────────────────────────────────
-
-#[cfg(target_os = "linux")]
-mod linux_impl {
-    use super::{HandleInfo, HandleKind};
-    use crate::error::{ProcError, Result};
-    use std::path::Path;
-
-    pub fn collect(pid: u32) -> Result<Vec<HandleInfo>> {
-        let dir = format!("/proc/{pid}/fd");
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|e| ProcError::permission_denied_with(format!("读取 {dir} 失败"), e))?;
-        let mut handles = Vec::new();
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let Some(fd_str) = file_name.to_str() else {
-                continue;
-            };
-            let Ok(fd) = fd_str.parse::<u32>() else {
-                continue;
-            };
-            let target = std::fs::read_link(entry.path()).unwrap_or_default();
-            let target_str = target.to_string_lossy().to_string();
-            handles.push(HandleInfo {
-                raw_handle: u64::from(fd),
-                kind: HandleKind::File,
-                name: target_str,
-                granted_access: 0,
-            });
-        }
-        Ok(handles)
-    }
-
-    pub fn find_lockers(path: &Path) -> Result<Vec<HandleInfo>> {
-        let target_canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let proc_dir = std::fs::read_dir("/proc")
-            .map_err(|e| ProcError::permission_denied_with("读取 /proc 失败", e))?;
-        let mut hits = Vec::new();
-        for entry in proc_dir.flatten() {
-            let name = entry.file_name();
-            let Some(name_str) = name.to_str() else {
-                continue;
-            };
-            let Ok(pid) = name_str.parse::<u32>() else {
-                continue;
-            };
-            let fd_dir = entry.path().join("fd");
-            let Ok(fds) = std::fs::read_dir(&fd_dir) else {
-                continue;
-            };
-            for fd_entry in fds.flatten() {
-                if let Ok(link) = std::fs::read_link(fd_entry.path()) {
-                    if link == target_canonical {
-                        let fd_num = fd_entry
-                            .file_name()
-                            .to_string_lossy()
-                            .parse::<u32>()
-                            .unwrap_or(0);
-                        hits.push(HandleInfo {
-                            // raw_handle 字段在反查路径下临时编码 PID，便于 CLI
-                            // 输出（find_lockers 的调用方知道这一点）。Linux fd
-                            // 的数值存在 granted_access 字段里以便区分。
-                            raw_handle: u64::from(pid),
-                            kind: HandleKind::File,
-                            name: target_canonical.to_string_lossy().to_string(),
-                            granted_access: fd_num,
-                        });
-                    }
-                }
-            }
-        }
-        Ok(hits)
-    }
 }
 
 // ── Windows impl ────────────────────────────────────────────────────────────

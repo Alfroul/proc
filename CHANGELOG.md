@@ -7,7 +7,105 @@
 
 ## [Unreleased]
 
-下次 cycle（v0.12.0+）的工作面：候选方向见下方 v0.11.0 段末尾「下一步候选」+ tech-debt v0.11 REVIEW-13 P2 归档（TD-23+）。
+下次 cycle（v0.13.0+）的工作面：候选方向见下方 v0.12.0 段末尾「下一步候选」+ tech-debt v0.12 REVIEW-14 P2 归档（TD-38+）。
+
+## [0.12.0] - 2026-07-04
+
+v0.12.0 cycle 围绕 **Windows-only 平台定位**（ADR-0022 决策，移除全部 Linux/macOS 代码 + 历史遗留 eBPF / PSI / nvtop / nethogs 整模块删）+ **UX polish cycle**（修 v0.11 REVIEW-13 P2 归档的 12 个 TD）两条主线，分 6 阶段推进（stage 1 Spike / stage 2 Linux 移除 / stage 3 签名完整度 / stage 4 FilterExpr 修复 / stage 5 杂项 / stage 6 Review + 收尾）。**全量回归 1115 passed / 0 failed / 3 ignored**（v0.11.0 基线 1146 → -31：stage 2 删除 ~46 个 Linux 相关测试，加 stage 3-5 新测试 ~15 个，净减 31）；0 个新依赖进默认依赖图（windows-rs 既有 feature 复用 + 删除 libc / aya / aya-log / nvml-wrapper 之外的 Linux 依赖）。
+
+**已知限制（必须在 release notes 显式标注）**：
+- **Windows-only 平台**：v0.12.0 起 proc 转为 Windows-only 应用（Windows 10 1809+ / Windows 11 x64，详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。Linux / macOS 用户迁移路径：`git checkout v0.11.0`（最后含 Linux 代码的 release）。如需 v0.12+ 新功能欢迎 fork。
+- **Win10 < 1809**：Schannel event 1793 不 fire（延续 v0.10.0 / v0.11.0 已知限制，TD-20）；worker 启动成功但 UI 显示 0 条 Schannel flow。
+- **Worker restart 3 次失败后仍永久死亡**：v0.11.0 落地的指数退避（5s/30s/5min）+ MAX_RETRIES=3 止损保持不变。
+- **DNS ETW 仅 Windows 管理员启用**：非管理员降级到 PowerShell fallback（v0.5.0 路径保留）。
+- **`.github/workflows/ci.yml` `check-linux` job 仍在**（TD-42，v0.13+ 整理候选）；用户主要本地 Windows 开发，GitHub Actions 是次要 CI。
+
+### 阶段 6 — Review + 收尾 + tag v0.12.0（本次发布）
+
+> 本次发布 commit：Cargo.toml 0.11.0 → 0.12.0；CHANGELOG / README / CONTEXT 同步 v0.12.0；6 个 stage doc 头部加 ✅ 已发布标记；REVIEW-14 P0/P1/P2 状态闭环；tech-debt TD-17/19/23/26/27/28/29/30/32/33/35/36 标 Fixed；新增 TD-38+（P2 归档）。
+
+- Docs: **`docs/reviews/REVIEW-14.md`**（新）— v0.12.0 cycle 全局 review 报告。审查覆盖 stage 1-5 全部产出（代码质量 / 架构 / 安全 / 跨平台 / 性能 / 完整性 6 子项），分级 **P0 0 / P1 7 / P2 7**。无阻断问题（基线 1115 passed + fmt/clippy/no-default-features build 全通过）；P1 集中在完整性（tech-debt TD 标记 / CONTEXT 演进历史 / stage docs ✅ / README banner / 平台表 / CHANGELOG），不影响核心功能。
+- Fix: **REVIEW-14 P1-1 ~ P1-7** — tech-debt TD-26 / 27 / 28 / 30 标 ✅ Fixed in v0.12.0（实际 stage 3 / 4 已落地，文档同步）；CONTEXT.md 加阶段 2 + 阶段 6 演进历史行；6 个 stage docs 头部加 ✅ 已完成标记；README banner 加 v0.12.0 段 + 平台支持表删 Linux/macOS 列；CHANGELOG `[Unreleased]` 改 `[0.12.0] - 2026-07-04`；Cargo.toml `0.11.0` → `0.12.0` + Cargo.lock 同步。
+- Docs: tech-debt.md 加 v0.13.0+ 候选段（TD-38 ~ TD-43 = REVIEW-14 P2-1 ~ P2-7 归档）；TD-17 / TD-19 保持 ✅ Fixed in v0.12.0 阶段 1（stage 1 已标）；TD-23 / 29 / 32 / 33 / 35 / 36 保持 ✅ Fixed in v0.12.0 阶段 5（stage 5 已标）；ADR-0022（Accepted）/ ADR-0016（Superseded）/ ADR-0013（Deprecated）三条 ADR Status 同步。
+- Release: `git tag -a v0.12.0 -m "v0.12.0：Windows-only 平台定位 + UX polish（trusted_signers + mem% + regex escape + 6 个 P2 修复）"` 已打（等用户确认后 push）。
+
+### 阶段 5 — 杂项小修（6 个 v0.11 REVIEW-13 P2 归档项）
+
+> 6 个独立小修互不依赖，每个 surgical 不引回归。覆盖 diag JSON 输出 / NetworkIn 性能 / R17 系统白名单 / R18 Downloads 去重 / property_at_index lifetime / MCP DNS 持久化。
+
+- Fix: **TD-23（DNS ETW diag JSON 输出不含 dns_collector 字段）** — `src/cli/diag.rs` JSON 输出从裸数组 `[...]` 改为 object `{"workers": [...], "dns_collector": "..."}`，与 MCP `proc_diag` 输出结构对齐（除了 MCP 多一个 ok: true 包装层）。`src/mcp/handler.rs::make_diag_json` 同步加 dns_collector 字段。
+- Fix: **TD-29（NetworkIn 用 Vec 线性查找）** — `src/filter/mod.rs::FilterExpr::NetworkIn.values` 字段从 `Vec<Value>` 改为 `HashSet<Value>`；apply 路径 `iter().any()` O(N) → `contains` O(1)。`Value` 加手动 `Hash + Eq` impl（f64 用 `to_bits()`，parser 产生数字非 NaN 安全）。`src/filter/parser.rs::parse_in_list` 返 `HashSet<Value>` 自动去重。100 个 IP × 1000 flows 的极端场景从 100_000 次比较降到 1_000 次 hash 查找。
+- Fix: **TD-32（R17 ScriptInterpreter 不分场景扣分）** — `src/security/lineage.rs::detect_suspicious_chain` 在返 ScriptInterpreter 扣分前检查直接父（`chain[0]`）是否在 `SYSTEM_BOOT_ENTRIES = [services.exe / wininit.exe / svchost.exe]` 白名单里；命中白名单则跳过扣分（视为合法系统登录脚本 / SCM trigger）。其他 R17 子检查（OfficeToShell / BrowserToShell / Custom）不受影响——白名单只在 ScriptInterpreter 路径生效。消除企业域控 + SCCM 部署环境的 ScriptInterpreter 误报。
+- Fix: **TD-33（R18 + path_check 叠加扣分导致 Downloads 等合法路径扣 30 分）** — `src/security/score.rs::SecurityScorer::score` 第 18 步在 extend R18 factors 前 filter 掉 `suspicious_path_downloads`（如果 `factors` 已含 v0.6 path_check 的 `downloads_dir`）。`%USERPROFILE%\Downloads` 同一物理路径不再被双扣（之前 15+15=30 过度），单扣 15。
+- Fix: **TD-35（property_at_index lifetime 修正）** — `src/dns_log/etw.rs` + `src/schannel_etw/provider.rs::property_at_index` 签名从 `(*const TRACE_EVENT_INFO, idx) -> Option<&'static EVENT_PROPERTY_INFO>` 改为 `(&[u8], idx) -> Option<&EVENT_PROPERTY_INFO>`（lifetime elision 自动绑到入参 buffer）。修正了原来撒谎的 `'static`——返回引用实际只在 owner buffer 活着时有效，buffer drop 后悬空。Callers 改传 `info_buf`（`Vec<u8>` owner 切片）。
+- Fix: **TD-36（MCP DNS tool 拿不到历史）** — `src/mcp/handler.rs::ProcMcpHandler` 加 `dns_collector: Arc<Mutex<Option<Box<dyn DnsLogCollector>>>>` 字段；rmcp 内部 clone handler 时共享同一 collector 实例。生产入口 `ProcMcpHandler::new()`（`serve()` 调）调 `detect_collector()` 一次 spawn；`Default`（测试路径）保持 `None` 不强制 spawn ETW / PowerShell。`proc_dns` tool call drain 持久 collector——客户端任何时刻调用都能拿到 server 启动以来累积的 DNS 事件，不再每次 spawn 临时 collector 错过启动前查询。
+- Tests: `tests/test_mcp_server.rs` 扩 TD-23 dns_collector + TD-36 持久 collector 3 case；`tests/test_filter_expr_v2.rs` 扩 TD-29 HashSet 3 case；`tests/test_lineage.rs` 扩 TD-32 白名单 4 case；`tests/test_path_rules.rs` 扩 TD-33 dedup 2 case。
+- Docs: CONTEXT.md 加 6 个新术语（diag JSON dns_collector / NetworkIn HashSet / SYSTEM_BOOT_ENTRIES / R18 dedup / property_at_index / MCP 持久 collector）+ 演进历史加 v0.12.0 阶段 5 行。
+
+### 阶段 4 — FilterExpr 修复（TD-28 regex escape + TD-30 mem% 语义）
+
+> 修两个 v0.11 stage 3 / stage 4 落地后的 silent bug：mem% 字节比较 bug 让「占用 > 50% 内存的进程」过滤几乎全部命中；regex 不支持 `\/` 让 CIDR / URL pattern 写不出来。
+
+- Fix: **TD-30（FilterExpr `mem > 5%` 字节比较 silent bug）** — `src/filter/mod.rs::EvalCtx` 加 `pub total_memory: u64` 字段，让 `mem > 50%` 字面量能换算成字节阈值。apply 路径：`FieldValue::Num(mem_bytes) vs Value::Percent(p)` 时，若 `field == Field::Mem && total_memory > 0`，按 `mem_bytes / total_memory * 100.0` 与 `p` 比较；否则退回旧行为（字节值直接与百分号数字比较）。`total_memory == 0` 表示「未知容量」（测试场景 / panel 未初始化），此时 mem% 走 legacy 路径避免 div by zero。`ProcessPanel` 加 `total_memory: u64` 字段，由 `init_tree` / `refresh_tree` 同步刷新，3 个 EvalCtx 构造点共用。
+- Fix: **TD-28（regex 中不能 escape `/`）** — `src/filter/parser.rs::parse_regex_lit` 从 `take_till1(|c| c == '/')` 改为状态机扫描。状态机规则：遇 `\` → 看下一字符——是 `/` 则 pattern 追加单 `/`（drop 反斜杠，regex crate 不接受 `\/` 作为有效转义）；其他字符（`.`/`d`/`w`/`s` 等 regex 元字符）则 `\X` 原样保留让 regex crate 解释。遇非转义 `/` → pattern 结束。兼容性：旧表达式（无 `\/`）行为不变。例子：`name =~ /192\.168\.1\.0\/24/` → pattern `192\.168\.1\.0/24`；`sni =~ /https:\/\/example\.com/` → pattern `https://example\.com`。
+- Tests: `tests/test_filter_expr.rs` 加 12 case：6 TD-30 mem% 换算 + 6 TD-28 regex escape。
+- Docs: CONTEXT.md 加 `EvalCtx.total_memory` + `parse_regex_lit \/ escape` 2 个新术语 + 演进历史加 v0.12.0 阶段 4 行；README FAQ 加 FilterExpr CIDR 匹配一条。
+
+### 阶段 3 — 签名验证完整度（TD-26 + TD-27 trusted_signers.toml）
+
+> 解决 v0.11 R16 最大误报源：Adobe / Cisco / Docker 等常见 vendor 配置 `trusted_signers.toml` 后从 Signed（扣 10）升级到 Trusted（不扣分）；9 状态机让用户能区分「证书过期」「不受信根」「链断裂」三类问题；扩内置列表让 24 个常见 vendor **零配置**即正确评分。
+
+- Added: **SignatureStatus 9 状态机（TD-26）** — `src/security/signature.rs` enum 从 v0.11 6 变体扩到 9 变体——加 `Expired`（CERT_E_EXPIRED 0x800B0101）/ `UntrustedRoot`（CERT_E_UNTRUSTEDROOT 0x800B0109）/ `ChainError`（CERT_E_CHAINING 0x800B010A / CERT_E_WRONG_NAME 0x800B0113 / TRUST_E_CERT_SIGNATURE 0x80096010）。`from_wintrust_result` 扩 5 HRESULT 映射；`signature_risk_factor` 加 3 新变体权重（Expired 15 / UntrustedRoot 15 / ChainError 10，介于 Signed 10 与 Unsigned 20 之间——曾经受信但有问题）；`badge`：Expired / UntrustedRoot 归到 ⚠️，ChainError 归到 ❓。
+- Added: **TrustedSignersRule / trusted_signers.toml（TD-27）** — 新建 `src/security/trusted_signers.rs`（~190 行）实装 `TrustedSignersRule`（含 `vendor_regex: regex::Regex` 编译缓存）+ `load_trusted_signers()` 读 `~/.config/proc/trusted_signers.toml`（默认不存在 → 空 Vec）+ `matches_any_rule()` 集成入口。TOML 格式 `[[signer]] name / vendor_pattern / reason(可选)`；`vendor_pattern` 是 regex，用户需用 `(?i)` 前缀声明大小写不敏感。
+- Added: **TRUSTED_SIGNERS 扩到 24 vendor** — 内置列表加 Adobe / Cisco / Oracle / VMWare / Docker / Red Hat / Apache / Python / GitHub / Electron / AMD 等；与用户 rules 合并（追加不替换），`verify_signature_with_policy` 在升级 Signed → Trusted 时调 `is_trusted_signer(company) || matches_any_rule(company, &self.trusted_signers_rules)`，任一命中即升级。
+- Added: **SecurityScorer 加 trusted_signers_rules 字段** — 构造时一次性加载，score 路径调 `verify_signature_with_policy(exe_path, None, &self.trusted_signers_rules)`。
+- Tests: `tests/test_signature.rs` 扩到 38 case：5 HRESULT 映射 + 3 risk_factor + 2 badge 分组 + 3 trusted_signers.toml 解析 + 扩 vendor 列表。
+- Docs: CONTEXT.md 加 `SignatureStatus 9 状态机` / `TrustedSignersRule` 2 个新术语 + 演进历史加 v0.12.0 阶段 3 行；README FAQ 加 trusted_signers.toml 排查一条。
+
+### 阶段 2 — Linux 代码移除（最大 Slice）
+
+> 按 stage 1 audit 报告移除全部 Linux/macOS 代码：删整模块 + 清理 cfg gate + 删 Linux-only tests + 更新 README 平台表。约 1000 行删除 + 200 行调整。
+
+- Removed: **整模块删除** — `src/ebpf/`（6 files：mod.rs / flow.rs / worker.rs / stub.rs / elf_loader.rs / ebpf-ebpf/ 整个子项目）；`src/psi.rs`；`src/dns_log/unsupported.rs`；`src/net_flow/{nethogs.rs, unsupported.rs}`；`tests/test_linux_stubs.rs`；`tests/test_psi.rs`；`tests/test_ebpf_flow.rs`；`tests/test_flow_source.rs`；`tests/test_gpu.rs`（nvtop 相关）。
+- Removed: **cfg gate 清理** — ~25 文件删除 `#[cfg(not(target_os = "windows"))]` / `#[cfg(target_os = "linux")]` 分支；保留 `#[cfg(target_os = "windows")]` 块（去掉 cfg attr 因现在所有平台都是 Windows）。仅保留 `src/security/signature.rs:232` 的 mock policy 路径（v0.11 stage 4 ADR-0021 设计入口，REVIEW-14 P2-1 归档 TD-38 候选清理）+ `tests/test_inspect.rs:97` 的 macOS stub mod（REVIEW-14 P2-2 归档 TD-39 候选清理）。
+- Changed: **ProcessFlow 简化** — `src/ebpf/flow.rs` 删后移到 `src/flow.rs`（新文件）。`FlowSource` enum 从 `{ Ebpf, Schannel }` 简化为单变体 Schannel 后**整字段删除**（serde `#[serde(default)]` 保旧录屏兼容，含 `source: "ebpf"` 字段的 v0.10/v0.11 `.prec` 反序列化时直接忽略未知字段）。
+- Changed: **NetworkField 简化** — `src/filter/mod.rs::NetworkField` 删除 `Source` 变体（Windows-only 后唯一来源是 Schannel）；`src/filter/parser.rs::parse_field` 拒绝 `source` 标识符返未知字段错误（test 覆盖）。
+- Changed: **src/cli/flows.rs** — 移除 `EBPF_ENABLED` 检查 + `ebpf_worker.is_none()` 分支（FlowSource 仅 Schannel）。
+- Changed: **src/app.rs** — 移除 `tick_flows_ebpf` 方法 + `flow_aggregator` 字段 + `App::workers.ebpf_worker` 字段。
+- Changed: **README 平台支持表** — 删 Linux / macOS 列（详见 stage 6 任务 6 二次确认）；line 3 description 删「Linux/macOS 可降级运行」。
+- Docs: CONTEXT.md 顶部加「⚠ 已知限制（v0.12.0 起顶层约束）」段（Windows-only 平台决策）；ADR-0016 Status 改 `Superseded by ADR-0022`；ADR-0013 Status 改 `Deprecated (v0.12 移除)`。
+- Tests: `tests/test_security.rs` mk_flow helper 移除 source 字段；`tests/test_filter_expr_v2.rs` NetworkField::Source 测试改「source 字段已移除」断言。
+
+### 阶段 1 — Spike（ADR-0022 + Cargo.toml 清理 + 范围审计）
+
+> stage 1 Spike 原则：锁定决策 + 清理 Cargo.toml + 产出范围清单，**不删任何业务代码**。stage 2 起开始按 audit 报告删 src/ebpf/ / src/psi.rs / ~30 文件 cfg gate 等 Linux 路径代码。
+
+- Added: **ADR-0022 Windows-only 平台决策** — `docs/adr/0022-windows-only-platform.md`（新）。Status: Accepted。决策：proc 自 v0.12 起转为 Windows-only 应用（Windows 10 1809+ / Windows 11 x64）；Linux / macOS 用户迁移路径：`git checkout v0.11.0`。
+- Changed: **ADR-0016 / ADR-0013 Status** — ADR-0016（eBPF flow graph）Status 改 `Superseded by ADR-0022`；ADR-0013（PSI 监控）Status 改 `Deprecated (v0.12 移除)`（不删文件，只改 Status 字段）。
+- Changed: **Cargo.toml 清理** — 删 `cfg(not(target_os="windows"))` deps（libc）+ `cfg(target_os="linux")` deps（aya / aya-log）+ workspace 段（src/ebpf/ebpf-ebpf 子项目）；`default = ["nvidia", "nvtop", "nethogs"]` → `default = ["nvidia"]`；保留 nvtop / nethogs / ebpf 3 个空 feature flag stub（避免 rustc 1.80+ `unexpected_cfgs` warning，stage 2 删代码时一并清）。
+- Added: **`docs/stages/v0.12-stage-2-audit.md`** — stage 2 范围清单（34 文件 / 78 处 cfg gate occurrences，分类：整模块删 / 整文件删 / cfg gate 清理 / 跨平台保留）。
+- Docs: tech-debt TD-17 / TD-19 标 ✅ Fixed in v0.12.0 阶段 1（决策不再追 Linux eBPF 路径 = 自动清零）；CONTEXT.md 顶部加「⚠ 已知限制（v0.12.0 起顶层约束）」段。
+- Tests: 全量回归 1146 passed / 0 failed / 3 ignored（基线不变，不引回归）。
+
+---
+
+**下一步候选（v0.13.0+）**：
+
+- **TD-31 FilterExpr v3 跨 ctx 表达式**（大型架构改动）— 让 `cpu > 5 AND sni =~ /evil/` 在 Flow 视图生效，需重新评估 FilterExpr 整体架构。
+- **TD-38 ~ TD-43（REVIEW-14 P2 归档）**：
+  - TD-38：signature.rs mock policy 路径 cfg gate 残留清理
+  - TD-39：tests/test_inspect.rs macOS stub 测试 mod 清理
+  - TD-40：trusted_signers.toml regex 复杂度限制
+  - TD-41：SYSTEM_BOOT_ENTRIES 白名单按 image path 严格化
+  - TD-42：`.github/workflows/ci.yml` check-linux job 清理
+  - TD-43：`.github/workflows/release.yml` Linux/macOS target 清理
+- **新方向**：
+  - per-process bytes_out/in 实装（需 Schannel event 提供或 ETW packet capture）
+  - 关系图可视化（process tree / flow graph UI）
+  - Windows Service 模式（headless daemon + IPC client）
+  - 报告导出（HTML / PDF / JSON snapshot）
+
+---
 
 ## [0.11.0] - 2026-07-01
 

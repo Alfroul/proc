@@ -51,11 +51,6 @@ pub fn query_processor_power_info()
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn query_processor_power_info() -> Option<Vec<()>> {
-    None
-}
-
 /// Compute throttle info from raw per-core data (max_mhz, current_mhz, mhz_limit).
 #[must_use]
 pub fn detect_throttle_from_raw(cores: &[(u32, u32, u32)]) -> Option<ThrottleInfo> {
@@ -315,26 +310,3 @@ mod ecoqos_imp {
 
 #[cfg(target_os = "windows")]
 pub use ecoqos_imp::{query_throttle, query_throttle_batch, set_throttle};
-
-#[cfg(not(target_os = "windows"))]
-mod ecoqos_stub {
-    use super::EcoQoSState;
-    use std::collections::HashMap;
-
-    pub fn set_throttle(_pid: u32, _eco: bool) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!(
-            "EcoQoS 仅在 Windows 11+ 支持（详见 ADR-0014）"
-        ))
-    }
-
-    pub fn query_throttle(_pid: u32) -> EcoQoSState {
-        EcoQoSState::Unknown
-    }
-
-    pub fn query_throttle_batch(pids: &[u32]) -> HashMap<u32, EcoQoSState> {
-        pids.iter().map(|&p| (p, EcoQoSState::Unknown)).collect()
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-pub use ecoqos_stub::{query_throttle, query_throttle_batch, set_throttle};

@@ -2,7 +2,17 @@
 
 ## Status
 
-**Accepted** — v0.7.0 阶段 6 引入
+**Deprecated (v0.12.0 移除)** — PSI（Pressure Stall Information）是 Linux 4.20+ 内核特性，v0.12.0 阶段 1 起平台决策转为 Windows-only（见 [ADR-0022](0022-windows-only-platform.md)），本 ADR 描述的 PSI 监控路径不再适用：
+
+> **v0.12 平台决策影响**：
+> - **`src/psi.rs` 整文件删除**（手写 `/proc/pressure/{cpu,mem,io}` parser + `PsiStats` / `PsiRecord` 结构）。
+> - **`tests/test_psi.rs` 整文件删除**（Linux cfg-gate 测试 + alert 规则触发验证）。
+> - **`SystemSnapshot::psi_stats()` / `LightSnapshot.psi` 字段删除**（PSI 数据载体从 snapshot 移除）。
+> - **`src/tui/sidebar.rs::push_psi_lines` 删除**（监控面板 PSI 段）。
+> - **`src/alert/rule.rs::MetricName::{Cpu,Mem,Io}Pressure{Some,Full}` 5 个变体删除**（与 PSI 相关的 alert Metric 类型清理）。
+> - **Linux 用户迁移路径**：`git checkout v0.11.0` 仍可用 PSI 监控；Windows 用户在 v0.12+ 不再有等价指标（Windows 无原生 PSI 概念）。
+
+**Accepted** — v0.7.0 阶段 6 引入（历史状态保留供参考）
 
 ## Context
 

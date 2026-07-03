@@ -4,11 +4,9 @@
 //!
 //! # 架构
 //!
-//! - [`NetFlowCollector`] trait 抽象平台数据源（参考阶段 6 [`crate::gpu::GpuProvider`] 模式）
+//! - [`NetFlowCollector`] trait 抽象数据源（参考阶段 6 [`crate::gpu::GpuProvider`] 模式）
 //! - Windows 实现 [`windows`] 走 IP Helper API（`GetExtendedTcpTable` +
 //!   `GetPerTcpConnectionEStats`，复用 [`crate::estats`] 的同类调用，按 PID 聚合）
-//! - Linux 实现 [`nethogs`] 走 `nethogs -t` 子进程 + 解析
-//! - 其它平台 [`unsupported`] 返回空 Vec（UI 字段保持 0，TUI 显示「-」）
 //! - [`worker::NetFlowWorker`] 复用 [`crate::worker::SnapshotWorker`]，1s poll
 //!
 //! # PID 复用
@@ -27,13 +25,8 @@
 //! `estats.rs` 的成熟 Win32 调用，1s 周期下 CPU 开销 < 1%。详见
 //! `docs/adr/0005-netflow-windows-iphelper-not-etw.md`。
 
-pub mod nethogs;
-pub mod unsupported;
-#[cfg(target_os = "windows")]
 pub mod windows;
 pub mod worker;
-#[cfg(not(target_os = "windows"))]
-pub use unsupported as windows;
 
 use std::fmt;
 
@@ -62,24 +55,14 @@ pub trait NetFlowCollector: Send + Sync {
     fn provider_name(&self) -> &'static str;
 }
 
-/// 按平台 + 二进制可用性返回合适的 collector。无可用 collector 时返回 None
+/// 返回合适的 collector。无可用 collector 时返回 None
 /// （主线程 net 列保持 0，不阻塞其它功能）。
 #[must_use]
 pub fn detect_collector() -> Option<Box<dyn NetFlowCollector>> {
-    #[cfg(target_os = "windows")]
-    {
-        match self::windows::IphelperCollector::new() {
-            Ok(c) => return Some(Box::new(c)),
-            Err(e) => tracing::warn!(
-                "Windows IP Helper collector 初始化失败，per-process 网络列保持 0: {e}"
-            ),
-        }
-    }
-
-    #[cfg(all(target_os = "linux", feature = "nethogs"))]
-    {
-        if let Some(c) = self::nethogs::NethogsCollector::try_new() {
-            return Some(Box::new(c));
+    match self::windows::IphelperCollector::new() {
+        Ok(c) => return Some(Box::new(c)),
+        Err(e) => {
+            tracing::warn!("Windows IP Helper collector 初始化失败，per-process 网络列保持 0: {e}")
         }
     }
 
@@ -126,8 +109,6 @@ mod tests {
     #[test]
     fn detect_collector_does_not_panic() {
         // 平台无关：detect_collector 必须能调用并返回 Option，不允许 panic。
-        // 跨平台 CI 上 Linux 无 nethogs 二进制时返回 None；Windows 上通常返回
-        // Some；macOS 一律 None。
         let _ = detect_collector();
     }
 }

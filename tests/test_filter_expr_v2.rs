@@ -1,10 +1,13 @@
 //! v0.11.0 阶段 3：FilterExpr v2 网络字段集成测试（ADR-0011 v0.11 阶段 3 增量段）。
 //!
+//! v0.12 阶段 2：移除 `source` 字段后，本文件不再覆盖 source 路径，其余
+//! sni / dns_name / remote_addr / remote_port 等网络字段契约不变。
+//!
 //! 覆盖 v0.10 落地的 `ProcessFlow.sni` / `dns_name` / `remote_addr` 字段接入
 //! FilterExpr AST 后的端到端契约：
 //!
 //! - Parser 解析网络字段表达式（`sni =~ /google\.com$/` / `dns_name = "x"` /
-//!   `remote_addr in (...)` / `remote_port = 443` / `source = schannel`）。
+//!   `remote_addr in (...)` / `remote_port = 443`）。
 //! - `FilterExpr::apply_network` 在 mock ProcessFlow 上正确判定。
 //! - 网络字段 + process 字段混合（AND / OR / NOT）的组合语义。
 //! - 旧表达式（`cpu > 5 AND name =~ /chrome/`）仍能解析（v0.7/v0.8 契约不破）。
@@ -12,22 +15,15 @@
 //! - Parser 错误中文化：未知字段提示含「未知」+ 字段支持列表。
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use proc::ebpf::flow::{FlowSource, ProcessFlow};
 use proc::filter::{CmpOp, FilterExpr, NetworkEvalCtx, NetworkField, Value, parse};
+use proc::flow::ProcessFlow;
 use proc::view_models::PortPanel;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
-fn mk_flow(
-    pid: u32,
-    sni: Option<&str>,
-    dns: Option<&str>,
-    addr: &str,
-    port: u16,
-    source: FlowSource,
-) -> ProcessFlow {
+fn mk_flow(pid: u32, sni: Option<&str>, dns: Option<&str>, addr: &str, port: u16) -> ProcessFlow {
     ProcessFlow {
         pid,
         start_time: 0,
@@ -39,7 +35,6 @@ fn mk_flow(
         bytes_in: 0,
         dns_name: dns.map(str::to_string),
         sni: sni.map(str::to_string),
-        source,
         first_seen: std::time::SystemTime::UNIX_EPOCH,
         last_seen: std::time::SystemTime::UNIX_EPOCH,
         exit_time: None,
@@ -109,16 +104,10 @@ fn parse_remote_port_eq_value_number() {
 }
 
 #[test]
-fn parse_source_eq_schannel_bare_string() {
-    let e = parse("source = schannel").unwrap();
-    match e {
-        FilterExpr::NetworkFieldCmp {
-            field: NetworkField::Source,
-            op: CmpOp::Eq,
-            value: Value::Text(s),
-        } => assert_eq!(s, "schannel"),
-        other => panic!("expected NetworkFieldCmp(Source), got {:?}", other),
-    }
+fn parse_source_field_now_unknown() {
+    // v0.12 阶段 2：source 字段已移除（Windows-only 后唯一来源是 Schannel），
+    // parse 应返未知字段错误。
+    assert!(parse("source = schannel").is_err());
 }
 
 // --- Parser：错误中文化 ---
@@ -157,7 +146,7 @@ fn backward_compat_mixed_process_and_network_expr_parses() {
 
 #[test]
 fn apply_network_sni_regex_matches() {
-    let f = mk_flow(1, Some("evil.com"), None, "1.2.3.4", 443, FlowSource::Ebpf);
+    let f = mk_flow(1, Some("evil.com"), None, "1.2.3.4", 443);
     let e = parse(r"sni =~ /evil\.com/").unwrap();
     assert!(e.apply_network(&nctx(&f)));
 }
@@ -165,56 +154,43 @@ fn apply_network_sni_regex_matches() {
 #[test]
 fn apply_network_sni_regex_misses_when_sni_none() {
     // sni = None → Text("") → 与 `evil\.com` 不匹配。
-    let f = mk_flow(2, None, None, "1.2.3.4", 443, FlowSource::Ebpf);
+    let f = mk_flow(2, None, None, "1.2.3.4", 443);
     let e = parse(r"sni =~ /evil\.com/").unwrap();
     assert!(!e.apply_network(&nctx(&f)));
 }
 
 #[test]
 fn apply_network_dns_name_eq_matches() {
-    let f = mk_flow(
-        3,
-        None,
-        Some("example.com"),
-        "1.2.3.4",
-        443,
-        FlowSource::Ebpf,
-    );
+    let f = mk_flow(3, None, Some("example.com"), "1.2.3.4", 443);
     let e = parse(r#"dns_name = "example.com""#).unwrap();
     assert!(e.apply_network(&nctx(&f)));
 }
 
 #[test]
 fn apply_network_remote_addr_in_matches_member() {
-    let f = mk_flow(4, None, None, "5.6.7.8", 80, FlowSource::Ebpf);
+    let f = mk_flow(4, None, None, "5.6.7.8", 80);
     let e = parse(r#"remote_addr in ("1.2.3.4", "5.6.7.8")"#).unwrap();
     assert!(e.apply_network(&nctx(&f)));
 }
 
 #[test]
 fn apply_network_remote_addr_in_misses_non_member() {
-    let f = mk_flow(5, None, None, "9.9.9.9", 80, FlowSource::Ebpf);
+    let f = mk_flow(5, None, None, "9.9.9.9", 80);
     let e = parse(r#"remote_addr in ("1.2.3.4", "5.6.7.8")"#).unwrap();
     assert!(!e.apply_network(&nctx(&f)));
 }
 
 #[test]
-fn apply_network_source_eq_schannel_matches() {
-    let f = mk_flow(6, Some("a.com"), None, "", 0, FlowSource::Schannel);
-    let e = parse("source = schannel").unwrap();
-    assert!(e.apply_network(&nctx(&f)));
-}
-
-#[test]
-fn apply_network_source_eq_schannel_misses_for_ebpf() {
-    let f = mk_flow(7, None, Some("x"), "1.1.1.1", 53, FlowSource::Ebpf);
-    let e = parse("source = schannel").unwrap();
+fn apply_network_dns_name_eq_misses_when_dns_none() {
+    // v0.12 阶段 2：原 source 字段测试改为 dns_name 兜底（source 已删）。
+    let f = mk_flow(6, Some("a.com"), None, "", 0);
+    let e = parse(r#"dns_name = "x""#).unwrap();
     assert!(!e.apply_network(&nctx(&f)));
 }
 
 #[test]
 fn apply_network_remote_port_eq_matches() {
-    let f = mk_flow(8, None, None, "1.1.1.1", 443, FlowSource::Ebpf);
+    let f = mk_flow(8, None, None, "1.1.1.1", 443);
     let e = parse("remote_port = 443").unwrap();
     assert!(e.apply_network(&nctx(&f)));
 }
@@ -223,9 +199,9 @@ fn apply_network_remote_port_eq_matches() {
 fn apply_network_and_combinator() {
     // sni 命中 evil.com 且端口 443 → match；只命中一个 → 不 match。
     let e = parse(r"sni =~ /evil\.com/ AND remote_port = 443").unwrap();
-    let matched = mk_flow(9, Some("evil.com"), None, "1.2.3.4", 443, FlowSource::Ebpf);
-    let missed_port = mk_flow(10, Some("evil.com"), None, "1.2.3.4", 80, FlowSource::Ebpf);
-    let missed_sni = mk_flow(11, Some("ok.com"), None, "1.2.3.4", 443, FlowSource::Ebpf);
+    let matched = mk_flow(9, Some("evil.com"), None, "1.2.3.4", 443);
+    let missed_port = mk_flow(10, Some("evil.com"), None, "1.2.3.4", 80);
+    let missed_sni = mk_flow(11, Some("ok.com"), None, "1.2.3.4", 443);
     assert!(e.apply_network(&nctx(&matched)));
     assert!(!e.apply_network(&nctx(&missed_port)));
     assert!(!e.apply_network(&nctx(&missed_sni)));
@@ -235,8 +211,8 @@ fn apply_network_and_combinator() {
 fn apply_network_not_combinator() {
     // NOT sni =~ /evil/ → 所有非 evil 的 flow 都命中。
     let e = parse(r"NOT sni =~ /evil/").unwrap();
-    let clean = mk_flow(12, Some("ok.com"), None, "1.1.1.1", 80, FlowSource::Ebpf);
-    let evil = mk_flow(13, Some("evil.com"), None, "1.1.1.1", 80, FlowSource::Ebpf);
+    let clean = mk_flow(12, Some("ok.com"), None, "1.1.1.1", 80);
+    let evil = mk_flow(13, Some("evil.com"), None, "1.1.1.1", 80);
     assert!(e.apply_network(&nctx(&clean)));
     assert!(!e.apply_network(&nctx(&evil)));
 }
@@ -256,16 +232,9 @@ fn activate_filter_and_type(panel: &mut PortPanel, query: &str) {
 fn flow_filtered_indices_substring_matches_sni_or_comm() {
     let mut panel = PortPanel::new();
     let flows = vec![
-        mk_flow(
-            100,
-            Some("evil.com"),
-            None,
-            "1.2.3.4",
-            443,
-            FlowSource::Ebpf,
-        ),
-        mk_flow(200, Some("ok.com"), None, "5.6.7.8", 80, FlowSource::Ebpf),
-        mk_flow(300, None, None, "9.9.9.9", 53, FlowSource::Ebpf),
+        mk_flow(100, Some("evil.com"), None, "1.2.3.4", 443),
+        mk_flow(200, Some("ok.com"), None, "5.6.7.8", 80),
+        mk_flow(300, None, None, "9.9.9.9", 53),
     ];
 
     // Substring: 默认 SearchState 模式。手动激活 + 输入。
@@ -290,16 +259,9 @@ fn flow_filtered_indices_substring_matches_sni_or_comm() {
 fn flow_filtered_indices_filter_expr_sni_regex() {
     let mut panel = PortPanel::new();
     let flows = vec![
-        mk_flow(1, Some("evil.com"), None, "1.1.1.1", 443, FlowSource::Ebpf),
-        mk_flow(
-            2,
-            Some("api.google.com"),
-            None,
-            "2.2.2.2",
-            443,
-            FlowSource::Ebpf,
-        ),
-        mk_flow(3, Some("ok.com"), None, "3.3.3.3", 80, FlowSource::Ebpf),
+        mk_flow(1, Some("evil.com"), None, "1.1.1.1", 443),
+        mk_flow(2, Some("api.google.com"), None, "2.2.2.2", 443),
+        mk_flow(3, Some("ok.com"), None, "3.3.3.3", 80),
     ];
 
     activate_filter_and_type(&mut panel, r"sni =~ /\.com$/");
@@ -317,9 +279,9 @@ fn flow_filtered_indices_filter_expr_sni_regex() {
 fn flow_filtered_indices_filter_expr_in_operator() {
     let mut panel = PortPanel::new();
     let flows = vec![
-        mk_flow(1, None, None, "1.2.3.4", 443, FlowSource::Ebpf),
-        mk_flow(2, None, None, "5.6.7.8", 443, FlowSource::Ebpf),
-        mk_flow(3, None, None, "9.9.9.9", 443, FlowSource::Ebpf),
+        mk_flow(1, None, None, "1.2.3.4", 443),
+        mk_flow(2, None, None, "5.6.7.8", 443),
+        mk_flow(3, None, None, "9.9.9.9", 443),
     ];
 
     activate_filter_and_type(&mut panel, r#"remote_addr in ("1.2.3.4", "5.6.7.8")"#);
@@ -328,15 +290,16 @@ fn flow_filtered_indices_filter_expr_in_operator() {
 }
 
 #[test]
-fn flow_filtered_indices_filter_expr_source_schannel() {
+fn flow_filtered_indices_filter_expr_sni_present() {
+    // v0.12 阶段 2：原 source=schannel 测试改为 sni 是否存在。
     let mut panel = PortPanel::new();
     let flows = vec![
-        mk_flow(1, Some("a.com"), None, "", 0, FlowSource::Schannel),
-        mk_flow(2, None, Some("x"), "1.1.1.1", 53, FlowSource::Ebpf),
-        mk_flow(3, Some("b.com"), None, "", 0, FlowSource::Schannel),
+        mk_flow(1, Some("a.com"), None, "", 0),
+        mk_flow(2, None, Some("x"), "1.1.1.1", 53),
+        mk_flow(3, Some("b.com"), None, "", 0),
     ];
 
-    activate_filter_and_type(&mut panel, "source = schannel");
+    activate_filter_and_type(&mut panel, r#"sni =~ /./"#);
     let idx = panel.flow_filtered_indices(&flows);
     assert_eq!(idx, vec![0, 2]);
 }
@@ -346,8 +309,8 @@ fn flow_filtered_indices_filter_expr_parse_error_keeps_prev_ast() {
     // parse 错误时保留上一次成功 AST（与 List view 同款契约）。
     let mut panel = PortPanel::new();
     let flows = vec![
-        mk_flow(1, Some("evil.com"), None, "1.1.1.1", 443, FlowSource::Ebpf),
-        mk_flow(2, Some("ok.com"), None, "2.2.2.2", 80, FlowSource::Ebpf),
+        mk_flow(1, Some("evil.com"), None, "1.1.1.1", 443),
+        mk_flow(2, Some("ok.com"), None, "2.2.2.2", 80),
     ];
 
     // 先打合法表达式：sni =~ /evil/ → 命中 flow[0]
@@ -369,8 +332,8 @@ fn flow_filtered_indices_filter_expr_parse_error_keeps_prev_ast() {
 fn flow_filtered_indices_empty_query_returns_all() {
     let mut panel = PortPanel::new();
     let flows = vec![
-        mk_flow(1, Some("a.com"), None, "1.1.1.1", 80, FlowSource::Ebpf),
-        mk_flow(2, Some("b.com"), None, "2.2.2.2", 80, FlowSource::Ebpf),
+        mk_flow(1, Some("a.com"), None, "1.1.1.1", 80),
+        mk_flow(2, Some("b.com"), None, "2.2.2.2", 80),
     ];
 
     // 空 query（FilterExpr 模式但还没输入字符） → 返回全部。
@@ -389,8 +352,8 @@ fn flow_filtered_indices_process_field_returns_all_flows() {
     // FilterExpr 模式下用 process 字段过滤 → 所有 flow 都不命中。
     let mut panel = PortPanel::new();
     let flows = vec![
-        mk_flow(1, Some("a.com"), None, "1.1.1.1", 80, FlowSource::Ebpf),
-        mk_flow(2, Some("b.com"), None, "2.2.2.2", 80, FlowSource::Ebpf),
+        mk_flow(1, Some("a.com"), None, "1.1.1.1", 80),
+        mk_flow(2, Some("b.com"), None, "2.2.2.2", 80),
     ];
 
     activate_filter_and_type(&mut panel, "cpu > 5");
@@ -400,4 +363,73 @@ fn flow_filtered_indices_process_field_returns_all_flows() {
         "process-字段表达式在 flow ctx 下应无命中，got {:?}",
         idx
     );
+}
+
+// --- TD-29（v0.12 阶段 5）：NetworkIn HashSet 行为 ---
+
+#[test]
+fn td29_network_in_dedupes_duplicate_values() {
+    // HashSet 自动去重：`sni in ("a", "a")` 等价 `sni in ("a")`。
+    // 这与 set 语义一致——in 操作符是「集合包含」判定，重复值不增加信息。
+    let e = parse(r#"sni in ("a.com", "a.com", "b.com")"#).unwrap();
+    match e {
+        FilterExpr::NetworkIn { field, values } => {
+            assert_eq!(field, NetworkField::Sni);
+            assert_eq!(
+                values.len(),
+                2,
+                "duplicate values should dedupe to 2, got {values:?}"
+            );
+        }
+        other => panic!("expected NetworkIn, got {:?}", other),
+    }
+}
+
+#[test]
+fn td29_network_in_numeric_lookup_matches() {
+    // remote_port in (80, 443, 8080) → 数值 HashSet 查找路径。
+    // TD-29 让 Number(f64) 也能进 HashSet（手动 Hash+Eq 走 to_bits）。
+    let e = parse("remote_port in (80, 443, 8080)").unwrap();
+    let matched = mk_flow(1, None, None, "1.1.1.1", 443);
+    assert!(e.apply_network(&nctx(&matched)));
+
+    let missed = mk_flow(2, None, None, "1.1.1.1", 22);
+    assert!(!e.apply_network(&nctx(&missed)));
+}
+
+#[test]
+fn td29_network_in_large_list_still_correct() {
+    // TD-29 主要收益：大 in 列表 × 多 flows 走 HashSet O(1) 而非 Vec O(N)。
+    // 这里构造 100 个 IP 的 in 列表 + 1000 flows，验证 apply 结果正确。
+    // 不做 benchmark（CI 不稳定），只验证逻辑路径。
+    let mut ip_list = String::from("remote_addr in (");
+    for i in 0..100u32 {
+        if i > 0 {
+            ip_list.push_str(", ");
+        }
+        // 构造 1.2.3.{i} 这种合法 IPv4
+        ip_list.push_str(&format!("\"1.2.3.{i}\""));
+    }
+    ip_list.push(')');
+
+    let e = parse(&ip_list).expect("parse 100-IP in list");
+    let mut flows = Vec::new();
+    for i in 0..1000u32 {
+        // 让第 500 / 700 flow 命中 IP 列表
+        let ip = if i == 500 {
+            "1.2.3.42"
+        } else if i == 700 {
+            "1.2.3.99"
+        } else {
+            "9.9.9.9"
+        };
+        flows.push(mk_flow(i, None, None, ip, 80));
+    }
+    let matched_idx: Vec<usize> = flows
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| e.apply_network(&nctx(f)))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(matched_idx, vec![500, 700], "应只命中两条 in 列表 IP");
 }

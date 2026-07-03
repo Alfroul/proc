@@ -217,39 +217,13 @@ pub fn parse_smartctl_json(json: &str) -> Result<SmartData> {
 
 /// 列出系统上的物理磁盘设备,供 `proc smart` 默认列出所有磁盘。
 ///
-/// - **Linux**:`/sys/block/` 下过滤掉 loop/ram/dm- 的块设备,返回
-///   `/dev/sda`、`/dev/nvme0n1` 等路径。
-/// - **Windows**:走 WMI `Win32_DiskDrive` 拿 `\\.\PhysicalDriveN`,失败
-///   返回空 Vec(非 admin 也能拿到,这个 WMI class 不需要特权)。
-/// - **macOS**:暂时返回空 Vec(smartctl 用户自己传 device 参数)。
+/// **Windows**:走 WMI `Win32_DiskDrive` 拿 `\\.\PhysicalDriveN`,失败
+/// 返回空 Vec(非 admin 也能拿到,这个 WMI class 不需要特权)。
 #[must_use]
 pub fn list_disks() -> Vec<String> {
-    #[cfg(target_os = "linux")]
-    {
-        let mut out = Vec::new();
-        if let Ok(entries) = std::fs::read_dir("/sys/block") {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("loop")
-                    || name.starts_with("ram")
-                    || name.starts_with("dm-")
-                    || name.starts_with("sr")
-                {
-                    continue;
-                }
-                out.push(format!("/dev/{name}"));
-            }
-        }
-        out.sort();
-        out
-    }
     #[cfg(target_os = "windows")]
     {
         list_disks_wmi().unwrap_or_default()
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        Vec::new()
     }
 }
 

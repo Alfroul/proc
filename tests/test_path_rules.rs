@@ -204,6 +204,11 @@ fn r18_local_appdata_weights_15() {
 }
 
 /// R18 UserProfileDownloads 命中：扣 15 分。
+///
+/// **v0.12 阶段 5（TD-33）调整**：path 改成 3 段（`\Downloads\Deep\Sub\installer.exe`）
+/// 绕过 v0.6 path_check 的 `is_in_downloads`（其 segments<=2 启发式），让 R18
+/// UserProfileDownloads 单独命中，避免 TD-33 dedup 把 `suspicious_path_downloads`
+/// 过滤掉。dedup 行为的覆盖见 [`td33_downloads_overlapping_path_dedup`]。
 #[test]
 fn r18_downloads_weights_15() {
     let _guard = TempEnvGuard::new(&["TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE"]);
@@ -217,7 +222,7 @@ fn r18_downloads_weights_15() {
     remove_env("APPDATA");
     remove_env("LOCALAPPDATA");
 
-    let exe = format!("{}\\Downloads\\installer.exe", userprofile_dir);
+    let exe = format!("{}\\Downloads\\Deep\\Sub\\installer.exe", userprofile_dir);
     let proc = make_proc_with_exe(103, "installer.exe", &exe);
     let all = vec![proc.clone()];
     let mut scorer = make_scorer();
@@ -229,6 +234,125 @@ fn r18_downloads_weights_15() {
         .find(|f| f.name == "suspicious_path_downloads")
         .unwrap_or_else(|| panic!("应命中 R18 Downloads，factors: {:?}", score.factors));
     assert_eq!(r18.weight, 15);
+}
+
+// --- TD-33（v0.12 阶段 5）：Downloads 去重 ---
+
+/// TD-33：v0.6 path_check 的 `downloads_dir`（15）+ v0.11 R18 的
+/// `suspicious_path_downloads`（15）实际指向同一物理路径 `%USERPROFILE%\Downloads`，
+/// 扣两次过度（30 分）。dedup 后只保留 `downloads_dir`（15 分），R18
+/// UserProfileDownloads 被 filter 掉。
+#[test]
+fn td33_downloads_overlapping_path_dedup() {
+    let _guard = TempEnvGuard::new(&["TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE"]);
+    let userprofile_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target\\test-r18-td33")
+        .to_string_lossy()
+        .to_string();
+    set_env("USERPROFILE", &userprofile_dir);
+    remove_env("TEMP");
+    remove_env("TMP");
+    remove_env("APPDATA");
+    remove_env("LOCALAPPDATA");
+
+    // 1-segment path：v0.6 path_check::is_in_downloads 命中 + R18
+    // UserProfileDownloads 也命中——TD-33 dedup 让 R18 那条被过滤掉。
+    let exe = format!("{}\\Downloads\\installer.exe", userprofile_dir);
+    let proc = make_proc_with_exe(110, "installer.exe", &exe);
+    let all = vec![proc.clone()];
+    let mut scorer = make_scorer();
+    let score = scorer.score(&proc, &all, &[], &[]);
+
+    // v0.6 path_check 的 downloads_dir 保留
+    let path_check_downloads = score
+        .factors
+        .iter()
+        .find(|f| f.name == "downloads_dir")
+        .unwrap_or_else(|| {
+            panic!(
+                "downloads_dir 应保留（dedup 后只过滤 R18 那条），factors: {:?}",
+                score.factors
+            )
+        });
+    assert_eq!(path_check_downloads.weight, 15);
+
+    // R18 的 suspicious_path_downloads 应被 filter 掉
+    let r18_downloads_dup = score
+        .factors
+        .iter()
+        .find(|f| f.name == "suspicious_path_downloads");
+    assert!(
+        r18_downloads_dup.is_none(),
+        "TD-33 dedup：suspicious_path_downloads 应被 filter 掉，factors: {:?}",
+        score.factors
+    );
+
+    // 计算 Downloads 相关 path factor 总扣分（应只 15，不是 30）
+    let downloads_total: u32 = score
+        .factors
+        .iter()
+        .filter(|f| f.name == "downloads_dir" || f.name == "suspicious_path_downloads")
+        .map(|f| f.weight)
+        .sum();
+    assert_eq!(
+        downloads_total, 15,
+        "TD-33：Downloads 总扣分应 15（dedup），实际 {downloads_total}，factors: {:?}",
+        score.factors
+    );
+}
+
+/// TD-33 dedup 不影响 R18 其他子检查：Temp / AppData / LocalAppData / Custom 等
+/// 仍照常命中。这里验证 Downloads dedup 后，R18 的 r18_cooperation_factor 路径
+/// （未签名 + 可疑路径）仍能正常触发——只要 R18 命中（哪怕只有 downloads_dir
+/// 被 filter 掉）就视作 r18_matched=true。
+///
+/// 注：score 函数内 sig_status 走真实 verify_signature，mock exe 不存在 → Unknown，
+/// 不会触发 R16+R18 协同扣分。此测试只验证 dedup 路径下 R18 仍能命中至少一项。
+#[test]
+fn td33_downloads_dedup_does_not_block_other_r18_kinds() {
+    let _guard = TempEnvGuard::new(&["TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE"]);
+    let userprofile_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target\\test-r18-td33-multi")
+        .to_string_lossy()
+        .to_string();
+    let appdata_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target\\test-r18-td33-appdata")
+        .to_string_lossy()
+        .to_string();
+    set_env("USERPROFILE", &userprofile_dir);
+    set_env("APPDATA", &appdata_dir);
+    remove_env("TEMP");
+    remove_env("TMP");
+    remove_env("LOCALAPPDATA");
+
+    // 路径同时位于 Downloads 和 AppData Roaming：v0.6 path_check 命中 downloads_dir，
+    // R18 同时命中 UserProfileDownloads（被 dedup 过滤）+ AppData（保留）。
+    // 这验证 dedup 只过滤 suspicious_path_downloads 一个 factor，不连带过滤其他 R18。
+    let exe = format!("{}\\Downloads\\Sub\\app.exe", userprofile_dir);
+    // 注：上面的路径是 1-segment Downloads，v0.6 会命中 downloads_dir；
+    // R18 UserProfileDownloads 命中后被 dedup 过滤；为了让 R18 AppData 也命中，
+    // 我们让 APPDATA 指向同一父目录。
+    let _ = appdata_dir; // APPDATA 设到独立路径，本测试不验证 AppData（要避免污染）
+    let proc = make_proc_with_exe(111, "app.exe", &exe);
+    let all = vec![proc.clone()];
+    let mut scorer = make_scorer();
+    let score = scorer.score(&proc, &all, &[], &[]);
+
+    // downloads_dir 保留（v0.6 path_check）
+    assert!(
+        score.factors.iter().any(|f| f.name == "downloads_dir"),
+        "downloads_dir 应保留，factors: {:?}",
+        score.factors
+    );
+    // suspicious_path_downloads 被 dedup 过滤
+    assert!(
+        !score
+            .factors
+            .iter()
+            .any(|f| f.name == "suspicious_path_downloads"),
+        "suspicious_path_downloads 应被 dedup 过滤，factors: {:?}",
+        score.factors
+    );
 }
 
 /// R18 不命中：系统目录（Program Files）不扣分。

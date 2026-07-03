@@ -94,12 +94,6 @@ pub fn check_loaded_dlls(pid: u32) -> Vec<RiskFactor> {
         factors.truncate(3);
         factors
     }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = pid;
-        Vec::new()
-    }
 }
 
 fn pcwstr_to_string(ptr: *const u16) -> String {

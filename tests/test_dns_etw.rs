@@ -95,16 +95,6 @@ fn detect_collector_returns_aligned_tuple() {
     }
 }
 
-/// 非 Windows 平台：detect_collector 必须返回 `(None, None)`。
-/// Windows 平台：跳过此断言（admin 可能返 ETW，非 admin 可能返 PowerShell）。
-#[cfg(not(target_os = "windows"))]
-#[test]
-fn detect_collector_none_on_non_windows() {
-    let (collector, kind) = detect_collector();
-    assert!(collector.is_none(), "非 Windows 必须 collector=None");
-    assert_eq!(kind, DnsCollectorKind::None, "非 Windows 必须 kind=None");
-}
-
 // ──────────────────────────────────────────────────────────────────────────
 // Windows tests：仅在 Windows 上跑（admin / 非 admin 各覆盖）
 // ──────────────────────────────────────────────────────────────────────────

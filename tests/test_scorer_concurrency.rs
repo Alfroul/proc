@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use proc::collect::ProcessInfo;
-use proc::ebpf::flow::ProcessFlow;
+use proc::flow::ProcessFlow;
 use proc::port_map::PortEntry;
 use proc::security::BackgroundScorer;
 

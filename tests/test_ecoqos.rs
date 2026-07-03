@@ -46,40 +46,24 @@ fn query_throttle_batch_empty_returns_empty_map() {
 }
 
 #[test]
-fn query_throttle_batch_non_windows_all_unknown() {
-    // 非 Windows 平台 stub：每个 PID 都返回 Unknown。
-    // Windows 上 PID 0（System Idle Process）/ PID 4（System）通常无权 set，
-    // query 返回 Unknown 也合法。本测试只验证「不 panic + 每个 PID 都有 entry」。
+fn query_throttle_batch_returns_entry_per_pid() {
+    // PID 0（System Idle Process）/ PID 4（System）通常无权 set，query 返回
+    // Unknown 也合法。本测试只验证「不 panic + 每个 PID 都有 entry」。
     let pids = vec![0, 4, 999_999]; // 999_999 几乎肯定不存在
     let map = proc::throttle::query_throttle_batch(&pids);
     assert_eq!(map.len(), 3);
     for &pid in &pids {
         assert!(map.contains_key(&pid), "missing entry for PID {pid}");
     }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        for &state in map.values() {
-            assert_eq!(state, EcoQoSState::Unknown);
-        }
-    }
 }
 
-// ── set_throttle 跨平台契约 ──
+// ── set_throttle 契约 ──
 
 #[test]
-fn set_throttle_non_windows_returns_error() {
-    #[cfg(not(target_os = "windows"))]
-    {
-        let r = proc::throttle::set_throttle(1234, true);
-        assert!(r.is_err(), "非 Windows 平台 set_throttle 应返回 Err");
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // Windows 上对不存在的 PID set → OpenProcess 失败 → Err
-        let r = proc::throttle::set_throttle(9_999_999, true);
-        assert!(r.is_err(), "Windows 上对不存在的 PID 应返回 Err");
-    }
+fn set_throttle_unknown_pid_returns_error() {
+    // Windows 上对不存在的 PID set → OpenProcess 失败 → Err
+    let r = proc::throttle::set_throttle(9_999_999, true);
+    assert!(r.is_err(), "Windows 上对不存在的 PID 应返回 Err");
 }
 
 // ── ProcessInfo.throttled 字段 ──

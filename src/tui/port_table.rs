@@ -322,36 +322,27 @@ fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
     let flows = &app.flows;
     let visible_indices = pp.flow_filtered_indices(flows);
 
-    let ebpf_enabled = crate::ebpf::EBPF_ENABLED;
     let schannel_on = app.workers.schannel_etw_worker.is_some();
 
-    // 标题栏：worker 状态 + 条数 + 操作提示。v0.10 阶段 3：跨平台对齐
-    // （ebpf / schannel 都有 → 显示数据来源 mix；单一来源 → 显示对应路径）。
+    // 标题栏：worker 状态 + 条数 + 操作提示。v0.12 阶段 2：仅 Schannel 路径。
     // v0.11 阶段 3：搜索 / FilterExpr 激活时附加 query 与错误。
     let ghost_count = flows.iter().filter(|f| f.is_ghost()).count();
-    let base_header = if ebpf_enabled && app.workers.ebpf_worker.is_some() {
+    let base_header = if schannel_on {
         if ghost_count > 0 {
             format!(
-                " eBPF Flow graph（{} 条 · 👻{} 幽灵保留 ≤30s · connect + DNS 关联）",
+                " Schannel Flow graph（{} 条 · 👻{} 幽灵保留 ≤30s · SNI 明文 · TLS handshake）",
                 flows.len(),
                 ghost_count
             )
         } else {
             format!(
-                " eBPF Flow graph（{} 条 · connect + DNS 关联）",
+                " Schannel Flow graph（{} 条 · SNI 明文 · TLS handshake）",
                 flows.len()
             )
         }
-    } else if schannel_on {
-        // v0.10 阶段 3：Windows admin 走 Schannel 路径（source = Schannel）。
-        format!(
-            " Schannel Flow graph（{} 条 · SNI 明文 · TLS handshake）",
-            flows.len()
-        )
-    } else if ebpf_enabled {
-        " eBPF Flow graph：worker 启动失败（无权限？内核 < 5.10？），详见日志".to_string()
     } else {
-        " Flow graph：需要 Linux + ebpf feature 或 Windows 管理员（Schannel ETW）".to_string()
+        " Flow graph：需要 Windows 管理员权限（Schannel ETW session 启动失败），详见日志"
+            .to_string()
     };
 
     // v0.11 阶段 3：搜索 / FilterExpr 状态条。visible_indices.len() 与 flows.len()
@@ -386,7 +377,8 @@ fn draw_flow_view(f: &mut Frame, area: Rect, app: &App) {
         .map(|w| format!(" · ⚠ {w}"))
         .unwrap_or_default();
     let ops_hint = "  F/Esc 退出 · ↑↓滚动 · / 搜索 · : FilterExpr";
-    let header_line = format!("{base_header}{filtered_hint}{search_hint}{err_hint}{warn_hint}{ops_hint}");
+    let header_line =
+        format!("{base_header}{filtered_hint}{search_hint}{err_hint}{warn_hint}{ops_hint}");
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)

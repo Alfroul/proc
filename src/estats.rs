@@ -319,25 +319,3 @@ mod win32 {
         }
     }
 }
-
-#[cfg(not(target_os = "windows"))]
-impl EStatsCollector {
-    pub fn new() -> crate::error::Result<Self> {
-        tracing::warn!(
-            "EStatsCollector::new is not supported on this platform; per-connection bandwidth is disabled"
-        );
-        Err(crate::error::ProcError::monitor(
-            "EStats is only available on Windows",
-        ))
-    }
-
-    pub fn sample(&mut self) {}
-
-    pub fn connection_speed(&self, _local_port: u16, _remote_addr: &IpAddr) -> (u64, u64) {
-        (0, 0)
-    }
-
-    pub fn process_speed(&self, _pid: u32, _entries: &[PortEntry]) -> (u64, u64, u64, u64) {
-        (0, 0, 0, 0)
-    }
-}

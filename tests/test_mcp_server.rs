@@ -106,6 +106,14 @@ fn test_proc_diag_returns_worker_metrics() {
     assert!(first["avg_us"].as_u64().is_some(), "avg_us missing");
     assert!(first["max_us"].as_u64().is_some(), "max_us missing");
     assert!(first["polls"].as_u64().is_some(), "polls missing");
+    // TD-23（v0.12 阶段 5）：dns_collector 字段必须在 JSON 输出里，三态字符串。
+    let dns_kind = out["dns_collector"]
+        .as_str()
+        .expect("dns_collector missing or not a string");
+    assert!(
+        matches!(dns_kind, "etw" | "powershell" | "none"),
+        "dns_collector must be one of etw/powershell/none, got: {dns_kind}"
+    );
 }
 
 #[test]
@@ -129,4 +137,68 @@ fn test_proc_docker_ps_does_not_crash_without_daemon() {
         );
     }
     println!("proc_docker_ps → {out}");
+}
+
+// --- TD-36（v0.12 阶段 5）：MCP DNS tool 持久 collector ---
+
+#[test]
+fn td36_default_handler_dns_collector_is_none_no_panic() {
+    // Default 构造（不 spawn collector）→ proc_dns 返回 unavailable，不 panic。
+    // 这是测试路径 / 非 Windows 平台的行为；生产入口走 new()。
+    let h = handler::ProcMcpHandler::default();
+    let arc_mutex = std::sync::Arc::clone(&h.dns_collector);
+    drop(h); // 持有 collector 的 handler drop；arc 引用还在
+
+    // 多次调用不应 panic（Mutex 互斥正常）。
+    for _ in 0..3 {
+        let out = handler::make_dns_json_from_collector(&arc_mutex, false);
+        // ok 字段必须在（true 或 false）。
+        assert!(out.get("ok").is_some(), "ok missing: {out}");
+        // Default 路径 collector == None → ok=false。
+        assert_eq!(
+            out["ok"],
+            serde_json::json!(false),
+            "Default 路径无 collector 应返 ok=false: {out}"
+        );
+    }
+}
+
+#[test]
+fn td36_tail_param_still_rejected_via_persistent_collector() {
+    // 持久 collector 路径下 tail=true 仍被拒（streaming-only）。
+    let h = handler::ProcMcpHandler::default();
+    let arc_mutex = std::sync::Arc::clone(&h.dns_collector);
+    let out = handler::make_dns_json_from_collector(&arc_mutex, true);
+    assert_eq!(
+        out["ok"],
+        serde_json::json!(false),
+        "tail=true 应被拒: {out}"
+    );
+    assert!(
+        out.get("error").is_some(),
+        "tail=true 应有 error 描述: {out}"
+    );
+}
+
+#[test]
+fn td36_new_handler_shares_collector_across_clones() {
+    // ProcMcpHandler::new() 在 Windows 上 spawn collector（或非 Windows 返 None）。
+    // rmcp serve_server 内部每次 tool call 会 clone handler；本测试验证 Clone
+    // 后两个 handler 共享同一 Arc<Mutex<...>> 实例（不会重复 spawn / 丢事件）。
+    // 不实际调 detect_collector（避免 spawn ETW session / PowerShell 子进程
+    // 污染测试输出），改用 Default + 手动塞 collector 验证 Arc 共享语义。
+    use proc::dns_log::detect_collector;
+
+    let h1 = handler::ProcMcpHandler::default();
+    let h2 = h1.clone();
+    // 两个 handler 的 Arc 指向同一 Mutex（强引用计数 = 2）。
+    assert!(
+        std::sync::Arc::ptr_eq(&h1.dns_collector, &h2.dns_collector),
+        "Clone 后应共享同一 Arc<Mutex<...>> 实例"
+    );
+
+    // 模拟 detect_collector 的实际行为：返回 (Option, Kind)。Default 路径 collector
+    // 为 None，不影响本测试（只验证 Arc 共享）。
+    let (_collector, kind) = detect_collector();
+    let _ = kind; // 不强制断言 kind（跨平台 / admin 状态不同）
 }

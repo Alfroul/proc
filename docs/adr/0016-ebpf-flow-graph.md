@@ -2,7 +2,15 @@
 
 ## Status
 
-**Accepted** — v0.7.0 阶段 8 引入
+**Superseded by [ADR-0022](0022-windows-only-platform.md)** — v0.12.0 阶段 1 起平台决策转为 Windows-only，本 ADR 描述的 Linux eBPF flow graph 路径在 v0.12 cycle 移除（`src/ebpf/` 整模块删 + `aya` / `aya-log` deps 删 + `ebpf` feature flag 删）。
+
+> **v0.12 平台决策影响**：
+> - **ProcessFlow.source** 仅保留 `Schannel` 变体（Windows Schannel ETW 路径，见 [ADR-0018](0018-windows-schannel-sni.md)）；`FlowSource::Ebpf` 变体删除。
+> - **R15 外联行为评分**：原 30 分扣分逻辑保留，但仅作用于 Schannel flow（dns_name 来自 `App::dns_log_recent`，sni 来自 Schannel event 1793）。
+> - **TD-17 / TD-19 标 ✅ Fixed in v0.12.0 阶段 1**（决策不再追 Linux eBPF 路径 = 自动清零）。
+> - **Linux 用户迁移路径**：`git checkout v0.11.0` 仍可用旧 eBPF 路径；如需新功能欢迎 fork。
+
+**Accepted** — v0.7.0 阶段 8 引入（历史状态保留供参考）
 
 ## Context
 

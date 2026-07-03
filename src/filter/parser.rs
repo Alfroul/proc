@@ -18,6 +18,8 @@
 //! - 字符串字面量：裸字符串（非空白/括号/操作符）或双引号 `"..."`（含空格）
 //! - 正则字面量：`/pattern/i?`，`i` 后缀编译为内嵌 `(?i)` 标志
 
+use std::collections::HashSet;
+
 use nom::{
     Err as NomErr, IResult,
     branch::alt,
@@ -115,7 +117,7 @@ fn to_parse_error(input: &str, e: NomErr<VerboseError<&str>>) -> ParseError {
 /// `[A-Za-z0-9_]+` 段当作未知字段名。提不到（边界情况）→ 退到无标识符版本。
 #[must_use]
 fn unknown_field_message(rest: &str) -> String {
-    const SUPPORTED: &str = "cpu/mem/pid/name/user/cmd/disk_read/disk_write/net_sent/net_recv/security_score/sni/dns_name/remote_addr/remote_port/bytes_out/bytes_in/source";
+    const SUPPORTED: &str = "cpu/mem/pid/name/user/cmd/disk_read/disk_write/net_sent/net_recv/security_score/sni/dns_name/remote_addr/remote_port/bytes_out/bytes_in";
     let ident: String = rest
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
@@ -325,7 +327,6 @@ fn parse_field(i: &str) -> NomRes<'_, ParsedField> {
         "remote_port" | "remoteport" => ParsedField::Network(NetworkField::RemotePort),
         "bytes_out" | "bytesout" => ParsedField::Network(NetworkField::BytesOut),
         "bytes_in" | "bytesin" => ParsedField::Network(NetworkField::BytesIn),
-        "source" => ParsedField::Network(NetworkField::Source),
         _ => {
             // 错误锚点放在字段名起点（i），让 to_parse_error 能从 input[off..]
             // 提取出未知字段名拼出友好提示（v0.11 阶段 3）。
@@ -340,17 +341,21 @@ fn parse_field(i: &str) -> NomRes<'_, ParsedField> {
 
 /// v0.11 阶段 3：`in (v1, v2, ...)` 列表解析。至少 1 个值；trailing `,` 不允许。
 /// 闭合 `)` 用 `cut` 让错误不被 alt 吞掉（与 paren_expr 同款）。
-fn parse_in_list(i: &str) -> NomRes<'_, Vec<Value>> {
+///
+/// **v0.12 阶段 5（TD-29）**：返回 `HashSet<Value>` 而非 `Vec<Value>`，让
+/// `FilterExpr::NetworkIn` apply 路径 `contains` 是 O(1)。重复值会被去重
+/// （`sni in ("a", "a")` 等价于 `sni in ("a")`），与 `in` 集合语义一致。
+fn parse_in_list(i: &str) -> NomRes<'_, HashSet<Value>> {
     let (i, _) = char('(')(i)?;
     let (i, _) = multispace0(i)?;
     let (i, first) = parse_value(i)?;
     let (i, rest) = many0(tuple((multispace0, char(','), multispace0, parse_value)))(i)?;
     let (i, _) = multispace0(i)?;
     let (i, _) = cut(char(')'))(i)?;
-    let mut values = Vec::with_capacity(rest.len() + 1);
-    values.push(first);
+    let mut values = HashSet::with_capacity(rest.len() + 1);
+    values.insert(first);
     for (_, _, _, v) in rest {
-        values.push(v);
+        values.insert(v);
     }
     Ok((i, values))
 }
@@ -424,10 +429,62 @@ fn parse_quoted_string(i: &str) -> NomRes<'_, String> {
 
 fn parse_regex_lit(i: &str) -> NomRes<'_, (String, bool)> {
     let (i, _) = char('/')(i)?;
-    let (i, pattern) = take_till1(|c| c == '/')(i)?;
-    let (i, _) = char('/')(i)?;
-    let (i, ci) = opt(char('i'))(i)?;
-    Ok((i, (pattern.to_string(), ci.is_some())))
+    // v0.12 阶段 4（TD-28）：支持 `\/` 转义，让 `/192\.168\.1\.0\/24/` 这类
+    // 含 `/` 的 pattern（CIDR / URL / 路径）能写出来。状态机扫描：
+    //   - 遇 `\` → 看下一字符：
+    //       - 是 `/` → pattern 追加单 `/`（去掉转义反斜杠，regex 不需要 `\/`）；
+    //       - 其他字符（`.` / `d` / `w` / `s` 等 regex 元字符）→ `\X` 原样保留，
+    //         让 regex crate 自行解释（如 `\d` 是数字字符类）。
+    //   - 遇非转义 `/` → pattern 结束；
+    //   - 其他字符 → 原样追加。
+    // 兼容性：旧表达式（无 `\/`）行为不变；`\` 后再无字符 → 非法（未闭合）。
+    let mut pattern = String::new();
+    let mut rest = i;
+    let mut closed = false;
+    loop {
+        match rest.chars().next() {
+            None => break,
+            Some('/') => {
+                rest = &rest[1..];
+                closed = true;
+                break;
+            }
+            Some('\\') => {
+                rest = &rest[1..];
+                match rest.chars().next() {
+                    Some('/') => {
+                        // 用户转义的是 regex literal 的分隔符 `/`，传给 regex
+                        // crate 时是字面 `/`（不是 `\/`——后者会被 regex 拒绝
+                        // 为「无效转义」）。
+                        pattern.push('/');
+                        rest = &rest[1..];
+                    }
+                    Some(c2) => {
+                        // 其他 `\X` 转义（`\d` `\.` `\w` 等）原样保留。
+                        pattern.push('\\');
+                        pattern.push(c2);
+                        rest = &rest[c2.len_utf8()..];
+                    }
+                    None => {
+                        // `\` 在末尾 → 仍未闭合，让下面的 closed=false 走错误路径。
+                        break;
+                    }
+                }
+            }
+            Some(c) => {
+                pattern.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
+    if !closed {
+        return Err(NomErr::Error(VerboseError::from_error_kind(
+            rest,
+            ErrorKind::Char,
+        )));
+    }
+    let (i, ci) = opt(char('i'))(rest)?;
+    Ok((i, (pattern, ci.is_some())))
 }
 
 /// 裸字符串 token：读到空白 / 括号 / 操作符字符为止。允许 `.`/`-`/`_` 等进程名
@@ -716,19 +773,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_network_source_eq() {
-        let e = parse("source = schannel").unwrap();
-        match e {
-            FilterExpr::NetworkFieldCmp {
-                field,
-                op: CmpOp::Eq,
-                value: Value::Text(s),
-            } => {
-                assert_eq!(field, NetworkField::Source);
-                assert_eq!(s, "schannel");
-            }
-            other => panic!("expected NetworkFieldCmp, got {:?}", other),
-        }
+    fn parse_network_source_field_now_unknown() {
+        // v0.12 阶段 2：source 字段已删除（Windows-only 后唯一来源是 Schannel），
+        // parse 应返未知字段错误。
+        let result = parse("source = schannel");
+        assert!(result.is_err(), "source 字段已移除，parse 应失败");
     }
 
     #[test]

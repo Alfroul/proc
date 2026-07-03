@@ -4,18 +4,13 @@
 //!
 //! # 架构
 //!
-//! - [`DnsLogCollector`] trait 抽象平台数据源（参考阶段 6/7 的 trait 模式）
+//! - [`DnsLogCollector`] trait 抽象数据源（参考阶段 6/7 的 trait 模式）
 //! - Windows 主路径 [`etw`]（v0.11 阶段 2 / ADR-0020）：手写 ETW 实时 session
 //!   抓 `Microsoft-Windows-DNS-Client` event 3008/3010，< 50ms 延迟 + 100% 完整性
 //! - Windows fallback [`windows_dns`]：PowerShell `Get-WinEvent` 子进程订阅
 //!   `Microsoft-Windows-DNS-Client/Operational` channel（event 3010 含
 //!   QueryName/QueryType/QueryStatus/QueryResults + ProcessId）。仅在 ETW 启动
 //!   失败时启用（非管理员 / session 占用 / x86）
-//! - Linux/macOS [`windows_dns`] 在非 Windows 平台 alias 到 [`unsupported`]，
-//!   [`detect_collector`] 返回 `None`。Linux 走 DBus 路线在 stage-8.md 被列为
-//!   推荐方案，但 systemd-resolved 的 DBus 接口不暴露 per-query 信号 —— 实际
-//!   需要走 libpcap 抓 53 端口 + DNS 协议解析 + PID 关联，工程量超出单
-//!   stage 范围，留作未来 feature。详见 `docs/adr/0006-dns-subprocess-not-etw-dbus.md`。
 //! - [`worker::DnsLogWorker`] 复用 [`crate::worker::SnapshotWorker`]，
 //!   `POLL_INTERVAL = 500ms`（DNS 查询高频，比阶段 7 NetFlow 的 1s 更短）
 //!
@@ -37,11 +32,8 @@
 
 #[cfg(target_os = "windows")]
 pub mod etw;
-pub mod unsupported;
 #[cfg(target_os = "windows")]
 pub mod windows_dns;
-#[cfg(not(target_os = "windows"))]
-pub use unsupported as windows_dns;
 pub mod worker;
 
 use std::fmt;
@@ -223,13 +215,6 @@ pub fn detect_collector() -> (Option<Box<dyn DnsLogCollector>>, DnsCollectorKind
                 tracing::warn!("Windows PowerShell DNS collector 也失败，DNS 日志为空: {e}");
             }
         }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        // Linux/macOS：DBus 路线不暴露 per-query 信号，pcap 路线工程量大，
-        // 当前 stage 不落地。详见 ADR-0006。
-        tracing::debug!("DNS log collector: 此平台暂不支持，UI 将显示空列表");
     }
 
     (None, DnsCollectorKind::None)

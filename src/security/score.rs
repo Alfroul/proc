@@ -166,6 +166,11 @@ pub struct SecurityScorer {
     /// v0.11 阶段 6 R18：当前进程环境变量展开后的用户目录缓存。SecurityScorer
     /// 构造时一次性展开，每次 score 调用复用（避免每进程读 env var）。
     user_dirs: super::path_rules::UserDirs,
+    /// v0.12 阶段 3：用户配置的受信签名 vendor 规则。加载自
+    /// `~/.config/proc/trusted_signers.toml`，文件不存在 → 空 Vec（只用内置
+    /// `TRUSTED_SIGNERS` 列表）。在 `verify_signature_with_policy` 升级 Signed
+    /// → Trusted 时与内置列表合并（任一命中即升级）。
+    trusted_signers_rules: Vec<super::trusted_signers::TrustedSignersRule>,
 }
 
 impl Default for SecurityScorer {
@@ -191,6 +196,8 @@ impl SecurityScorer {
             // （Temp / AppData / LocalAppData / UserProfileDownloads）。
             path_rules: super::path_rules::load_path_rules(),
             user_dirs: super::path_rules::UserDirs::from_env(),
+            // v0.12 阶段 3：文件不存在 → 空 Vec，只用内置 TRUSTED_SIGNERS 列表。
+            trusted_signers_rules: super::trusted_signers::load_trusted_signers(),
         }
     }
 
@@ -208,7 +215,7 @@ impl SecurityScorer {
         proc: &ProcessInfo,
         all_procs: &[ProcessInfo],
         port_entries: &[crate::port_map::PortEntry],
-        flows: &[crate::ebpf::flow::ProcessFlow],
+        flows: &[crate::flow::ProcessFlow],
     ) -> SecurityScore {
         let exe_path = proc.exe.as_deref().unwrap_or("");
         // ADR-0003：键加 start_time，PID 复用后旧实例的签名缓存不会过继给新进程。
@@ -239,7 +246,11 @@ impl SecurityScorer {
             cached
         } else if self.verify_budget > 0 {
             self.verify_budget -= 1;
-            super::signature::verify_signature(exe_path)
+            super::signature::verify_signature_with_policy(
+                exe_path,
+                None,
+                &self.trusted_signers_rules,
+            )
         } else {
             super::signature::SignatureStatus::Unknown
         };
@@ -298,6 +309,10 @@ impl SecurityScorer {
                 super::signature::SignatureStatus::Trusted
                     | super::signature::SignatureStatus::Signed
                     | super::signature::SignatureStatus::Unsigned
+                    | super::signature::SignatureStatus::Revoked
+                    | super::signature::SignatureStatus::Expired
+                    | super::signature::SignatureStatus::UntrustedRoot
+                    | super::signature::SignatureStatus::ChainError
             ) {
                 self.hash_reputation.record(exe_path, sig_status);
             }
@@ -310,7 +325,7 @@ impl SecurityScorer {
         // 的 2 条命中条件：SNI 不在白名单 / 端口扫描特征。flows 为空（非 Linux
         // / 无 ebpf feature / 内核不支持）→ 自动 no-op，与 v0.6 行为一致。
         // （PID 复用：按 (pid, start_time) 双字段过滤，与缓存键一致。）
-        let flows_for_pid: Vec<&crate::ebpf::flow::ProcessFlow> = flows
+        let flows_for_pid: Vec<&crate::flow::ProcessFlow> = flows
             .iter()
             .filter(|f| f.pid == proc.pid && f.start_time == proc.start_time)
             .collect();
@@ -340,11 +355,26 @@ impl SecurityScorer {
         // （同 R17 与 v0.7 office_spawning_shell 的 surgical 原则——安全评分偏向严格）。
         // stage-6.md 任务 2：协同扣分——R16（未签名 / 吊销，第 1 步 sig_status）
         // 同时命中 R18 时额外扣 10 分（双重特征强信号）。
+        //
+        // **TD-33（v0.12 阶段 5）**：Downloads 去重。v0.6 path_check 的 `downloads_dir`
+        // 与 v0.11 R18 的 `suspicious_path_downloads`（UserProfileDownloads）实际指向
+        // 同一物理路径 `%USERPROFILE%\Downloads`，扣两次（15+15=30）过度。`factors`
+        // 已含 `downloads_dir` 时，从 R18 结果里 filter 掉 `suspicious_path_downloads`
+        // 避免双重扣分。其他 R18 子检查（Temp / AppData / LocalAppData / Custom）不受
+        // 影响——它们与 path_check 的 `temp_dir` 也是同一思路，但 path_check 用
+        // 子串匹配（`\temp\` / `\appdata\local\temp`）和 R18 用环境变量展开的前缀
+        // 匹配覆盖范围不同（path_check 漏 `%TEMP%` 直接挂在根目录的场景），保留叠加
+        // 让 R18 兜底。
+        let path_check_has_downloads = factors.iter().any(|f| f.name == "downloads_dir");
         let r18_hit = super::path_rules::check_path_risk(
             std::slice::from_ref(proc),
             &self.user_dirs,
             &self.path_rules,
         );
+        let r18_hit: Vec<_> = r18_hit
+            .into_iter()
+            .filter(|f| !(path_check_has_downloads && f.name == "suspicious_path_downloads"))
+            .collect();
         let r18_matched = !r18_hit.is_empty();
         factors.extend(r18_hit);
         if let Some(coop) = r18_cooperation_factor(sig_status, r18_matched) {
@@ -366,6 +396,9 @@ impl SecurityScorer {
                 | super::signature::SignatureStatus::Signed
                 | super::signature::SignatureStatus::Unsigned
                 | super::signature::SignatureStatus::Revoked
+                | super::signature::SignatureStatus::Expired
+                | super::signature::SignatureStatus::UntrustedRoot
+                | super::signature::SignatureStatus::ChainError
         );
 
         if signature_cached {
@@ -405,7 +438,7 @@ enum ScoringRequest {
         ports: Arc<Vec<crate::port_map::PortEntry>>,
         /// v0.7 阶段 8 R15：FlowAggregator drain 出的 ProcessFlow 快照。
         /// 非 Linux / 无 ebpf feature 时为空 Vec，R15 自动 no-op。
-        flows: Arc<Vec<crate::ebpf::flow::ProcessFlow>>,
+        flows: Arc<Vec<crate::flow::ProcessFlow>>,
     },
     Shutdown,
 }
@@ -478,7 +511,7 @@ impl BackgroundScorer {
 
                             let procs_slice: &[ProcessInfo] = processes.as_ref();
                             let ports_slice: &[crate::port_map::PortEntry] = ports.as_ref();
-                            let flows_slice: &[crate::ebpf::flow::ProcessFlow] = flows.as_ref();
+                            let flows_slice: &[crate::flow::ProcessFlow] = flows.as_ref();
                             let mut scores = HashMap::new();
                             for proc in procs_slice {
                                 // Honor global Ctrl+C so a long pass can be
@@ -519,7 +552,7 @@ impl BackgroundScorer {
         &self,
         processes: Arc<Vec<ProcessInfo>>,
         ports: Arc<Vec<crate::port_map::PortEntry>>,
-        flows: Arc<Vec<crate::ebpf::flow::ProcessFlow>>,
+        flows: Arc<Vec<crate::flow::ProcessFlow>>,
     ) {
         if let Some(tx) = &self.request_tx {
             let _ = tx.try_send(ScoringRequest::Score {

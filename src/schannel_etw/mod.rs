@@ -50,9 +50,4 @@ pub fn try_spawn(crash_tx: Option<Sender<WorkerCrash>>) -> Option<SchannelEtwWor
     {
         provider::try_spawn_windows(crash_tx)
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = crash_tx;
-        None
-    }
 }

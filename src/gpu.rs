@@ -112,11 +112,6 @@ fn collect_dxgi_adapters() -> Vec<DxgiAdapter> {
     adapters
 }
 
-#[cfg(not(target_os = "windows"))]
-fn collect_dxgi_adapters() -> Vec<DxgiAdapter> {
-    Vec::new()
-}
-
 // ---------- NVML layer (optional) ----------
 
 #[cfg(feature = "nvidia")]
@@ -292,16 +287,6 @@ impl Drop for PdhState {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-struct PdhState;
-
-#[cfg(not(target_os = "windows"))]
-impl PdhState {
-    fn new() -> Option<Self> {
-        None
-    }
-}
-
 // ---------- GpuProvider trait（阶段 6 B1：多厂商 GPU 抽象） ----------
 
 /// GPU 数据源抽象。每个 impl 代表一个独立的 GPU 信息来源：
@@ -446,212 +431,7 @@ impl GpuProvider for NvmlProvider {
     }
 }
 
-// 非 Windows 平台 NvmlProvider 占位（DXGI/NVML 不可用）。detect_providers
-// 不会构造它，但保留类型定义让跨平台代码可统一引用。
-#[cfg(not(target_os = "windows"))]
-pub struct NvmlProvider;
-
-#[cfg(not(target_os = "windows"))]
-impl NvmlProvider {
-    #[must_use]
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-impl GpuProvider for NvmlProvider {
-    fn list_gpus(&self) -> Vec<GpuInfo> {
-        Vec::new()
-    }
-    fn refresh(&mut self) {}
-    fn provider_name(&self) -> &'static str {
-        "nvml-unavailable"
-    }
-}
-
-// ---------- NvtopProvider（Linux：nvtop 子进程 JSON） ----------
-
-/// 通过 `nvtop` 子进程拿 AMD/Intel GPU 数据。
-///
-/// 仅在 `target_os = "linux"` + `feature = "nvtop"` 下编译。Windows 的
-/// AMD/Intel 支持留 TODO（见 docs/adr/0004 §跨平台演进）。
-#[cfg(all(target_os = "linux", feature = "nvtop"))]
-pub struct NvtopProvider {
-    cached: Vec<GpuInfo>,
-}
-
-#[cfg(all(target_os = "linux", feature = "nvtop"))]
-impl Default for NvtopProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(all(target_os = "linux", feature = "nvtop"))]
-impl NvtopProvider {
-    #[must_use]
-    pub fn new() -> Self {
-        Self { cached: Vec::new() }
-    }
-
-    /// 探测 nvtop 二进制是否在 PATH。失败返回 false，不 panic、不写日志。
-    #[must_use]
-    pub fn is_available() -> bool {
-        std::process::Command::new("nvtop")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok()
-    }
-
-    fn run_nvtop(&mut self) {
-        // 注意：`nvtop -s -o json` 是 stage-6.md §1.2 假设的 CLI 约定。
-        // 不同 nvtop 版本可能不支持 `-o json`；子进程失败时保留旧缓存，
-        // ADR-0004 记录此约束与后续兼容方案。
-        let output = std::process::Command::new("nvtop")
-            .args(["-s", "-o", "json"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output();
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let parsed = parse_nvtop_json(&stdout);
-                if !parsed.is_empty() {
-                    self.cached = parsed;
-                }
-            }
-            Ok(out) => {
-                tracing::debug!(
-                    "nvtop exited non-zero, keeping cached GPU info: {}",
-                    out.status
-                );
-            }
-            Err(e) => {
-                tracing::debug!("nvtop spawn failed: {:?}", e);
-            }
-        }
-    }
-}
-
-#[cfg(all(target_os = "linux", feature = "nvtop"))]
-impl GpuProvider for NvtopProvider {
-    fn list_gpus(&self) -> Vec<GpuInfo> {
-        self.cached.clone()
-    }
-    fn refresh(&mut self) {
-        self.run_nvtop();
-    }
-    fn provider_name(&self) -> &'static str {
-        "nvtop"
-    }
-}
-
-// ---------- nvtop JSON 解析（纯函数） ----------
-
-/// 解析 nvtop 子进程的 JSON 输出。
-///
-/// 期望 schema（stage-6.md §1.2 方案 A 约定）：
-/// ```json
-/// [{
-///   "device": "AMD Radeon RX 6700 XT",
-///   "temperature": 65.0,
-///   "memory": { "used": 1024, "total": 8192 },
-///   "gpu_utilization": 45.0,
-///   "power": { "used": 50, "total": 225 }
-/// }]
-/// ```
-///
-/// 缺字段按 0/None 处理；整个文档非法 JSON 时返回空 Vec（不 panic）。
-/// vendor 由 device 字符串推断（含 "NVIDIA"/"GeForce" → Nvidia，
-/// "AMD"/"Radeon" → Amd，"Intel" → Intel，其它 → Unknown）。
-#[cfg(feature = "nvtop")]
-#[must_use]
-pub fn parse_nvtop_json(content: &str) -> Vec<GpuInfo> {
-    #[derive(serde::Deserialize)]
-    struct NvtopMem {
-        #[serde(default)]
-        used: u64,
-        #[serde(default)]
-        total: u64,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct NvtopPower {
-        #[serde(default)]
-        used: f64,
-        #[serde(default)]
-        #[allow(dead_code)]
-        total: f64,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct NvtopEntry {
-        device: String,
-        #[serde(default)]
-        temperature: Option<f64>,
-        #[serde(default)]
-        memory: Option<NvtopMem>,
-        #[serde(default)]
-        gpu_utilization: Option<f64>,
-        #[serde(default)]
-        power: Option<NvtopPower>,
-    }
-
-    let parsed: Result<Vec<NvtopEntry>, _> = serde_json::from_str(content);
-    parsed
-        .unwrap_or_default()
-        .into_iter()
-        .map(|e| {
-            let vram_total = e.memory.as_ref().map(|m| m.total).unwrap_or(0);
-            let vram_used = e.memory.as_ref().map(|m| m.used).unwrap_or(0);
-            let utilization = e.gpu_utilization.unwrap_or(0.0).clamp(0.0, 100.0) as u32;
-            GpuInfo {
-                vendor: infer_vendor(&e.device),
-                name: e.device,
-                utilization_pct: utilization,
-                vram_used,
-                vram_total,
-                vram_budget: vram_total,
-                temperature: e.temperature.map(|t| t as f32),
-                power_watts: e.power.map(|p| p.used),
-            }
-        })
-        .collect()
-}
-
-/// 从 GPU 名称推断厂商。nvtop schema 不带 PCI vendor ID，靠字符串匹配。
-#[cfg(feature = "nvtop")]
-fn infer_vendor(name: &str) -> GpuVendor {
-    let lower = name.to_lowercase();
-    if lower.contains("nvidia")
-        || lower.contains("geforce")
-        || lower.contains("quadro")
-        || lower.contains("rtx")
-        || lower.contains("gtx")
-    {
-        GpuVendor::Nvidia
-    } else if lower.contains("amd") || lower.contains("radeon") {
-        GpuVendor::Amd
-    } else if lower.contains("intel") {
-        GpuVendor::Intel
-    } else {
-        GpuVendor::Unknown
-    }
-}
-
-// ---------- detect_providers + GpuCollector ----------
-
-/// 根据 feature flag + 平台 + 二进制可用性返回当前活跃的 provider 列表。
-/// 任何初始化失败都跳过对应 provider，绝不 panic。
-///
-/// 组合策略（stage-6.md §3）：
-/// - Windows：始终加 `NvmlProvider`（DXGI 覆盖所有 vendor，NVML feature
-///   关闭时只退化 NVML enrichment，仍返回非 NVIDIA 卡的 VRAM）
-/// - Linux + nvtop feature + nvtop 在 PATH：加 `NvtopProvider`
-/// - macOS / 其它：空 Vec（sidebar GPU 区无内容）
+/// 返回当前活跃的 provider 列表。任何初始化失败都跳过对应 provider，绝不 panic。
 #[must_use]
 pub fn detect_providers() -> Vec<Box<dyn GpuProvider>> {
     let mut providers: Vec<Box<dyn GpuProvider>> = Vec::new();
@@ -659,13 +439,6 @@ pub fn detect_providers() -> Vec<Box<dyn GpuProvider>> {
     #[cfg(target_os = "windows")]
     {
         providers.push(Box::new(NvmlProvider::new()));
-    }
-
-    #[cfg(all(target_os = "linux", feature = "nvtop"))]
-    {
-        if NvtopProvider::is_available() {
-            providers.push(Box::new(NvtopProvider::new()));
-        }
     }
 
     providers
@@ -715,95 +488,9 @@ impl GpuCollector {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "nvtop")]
-    #[test]
-    fn parse_nvtop_json_handles_empty_array() {
-        assert!(parse_nvtop_json("[]").is_empty());
-    }
-
-    #[cfg(feature = "nvtop")]
-    #[test]
-    fn parse_nvtop_json_returns_empty_on_garbage() {
-        assert!(parse_nvtop_json("not json").is_empty());
-        assert!(parse_nvtop_json("").is_empty());
-    }
-
-    #[cfg(feature = "nvtop")]
-    #[test]
-    fn parse_nvtop_json_parses_multi_vendor_sample() {
-        let json = r#"[
-            {
-                "device": "NVIDIA GeForce RTX 4090",
-                "temperature": 62.5,
-                "memory": { "used": 2048, "total": 24576 },
-                "gpu_utilization": 78.0,
-                "power": { "used": 215, "total": 450 }
-            },
-            {
-                "device": "AMD Radeon RX 7900 XTX",
-                "temperature": 70.0,
-                "memory": { "used": 1024, "total": 24576 },
-                "gpu_utilization": 45.0,
-                "power": { "used": 130, "total": 355 }
-            },
-            {
-                "device": "Intel Arc A770",
-                "temperature": 55.0,
-                "memory": { "used": 512, "total": 16384 },
-                "gpu_utilization": 12.0,
-                "power": { "used": 30, "total": 225 }
-            }
-        ]"#;
-        let out = parse_nvtop_json(json);
-        assert_eq!(out.len(), 3, "三厂商各一条");
-        assert_eq!(out[0].vendor, GpuVendor::Nvidia);
-        assert_eq!(out[0].utilization_pct, 78);
-        assert_eq!(out[0].vram_total, 24576);
-        assert_eq!(out[0].temperature, Some(62.5));
-        assert_eq!(out[0].power_watts, Some(215.0));
-        assert_eq!(out[1].vendor, GpuVendor::Amd);
-        assert_eq!(out[1].name, "AMD Radeon RX 7900 XTX");
-        assert_eq!(out[2].vendor, GpuVendor::Intel);
-    }
-
-    #[cfg(feature = "nvtop")]
-    #[test]
-    fn parse_nvtop_json_handles_missing_fields() {
-        // 缺 memory / temperature / power 时字段填 0/None，不 panic。
-        let json = r#"[{ "device": "Unknown Box" }]"#;
-        let out = parse_nvtop_json(json);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].vendor, GpuVendor::Unknown);
-        assert_eq!(out[0].utilization_pct, 0);
-        assert_eq!(out[0].vram_total, 0);
-        assert_eq!(out[0].temperature, None);
-        assert_eq!(out[0].power_watts, None);
-    }
-
-    #[cfg(feature = "nvtop")]
-    #[test]
-    fn parse_nvtop_json_clamps_utilization_to_100() {
-        // 过载值 clamp 到 100，避免下游百分比越界。
-        let json = r#"[{ "device": "X", "gpu_utilization": 250.0 }]"#;
-        let out = parse_nvtop_json(json);
-        assert_eq!(out[0].utilization_pct, 100);
-    }
-
-    #[cfg(feature = "nvtop")]
-    #[test]
-    fn infer_vendor_matches_common_brand_strings() {
-        assert_eq!(infer_vendor("NVIDIA GeForce RTX 4090"), GpuVendor::Nvidia);
-        assert_eq!(infer_vendor("GeForce GTX 1080"), GpuVendor::Nvidia);
-        assert_eq!(infer_vendor("Quadro P4000"), GpuVendor::Nvidia);
-        assert_eq!(infer_vendor("AMD Radeon RX 6700"), GpuVendor::Amd);
-        assert_eq!(infer_vendor("Radeon RX Vega"), GpuVendor::Amd);
-        assert_eq!(infer_vendor("Intel UHD Graphics 770"), GpuVendor::Intel);
-        assert_eq!(infer_vendor("Mali-G78"), GpuVendor::Unknown);
-    }
-
     #[test]
     fn detect_providers_does_not_panic() {
-        // 不论平台 / feature 组合，detect_providers 都不应 panic。
+        // detect_providers 不应 panic。
         let providers = detect_providers();
         for p in &providers {
             assert!(!p.provider_name().is_empty());

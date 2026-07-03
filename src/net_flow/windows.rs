@@ -167,15 +167,7 @@ mod win32 {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-mod win32 {
-    use super::*;
-    pub(super) fn sample_all() -> HashMap<ConnKey, (u64, u64)> {
-        HashMap::new()
-    }
-}
-
-/// 跨平台 collector 外壳：Windows 上调 win32 模块，其它平台 new() 直接失败。
+/// collector 外壳：调 win32 模块，初始化失败时返回 Err。
 pub struct IphelperCollector {
     last_per_pid: HashMap<u32, (u64, u64)>,
     last_time: Instant,
@@ -189,13 +181,6 @@ impl IphelperCollector {
             last_per_pid: initial,
             last_time: Instant::now(),
         })
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    pub fn new() -> Result<Self> {
-        Err(crate::error::ProcError::monitor(
-            "IphelperCollector 仅 Windows 支持，当前平台不可用",
-        ))
     }
 }
 
@@ -292,9 +277,4 @@ fn sample_per_pid_cumulative() -> HashMap<u32, (u64, u64)> {
         }
     }
     per_pid
-}
-
-#[cfg(not(target_os = "windows"))]
-fn sample_per_pid_cumulative() -> HashMap<u32, (u64, u64)> {
-    HashMap::new()
 }

@@ -193,44 +193,6 @@ fn parse_utf16_env(raw: &[u8]) -> Vec<EnvVar> {
         .collect()
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn collect_env(pid: u32) -> Result<Vec<EnvVar>> {
-    // /proc 只在 Linux 上存在；macOS 等其它非 Windows 平台走 stub。
-    #[cfg(target_os = "linux")]
-    {
-        let path = format!("/proc/{pid}/environ");
-        let data = std::fs::read(&path)
-            .map_err(|e| ProcError::permission_denied_with(format!("读取 {path} 失败"), e))?;
-        let mut out = Vec::with_capacity(64);
-        for raw in data.split(|&b| b == 0) {
-            if raw.is_empty() {
-                continue;
-            }
-            let s = String::from_utf8_lossy(raw);
-            let mut parts = s.splitn(2, '=');
-            let (Some(k), Some(v)) = (parts.next(), parts.next()) else {
-                continue;
-            };
-            if !k.is_empty() {
-                out.push(EnvVar {
-                    is_secret: super::env_mask::is_secret_key(k),
-                    key: k.to_string(),
-                    value: v.to_string(),
-                });
-            }
-        }
-        Ok(out)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        Err(ProcError::permission_denied(
-            "此平台（非 Linux/Windows）暂不支持环境变量采集",
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

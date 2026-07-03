@@ -24,8 +24,10 @@ pub mod parser;
 
 pub use parser::{ParseError, parse};
 
+use std::collections::HashSet;
+
 use crate::collect::ProcessInfo;
-use crate::ebpf::flow::ProcessFlow;
+use crate::flow::ProcessFlow;
 
 /// 过滤表达式 AST。每个节点是一个布尔判定，[`FilterExpr::apply`] 是执行入口。
 ///
@@ -63,9 +65,14 @@ pub enum FilterExpr {
     },
     /// v0.11 阶段 3：网络字段集合包含 `field in ("a", "b", ...)`，例
     /// `sni in ("a.com", "b.com")`。HashSet 查询语义。
+    ///
+    /// **v0.12 阶段 5（TD-29）**：内部存储从 `Vec<Value>` 改为 `HashSet<Value>`
+    /// 让 apply 路径 `contains` 是 O(1) 而非 O(N)。Parser 在 `parse_in_list` 一次
+    /// 性构造 HashSet；用户写 100 个值 × 1000 flows 的极端场景从 100_000 比较
+    /// 降到 1_000 hash 查找。
     NetworkIn {
         field: NetworkField,
-        values: Vec<Value>,
+        values: HashSet<Value>,
     },
     And(Box<FilterExpr>, Box<FilterExpr>),
     Or(Box<FilterExpr>, Box<FilterExpr>),
@@ -163,7 +170,15 @@ impl CmpOp {
 }
 
 /// 字面量值。解析时单位已规范化（`5kb` → Number(5120)，`5%` → Percent(5)）。
-#[derive(Debug, Clone, PartialEq)]
+///
+/// **v0.12 阶段 5（TD-29）**：实现 `Hash + Eq` 让 [`FilterExpr::NetworkIn`] 能用
+/// `HashSet<Value>` O(1) 查找（之前是 `Vec<Value>` + `iter().any()` O(N) 每 flow）。
+/// f64 不内建 `Hash`（NaN 语义问题），按 `to_bits()` 实现——parser 产生的数字
+/// 永远不是 NaN（合法 digit 字符串解析），所以这是安全的；测试构造的 Value 也
+/// 用具体数字，无 NaN 风险。`PartialEq` 也按 `to_bits()` 让 `Hash` / `Eq` 自洽
+/// （`-0.0 == +0.0` 在 IEEE 是 true 但 to_bits 不同——对 `in` 操作符语义无影响，
+/// 用户不会写 `-0.0` 字面量进 `in` 列表）。
+#[derive(Debug, Clone)]
 pub enum Value {
     /// 裸数字或字节单位已转换。比较 cpu 字段时按 %，比较 mem/disk/net 字段时按字节。
     Number(f64),
@@ -171,6 +186,53 @@ pub enum Value {
     Percent(f64),
     /// 文本字面量（裸字符串如 `chrome` 或带引号 `"chrome exe"`）。
     Text(String),
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Number(a), Self::Number(b)) => a.to_bits() == b.to_bits(),
+            (Self::Percent(a), Self::Percent(b)) => a.to_bits() == b.to_bits(),
+            (Self::Text(a), Self::Text(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
+
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Number(n) => {
+                0u8.hash(state);
+                n.to_bits().hash(state);
+            }
+            Self::Percent(n) => {
+                1u8.hash(state);
+                n.to_bits().hash(state);
+            }
+            Self::Text(s) => {
+                2u8.hash(state);
+                s.hash(state);
+            }
+        }
+    }
+}
+
+impl Value {
+    /// TD-29（v0.12 阶段 5）：把 [`FieldValue`]（apply 路径从 ProcessInfo/ProcessFlow
+    /// extract 出来的中间态）转回 [`Value`]，供 `NetworkIn` 的 `HashSet<Value>`
+    /// `contains` 查找。`FieldValue::Num(n)` → `Value::Number(n)`；
+    /// `FieldValue::Text(s)` → `Value::Text(s)`。Percent 不出现在 FieldValue 里
+    /// （Percent 是字面量标记，extract 出来的是 Num）。
+    #[must_use]
+    fn from_field_value(fv: FieldValue) -> Self {
+        match fv {
+            FieldValue::Num(n) => Self::Number(n),
+            FieldValue::Text(s) => Self::Text(s),
+        }
+    }
 }
 
 /// 字段实际取值。`extract` 后的中间态，让 apply 函数走模式匹配。
@@ -182,9 +244,14 @@ pub enum FieldValue {
 
 /// 求值上下文。把 security_score 从 App::security_scores 单独传进来，因为
 /// ProcessInfo 不持分数（分数在 App HashMap 里）。
+///
+/// **v0.12 阶段 4（TD-30）**：加 `total_memory` 字段，让 `mem > 50%` 能换算成
+/// 字节阈值（`mem / total_memory * 100.0` 与百分号字面量比较）。`total_memory == 0`
+/// 时（测试 / unknown 容量）退回旧行为（字节值与百分号数字直接比较），保留兼容。
 pub struct EvalCtx<'a> {
     pub process: &'a ProcessInfo,
     pub security_score: Option<u32>,
+    pub total_memory: u64,
 }
 
 /// v0.11 阶段 3：网络字段求值上下文。作用对象是 [`ProcessFlow`]（Flow 子视图 /
@@ -240,7 +307,21 @@ impl FilterExpr {
                 let fv = field.extract(ctx);
                 match (&fv, value) {
                     (FieldValue::Num(a), Value::Number(b)) => op.apply_num(*a, *b),
-                    (FieldValue::Num(a), Value::Percent(b)) => op.apply_num(*a, *b),
+                    (FieldValue::Num(a), Value::Percent(b)) => {
+                        // TD-30（v0.12 阶段 4）：mem + % 语义修复——按 total_memory
+                        // 换算成「mem 占总内存百分比」与百分号字面量比较。cpu 自身
+                        // 就是 0-100 标度，`cpu > 5%` 与 `cpu > 5` 等价（不变）；
+                        // disk_read/write / net_sent/recv 字段没有自然除数，退回
+                        // 旧行为（字节值直接与百分号数字比较，语义可疑但 surgical
+                        // 原则下不引入未定义除数）；total_memory == 0（测试 / 未知容量）
+                        // 也退回旧行为，避免 div by zero。
+                        if matches!(field, Field::Mem) && ctx.total_memory > 0 {
+                            let pct = *a / ctx.total_memory as f64 * 100.0;
+                            op.apply_num(pct, *b)
+                        } else {
+                            op.apply_num(*a, *b)
+                        }
+                    }
                     (FieldValue::Text(a), Value::Text(b)) => op.apply_text(a, b),
                     // 类型不匹配（数值字段对文本字面量、文本字段对数字）→ 不命中
                     _ => false,
@@ -291,15 +372,11 @@ impl FilterExpr {
                 }
             }
             Self::NetworkIn { field, values } => {
+                // TD-29（v0.12 阶段 5）：HashSet O(1) contains 替代 Vec.iter().any() O(N)。
+                // extract 出来的 FieldValue 转 Value 后直接 contains——HashSet 用我们
+                // 手写的 Hash+Eq（to_bits() 对 f64），与 parser 构造的 Value 自洽。
                 let fv = field.extract(ctx);
-                match &fv {
-                    FieldValue::Text(s) => {
-                        values.iter().any(|v| matches!(v, Value::Text(t) if t == s))
-                    }
-                    FieldValue::Num(n) => values
-                        .iter()
-                        .any(|v| matches!(v, Value::Number(m) if m == n)),
-                }
+                values.contains(&Value::from_field_value(fv))
             }
             Self::And(l, r) => l.apply_network(ctx) && r.apply_network(ctx),
             Self::Or(l, r) => l.apply_network(ctx) || r.apply_network(ctx),
@@ -313,45 +390,40 @@ impl FilterExpr {
 /// v0.11 阶段 3：网络字段枚举。作用对象 [`ProcessFlow`]，与 [`Field`]
 /// （作用对象 [`ProcessInfo`]）分离。
 ///
-/// 文本字段：`Sni` / `DnsName` / `RemoteAddr` / `Source`（值走 [`FieldValue::Text`]）。
+/// 文本字段：`Sni` / `DnsName` / `RemoteAddr`（值走 [`FieldValue::Text`]）。
 /// 数值字段：`RemotePort` / `BytesOut` / `BytesIn`（值走 [`FieldValue::Num`]）。
 ///
 /// 设计取舍见 ADR-0011 v0.11 阶段 3 增量段。
+///
+/// v0.12 阶段 2：移除 `Source` 字段（Windows-only 后唯一来源是 Schannel）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkField {
-    /// TLS ClientHello SNI 明文（HTTPS 流量必经路径；Windows 走 Schannel ETW，
-    /// Linux 走 eBPF uprobe）。None → 空字符串。
+    /// TLS ClientHello SNI 明文（HTTPS 流量必经路径；Windows 走 Schannel ETW）。
+    /// None → 空字符串。
     Sni,
     /// DNS 查询关联名（DNS cache 命中时关联；HTTPS 命中 DNS cache 时关联不到）。
     /// None → 空字符串。
     DnsName,
-    /// 远端 IPv4 地址字符串（`"1.2.3.4"`）。Schannel 路径可能空。
+    /// 远端 IPv4 地址字符串（`"1.2.3.4"`）。Schannel 路径常空。
     RemoteAddr,
     /// 远端端口（host byte order）。0 = 未知（Schannel 路径不给 socket 元数据）。
     RemotePort,
-    /// 出向字节数。MVP 留 0（要 hook tcp_sendmsg，留 TD-17）。
+    /// 出向字节数。Schannel 路径常 0。
     BytesOut,
-    /// 入向字节数。MVP 留 0（要 hook tcp_recvmsg，留 TD-17）。
+    /// 入向字节数。Schannel 路径常 0。
     BytesIn,
-    /// 数据来源：`"ebpf"` (Linux + ebpf feature) / `"schannel"` (Windows admin)。
-    /// 与 `FlowSource` serde 序列化同款小写。
-    Source,
 }
 
 impl NetworkField {
-    /// 文本字段（Sni/DnsName/RemoteAddr/Source）走 [`FieldValue::Text`]；
+    /// 文本字段（Sni/DnsName/RemoteAddr）走 [`FieldValue::Text`]；
     /// 数值字段（RemotePort/BytesOut/BytesIn）走 [`FieldValue::Num`]。
     #[must_use]
     pub fn is_text(self) -> bool {
-        matches!(
-            self,
-            Self::Sni | Self::DnsName | Self::RemoteAddr | Self::Source
-        )
+        matches!(self, Self::Sni | Self::DnsName | Self::RemoteAddr)
     }
 
     /// 从 ProcessFlow 取值。`Option<String>` 字段（sni/dns_name）`None` →
     /// `Text("")`（与 `=~ /foo/` 不匹配但 `NOT sni =~ /./` 可用）。
-    /// `Source` 走 `FlowSource::as_str()` 小写枚举字符串。
     #[must_use]
     pub fn extract(self, ctx: &NetworkEvalCtx<'_>) -> FieldValue {
         let f = ctx.flow;
@@ -362,18 +434,7 @@ impl NetworkField {
             Self::RemotePort => FieldValue::Num(f64::from(f.remote_port)),
             Self::BytesOut => FieldValue::Num(f.bytes_out as f64),
             Self::BytesIn => FieldValue::Num(f.bytes_in as f64),
-            Self::Source => FieldValue::Text(source_as_str(f.source).to_string()),
         }
-    }
-}
-
-/// `FlowSource` → 小写字符串（与 serde `rename_all="lowercase"` 一致）。
-/// `NetworkField::extract` 内部用。
-#[must_use]
-fn source_as_str(s: crate::ebpf::flow::FlowSource) -> &'static str {
-    match s {
-        crate::ebpf::flow::FlowSource::Ebpf => "ebpf",
-        crate::ebpf::flow::FlowSource::Schannel => "schannel",
     }
 }
 
@@ -396,6 +457,7 @@ mod tests {
         EvalCtx {
             process: p,
             security_score: score,
+            total_memory: 0,
         }
     }
 
@@ -537,15 +599,9 @@ mod tests {
 
     // --- v0.11 阶段 3：NetworkField / apply_network ---
 
-    use crate::ebpf::flow::{FlowSource, ProcessFlow};
+    use crate::flow::ProcessFlow;
 
-    fn flow(
-        sni: Option<&str>,
-        dns: Option<&str>,
-        addr: &str,
-        port: u16,
-        source: FlowSource,
-    ) -> ProcessFlow {
+    fn flow(sni: Option<&str>, dns: Option<&str>, addr: &str, port: u16) -> ProcessFlow {
         ProcessFlow {
             pid: 1,
             start_time: 0,
@@ -557,7 +613,6 @@ mod tests {
             bytes_in: 0,
             dns_name: dns.map(str::to_string),
             sni: sni.map(str::to_string),
-            source,
             first_seen: std::time::SystemTime::UNIX_EPOCH,
             last_seen: std::time::SystemTime::UNIX_EPOCH,
             exit_time: None,
@@ -570,7 +625,7 @@ mod tests {
 
     #[test]
     fn network_sni_eq_matches() {
-        let f = flow(Some("evil.com"), None, "1.2.3.4", 443, FlowSource::Ebpf);
+        let f = flow(Some("evil.com"), None, "1.2.3.4", 443);
         let expr = FilterExpr::NetworkFieldCmp {
             field: NetworkField::Sni,
             op: CmpOp::Eq,
@@ -582,7 +637,7 @@ mod tests {
     #[test]
     fn network_sni_none_returns_empty() {
         // sni = None → Text("") → 与任何非空 sni 字面量不匹配。
-        let f = flow(None, None, "1.2.3.4", 443, FlowSource::Ebpf);
+        let f = flow(None, None, "1.2.3.4", 443);
         let expr = FilterExpr::NetworkFieldCmp {
             field: NetworkField::Sni,
             op: CmpOp::Eq,
@@ -593,13 +648,7 @@ mod tests {
 
     #[test]
     fn network_sni_regex_matches() {
-        let f = flow(
-            Some("api.google.com"),
-            None,
-            "1.2.3.4",
-            443,
-            FlowSource::Ebpf,
-        );
+        let f = flow(Some("api.google.com"), None, "1.2.3.4", 443);
         let expr = FilterExpr::NetworkRegex {
             field: NetworkField::Sni,
             re: regex::Regex::new(r"google\.com$").unwrap(),
@@ -610,7 +659,7 @@ mod tests {
 
     #[test]
     fn network_remote_port_eq() {
-        let f = flow(None, None, "1.2.3.4", 443, FlowSource::Ebpf);
+        let f = flow(None, None, "1.2.3.4", 443);
         let expr = FilterExpr::NetworkFieldCmp {
             field: NetworkField::RemotePort,
             op: CmpOp::Eq,
@@ -621,21 +670,12 @@ mod tests {
 
     #[test]
     fn network_remote_addr_in() {
-        let f = flow(None, None, "5.6.7.8", 443, FlowSource::Ebpf);
+        let f = flow(None, None, "5.6.7.8", 443);
         let expr = FilterExpr::NetworkIn {
             field: NetworkField::RemoteAddr,
-            values: vec![Value::Text("1.2.3.4".into()), Value::Text("5.6.7.8".into())],
-        };
-        assert!(expr.apply_network(&nctx(&f)));
-    }
-
-    #[test]
-    fn network_source_schannel_text_match() {
-        let f = flow(Some("a.com"), None, "", 0, FlowSource::Schannel);
-        let expr = FilterExpr::NetworkFieldCmp {
-            field: NetworkField::Source,
-            op: CmpOp::Eq,
-            value: Value::Text("schannel".into()),
+            values: [Value::Text("1.2.3.4".into()), Value::Text("5.6.7.8".into())]
+                .into_iter()
+                .collect(),
         };
         assert!(expr.apply_network(&nctx(&f)));
     }
@@ -643,7 +683,7 @@ mod tests {
     #[test]
     fn network_process_variant_returns_false() {
         // FieldCmp (process) on NetworkEvalCtx → false（network ctx 无 ProcessInfo）。
-        let f = flow(Some("a.com"), None, "1.2.3.4", 443, FlowSource::Ebpf);
+        let f = flow(Some("a.com"), None, "1.2.3.4", 443);
         let expr = FilterExpr::FieldCmp {
             field: Field::Cpu,
             op: CmpOp::Gt,
@@ -654,7 +694,7 @@ mod tests {
 
     #[test]
     fn network_and_combinator() {
-        let f = flow(Some("evil.com"), None, "1.2.3.4", 443, FlowSource::Ebpf);
+        let f = flow(Some("evil.com"), None, "1.2.3.4", 443);
         let expr = FilterExpr::And(
             Box::new(FilterExpr::NetworkRegex {
                 field: NetworkField::Sni,
@@ -675,7 +715,6 @@ mod tests {
         assert!(NetworkField::Sni.is_text());
         assert!(NetworkField::DnsName.is_text());
         assert!(NetworkField::RemoteAddr.is_text());
-        assert!(NetworkField::Source.is_text());
         assert!(!NetworkField::RemotePort.is_text());
         assert!(!NetworkField::BytesOut.is_text());
         assert!(!NetworkField::BytesIn.is_text());
@@ -725,7 +764,7 @@ mod tests {
     fn contains_process_field_network_in_only() {
         let expr = FilterExpr::NetworkIn {
             field: NetworkField::RemoteAddr,
-            values: vec![Value::Text("1.2.3.4".into())],
+            values: [Value::Text("1.2.3.4".into())].into_iter().collect(),
         };
         assert!(!expr.contains_process_field());
     }

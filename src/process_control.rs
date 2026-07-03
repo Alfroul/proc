@@ -101,17 +101,6 @@ pub fn get_priority(pid: u32) -> Result<PriorityClass> {
     {
         get_priority_windows(pid)
     }
-    #[cfg(target_os = "linux")]
-    {
-        get_priority_linux(pid)
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        let _ = pid;
-        Err(ProcError::permission_denied(
-            "此平台（非 Windows/Linux）暂不支持优先级查询",
-        ))
-    }
 }
 
 /// 设置进程优先级。
@@ -119,17 +108,6 @@ pub fn set_priority(pid: u32, class: PriorityClass) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         set_priority_windows(pid, class)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        set_priority_linux(pid, class)
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        let _ = (pid, class);
-        Err(ProcError::permission_denied(
-            "此平台（非 Windows/Linux）暂不支持优先级设置",
-        ))
     }
 }
 
@@ -139,17 +117,6 @@ pub fn get_affinity(pid: u32) -> Result<u64> {
     {
         get_affinity_windows(pid)
     }
-    #[cfg(target_os = "linux")]
-    {
-        get_affinity_linux(pid)
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        let _ = pid;
-        Err(ProcError::permission_denied(
-            "此平台（非 Windows/Linux）暂不支持 affinity 查询",
-        ))
-    }
 }
 
 /// 设置进程 CPU affinity mask（每核一位）。
@@ -157,17 +124,6 @@ pub fn set_affinity(pid: u32, mask: u64) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         set_affinity_windows(pid, mask)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        set_affinity_linux(pid, mask)
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        let _ = (pid, mask);
-        Err(ProcError::permission_denied(
-            "此平台（非 Windows/Linux）暂不支持 affinity 设置",
-        ))
     }
 }
 
@@ -287,90 +243,6 @@ impl PriorityClass {
             Self::Normal
         }
     }
-}
-
-// ── Linux ───────────────────────────────────────────────────────────────────
-
-#[cfg(target_os = "linux")]
-fn errno() -> i32 {
-    unsafe { *libc::__errno_location() }
-}
-
-#[cfg(target_os = "linux")]
-fn get_priority_linux(pid: u32) -> Result<PriorityClass> {
-    // getpriority 有奇葩语义：成功时返回 nice 值，失败时返回 -1 并设 errno；
-    // 但 -1 本身也是合法的 nice 值。所以调用前必须清 errno，调用后检查。
-    unsafe {
-        *libc::__errno_location() = 0;
-        let nice = libc::getpriority(libc::PRIO_PROCESS, pid);
-        if nice == -1 {
-            let err = errno();
-            if err != 0 {
-                return Err(ProcError::permission_denied(format!(
-                    "getpriority 失败 (errno={err})"
-                )));
-            }
-        }
-        Ok(PriorityClass::from_nice(nice))
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn set_priority_linux(pid: u32, class: PriorityClass) -> Result<()> {
-    let r = unsafe { libc::setpriority(libc::PRIO_PROCESS, pid, class.to_nice()) };
-    if r != 0 {
-        let err = errno();
-        return Err(ProcError::permission_denied(format!(
-            "setpriority 失败 (errno={err})"
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn get_affinity_linux(pid: u32) -> Result<u64> {
-    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-    let r = unsafe {
-        libc::CPU_ZERO(&mut set);
-        libc::sched_getaffinity(pid as i32, std::mem::size_of::<libc::cpu_set_t>(), &mut set)
-    };
-    if r != 0 {
-        let err = errno();
-        return Err(ProcError::permission_denied(format!(
-            "sched_getaffinity 失败 (errno={err})"
-        )));
-    }
-
-    let mut mask: u64 = 0;
-    for i in 0..64 {
-        if unsafe { libc::CPU_ISSET(i, &set) } {
-            mask |= 1u64 << i;
-        }
-    }
-    Ok(mask)
-}
-
-#[cfg(target_os = "linux")]
-fn set_affinity_linux(pid: u32, mask: u64) -> Result<()> {
-    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-    unsafe {
-        libc::CPU_ZERO(&mut set);
-        for i in 0..64 {
-            if mask & (1u64 << i) != 0 {
-                libc::CPU_SET(i, &mut set);
-            }
-        }
-    }
-    let r = unsafe {
-        libc::sched_setaffinity(pid as i32, std::mem::size_of::<libc::cpu_set_t>(), &set)
-    };
-    if r != 0 {
-        let err = errno();
-        return Err(ProcError::permission_denied(format!(
-            "sched_setaffinity 失败 (errno={err})"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

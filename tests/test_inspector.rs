@@ -428,26 +428,6 @@ fn env_filter_skips_non_matching_keys() {
     assert_eq!(filtered[0].key, "HOME");
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn linux_dlls_include_libc_via_proc_maps() {
-    // Linux DLL Tab 走 /proc/<pid>/maps；自己进程至少应能解析出 libc 或 ld。
-    // 注意：proc 本身是 Rust 静态二进制，但仍会 dynamic-link libc。
-    let dlls = inspect::dlls::collect_dlls(std::process::id()).expect("self maps");
-    assert!(!dlls.is_empty(), "expected ≥1 module from /proc/self/maps");
-
-    // libc / ld / libgcc 至少命中一个 —— 如果都没找到，说明 /proc 解析挂了。
-    let known = dlls.iter().any(|d| {
-        let p = d.path.to_lowercase();
-        p.contains("libc") || p.contains("/ld-") || p.contains("libgcc") || p.contains("libpthread")
-    });
-    assert!(
-        known,
-        "expected libc/ld/libgcc in self maps, got: {:?}",
-        dlls.iter().take(3).map(|d| &d.path).collect::<Vec<_>>()
-    );
-}
-
 // ===========================================================================
 // 阶段 4：Handles/Memory Tab 接线 + A4 优先级快捷键
 // ===========================================================================

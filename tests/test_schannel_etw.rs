@@ -1,9 +1,8 @@
 //! v0.10 阶段 2：Schannel ETW SNI worker 测试。
 //!
-//! 平台 cfg-gate：
+//! 平台 cfg-gate（v0.12 阶段 2 起 Windows-only）：
 //! - **Windows**：spawn worker → curl https://example.com → 验证 SniRecord
 //!   出现 + sni = "example.com"（需要管理员权限；非管理员走 SKIP 不 fail）
-//! - **其它平台**：`try_spawn` 返回 `None`，验证 stub 行为
 //!
 //! 跨平台 `SniRecord` / `read_utf16_le_until_null` 单元测试在 `parser.rs` 内部。
 //! 本文件只测 worker 集成路径（启停干净 + curl 触发后能采到 SNI）。
@@ -12,15 +11,7 @@
 
 use proc::schannel_etw::{SniRecord, try_spawn};
 
-/// 跨平台 stub 测试：非 Windows `try_spawn` 必须返回 `None`。
-#[cfg(not(target_os = "windows"))]
-#[test]
-fn stub_returns_none_off_windows() {
-    assert!(try_spawn(None).is_none());
-}
-
 /// SniRecord struct 数据格式：pid / sni / ts 字段 + Clone / Serialize 契约。
-/// 全平台都跑——结构体在 parser.rs 里跨平台编译。
 #[test]
 fn sni_record_shape() {
     use std::time::SystemTime;
