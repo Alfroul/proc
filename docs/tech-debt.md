@@ -460,6 +460,65 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 ---
 
+## v0.14.0+ 候选（v0.13.0 stage 2 PERF-BASELINE 归档）
+
+> v0.13.0 cycle stage 2 Slice 产出 [`docs/reviews/PERF-BASELINE-v0.13.md`](reviews/PERF-BASELINE-v0.13.md)，分析 6 个 criterion benchmark × 多档 fixture 共 25 个数据点。**用户选方案 c**：cycle 缩到 4 stage（baseline + 报告 + Review + 收尾），不动业务代码。stage 2 评估的 4 个候选项（含 1 个中 ROI + 2 个低 ROI + 1 个侦察报告误读）全部归档为 TD-44 ~ TD-47 留 v0.14+ cycle 评估。**核心结论**：proc 当前架构在 1000 进程规模下无用户感知瓶颈；唯一 mean > 5 ms 的 hot path（parent_chain 16.5 ms）在 worker 独立线程不阻塞 UI。
+
+### TD-44（PERF-BASELINE 候选 2）：tui_draw format! 风暴优化（低 ROI）
+
+**位置**：`src/tui/process_table.rs:71-159` + `src/format.rs:3-46`
+**现状**：criterion `bench_tui_draw` 实测 5.6 ms @ 1000 进程，但**数字高估**——bench 对全部 1000 行跑 `format!`，生产代码 `src/tui/process_table.rs:71-75` 用 `.skip(scroll_offset).take(rows_visible)` 只格式化可见行（典型 30-50 行）。真实生产单帧 < 1 ms。
+**影响**：用户感知不到差（bench 5.6 ms 是 fixture 全量，真实路径 ~500 µs/frame）。优化后 bench 可降到 ~2 ms，真实路径降到 ~200 µs，**用户无感**。
+**修复**：用 `itoa` / 直接 `Cell<Cow<_>>` 替换 `format_bytes` / `format_speed` / `format!("{:.1}", cpu)` 等热路径 format!。
+**验证**：`cargo bench --bench bench_tui_draw` 数字下降；全量回归 ≥ 1115 passed 不变。
+**v0.13 stage 2 决策**：不修。理由：(1) bench 高估，真实生产 < 1 ms 已在用户无感区；(2) 用户感知不到差；(3) 修复需重写 5+ 个 format! 调用点 + 单元测试，工作量 ~150 行。归档为 v0.14+ 候选。
+
+### TD-45（PERF-BASELINE 候选 3）：record deserialize 加速（低 ROI）
+
+**位置**：`src/record/reader.rs`（bincode deserialize 路径）
+**现状**：criterion `bench_record_serialize` 实测 deserialize 165 µs @ 1000 进程，比 serialize（14 µs）慢 **12×**。
+**影响**：replay 路径偶发触发（用户按方向键 seek 一帧），165 µs 单帧 seek 完全无感。但 30 min session × 30 FPS = 54000 frames，如做「快进/倒放」连续 seek 多帧，体验可能下降。
+**修复**：换 bincode option（如 `bincode::config::standard().with_little_endian().with_fixint_encoding()` vs `varint`），或考虑零拷贝方案。但改 bincode 配置影响向后兼容（旧录屏文件格式），需迁移层。
+**验证**：构造 1000 进程 × 1800 frames 的录屏文件，跑连续 seek；旧文件向后兼容。
+**v0.13 stage 2 决策**：不修。理由：(1) replay 偶发触发，用户无感；(2) 改 bincode 配置影响向后兼容，风险高；(3) 工作量 ~200 行 + 兼容层。归档为 v0.14+ 候选。
+
+### TD-46（PERF-BASELINE 附录）：command_palette fuzzy 优化（侦察报告误读）
+
+**位置**：`src/tui/command_palette.rs:225-237`（`recompute_matches` nucleo fuzzy）
+**现状**：v0.13 brainstorm 侦察报告说「`command_palette.rs:813, 912` 的 `to_lowercase().contains()` 每帧」。**实际查证**：line 813 / 912 在 `#[test]` 模块（`empty_query_matches_all_items` / `theme_items_in_matches` 等单元测试的 assert），**不是生产路径**。
+**影响**：侦察报告这条疑点不成立；生产 fuzzy 用 nucleo（line 109-150 matcher 已复用避免每次按键重建），性能无问题。
+**修复**：N/A（侦察报告纠错）。
+**验证**：N/A。
+**v0.13 stage 2 决策**：N/A — 侦察报告误读，无需修复。归档以记录纠错历史（避免 v0.14+ cycle 重新调查）。
+
+### TD-47（PERF-BASELINE 候选 1）：parent_chain Arc 重构（中 ROI）
+
+**位置**：
+- 字段定义：`src/collect.rs:588` — `pub parent_chain: Vec<(u32, String)>`
+- 写入热路径：`src/collect.rs:953-966`（`pid_to_chain` 构建 + `chain.clone()` 写回）
+- `build_parent_chain` 实函数：`src/security/lineage.rs:149-176`（line 172 `parent_proc.name.to_string()` 每祖先 1 次 String alloc）
+- UI 消费者：`src/tui/detail_view.rs:371-376, 406-413`（`.as_str()`）
+- 评分消费者：`src/security/lineage.rs:200, 209, 222-231, 333-338`（`.as_str()`）
+- 其他构造点：`src/record/conversions.rs:49` / `src/eject/locks.rs:92` / 测试 `src/security/lineage.rs:574`
+
+**现状**：criterion `bench_refresh_heavy` 实测 1000 进程 mean **16.5 ms**（worker 独立线程 `proc-heavy-refresh`，2s 周期，0.83% 持续 CPU）。每周期 ~10000 次 heap alloc（1000 进程 × 5 平均链深 × 2 次 clone —— `build_parent_chain` 内 push + `chain.clone()` 写回）。
+**影响**：
+- **不阻塞 UI 帧预算**（worker 独立线程）
+- **0.83% CPU 持续负载**（笔记本电池场景可忽略）
+- **~10000 allocs/s 的 GC 压力**（现代 allocator 上无感，但长期 cache miss 可累积）
+
+**修复方案**：
+1. `ProcessInfo::parent_chain: Vec<(u32, String)>` → `Vec<(u32, Arc<str>)>`（保留 serde 兼容性 — `Arc<str>` 不 impl Serialize，需要在 `FrameProcess` 中转层做 `String` 转换，FrameProcess 已是 String）
+2. `build_parent_chain` 把 `parent_proc.name.to_string()` 改 `Arc::clone(&parent_proc.name)` — 零 heap alloc
+3. 把 `chain.clone()` 改成 `Arc::clone` —— 需要把 `Vec<(u32, Arc<str>)>` 升一级为 `Arc<[(u32, Arc<str>)]>`，processes 写入时 Arc 整链一次
+4. UI/评分消费者：`.map(|(_, n)| n.as_str())` → `.map(|(_, n)| n.as_ref())` 或 `&**n`
+
+**验证**：`cargo bench --bench bench_refresh_heavy` 数字从 16.5 ms 降到 ~3-5 ms（kill 90% 堆分配后剩 HashMap 构建 + Arc atomic increment）；全量回归 ≥ 1115 passed 不变。
+
+**v0.13 stage 2 决策**：不修。理由：(1) worker 独立线程不阻塞 UI；(2) 0.83% CPU + 10000 allocs/s 在现代 allocator 上无感；(3) 修复涉及 ~10 处消费点签名变更 + serde 兼容层，~300-400 行 + 测试 + bench 更新；(4) 用户拍板方案 c 跳过 stage 3+。**留 v0.14+ cycle 重新评估**：如 v0.14 选「性能优化 cycle」，本 TD 是首选优化点（中 ROI，唯一有量化 before/after 数字的候选）。
+
+---
+
 
 ## 历史回顾
 

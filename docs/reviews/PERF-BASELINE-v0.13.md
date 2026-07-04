@@ -294,29 +294,40 @@ stage 1 数字揭示：
 
 ---
 
-## 归档（不进 stage 3+ 的低 ROI 项）
+## 归档（用户拍板方案 c — 全部候选进 tech-debt）
 
-以下候选拟归档到 `docs/tech-debt.md` 留 v0.14+ cycle 评估（如用户在拍板清单选「归档」）：
+> **2026-07-04 用户拍板**：选方案 c（4 stage 收尾，cycle 作为「性能验证 cycle」），以下 4 个候选拟归档到 `docs/tech-debt.md` 留 v0.14+ cycle 评估。stage 2 → stage 3 启动前由当前会话或新会话补归档动作。
 
-### TD-42: tui_draw format! 风暴优化（候选 2）
+### TD-44: tui_draw format! 风暴优化（候选 2）
 
 - **位置**：`src/tui/process_table.rs:71-159` + `src/format.rs:3-46`
 - **当前**：bench 5.6 ms @ 1000 进程（高估，真实生产 < 1 ms 因 `skip().take(rows_visible)` 只格式化可见行）
 - **预估优化收益**：用户感知不到差（bench 5.6 → 2 ms，真实 ~500 µs → ~200 µs）
 - **为何归档**：bench 高估导致 stage 2 评估时 ROI 看起来高于实际；真实生产路径已 < 1 ms 阈值
 
-### TD-43: record deserialize 加速（候选 3）
+### TD-45: record deserialize 加速（候选 3）
 
 - **位置**：`src/record/reader.rs`（bincode deserialize 165 µs @ 1000 进程）
 - **当前**：12× 慢于 serialize，但绝对值 < 200 µs
 - **为何归档**：replay 偶发触发，用户无感；改 bincode 配置影响向后兼容
 
-### TD-44: command_palette fuzzy 优化（侦察报告疑点 4）
+### TD-46: command_palette fuzzy 优化（侦察报告疑点 4）
 
 - **位置**：`src/tui/command_palette.rs:225-237`（`recompute_matches` nucleo fuzzy）
 - **当前**：未单独 bench，但 `command_palette.rs:813, 912` 引用的 `to_lowercase().contains()` 在 **测试代码内**（不是生产路径）
 - **侦察报告纠错**：brainstorm 文档说「command_palette `to_lowercase().contains()` 每帧（line 813, 912）」是**误读**——这两行在 `#[test]` 模块，生产 fuzzy 用 nucleo（已有 matcher 复用，line 109-150）
 - **为何归档**：侦察报告这条疑点不成立；nucleo fuzzy 本身已优化（matcher 复用）
+
+### TD-47: parent_chain Arc 重构（候选 1，中 ROI）
+
+- **位置**：
+  - 字段定义：`src/collect.rs:588` — `pub parent_chain: Vec<(u32, String)>`
+  - 写入热路径：`src/collect.rs:953-966`（`pid_to_chain` 构建 + `chain.clone()` 写回）
+  - `build_parent_chain` 实函数：`src/security/lineage.rs:149-176`
+- **当前**：1000 进程 mean 16.5 ms（worker 独立线程，不阻塞 UI）；每周期 ~10000 次 heap alloc
+- **预估优化收益**：~3-5 ms（kill 90% 堆分配）；但 worker 线程非 UI 紧急，用户感知不到差
+- **为何归档**：v0.13 stage 2 评估为「中 ROI 候选 1」，用户选方案 c 跳过 stage 3+ 优化。归档留 v0.14+ cycle 评估时重新决定（如 v0.14 重新选方案 b/c，本 TD 是首选优化点）
+- **预估工作量**：~300-400 行（field 类型 + build_parent_chain + ~10 个消费点 + 单元测试 + bench 更新）
 
 ---
 
@@ -325,7 +336,7 @@ stage 1 数字揭示：
 | 侦察报告疑点 | stage 2 实测验证 | 结论 |
 |---|---|---|
 | 1. CONTEXT.md 与代码不一致（HeavyWorker 1.5s → 2s） | stage 1 sidecar 已修 | ✅ 已闭环 |
-| 2. TUI 渲染层 format! 风暴 | bench_tui_draw 5.6 ms（**高估**，生产 < 1 ms） | ❌ 非瓶颈，归档 TD-42 |
+| 2. TUI 渲染层 format! 风暴 | bench_tui_draw 5.6 ms（**高估**，生产 < 1 ms） | ❌ 非瓶颈，归档 TD-44 |
 | 3. detail_view handles 每帧 to_lowercase | 未单独 bench，但 detail_view 仅在选中进程时渲染（每秒 60 帧但单实例） | ❌ 非热路径 |
 | 4. command_palette to_lowercase().contains 每帧 | **侦察报告误读**——line 813/912 在 `#[test]` 内 | ❌ 非问题 |
 | 5. parent_chain 每周期 clone Vec | bench_refresh_heavy 16.5 ms（**命中**，但 worker 线程不阻塞 UI） | ⚠ 候选 1（中 ROI） |
