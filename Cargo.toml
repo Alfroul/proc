@@ -115,9 +115,46 @@ nvidia = ["nvml-wrapper"]
 tempfile = "3"
 # v0.6.0 阶段 3：log_rotate 测试需要设置文件 mtime 模拟「8 天前的日志」。
 filetime = "0.2"
+# v0.13 阶段 1：criterion benchmark suite（ADR: 性能 baseline cycle 方案 A）。
+# 锁 0.5（最新稳定）。与 Rust MSRV 1.85 兼容（criterion 0.5 要求 Rust 1.70+）。
+# 不在 CI 跑（决策表 B），仅本地手跑——GitHub Actions 共享 runner 抖动大。
+criterion = "0.5"
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+# v0.13 阶段 1：bench profile 与 release 对齐（lto=thin + codegen-units=1），
+# 避免 benchmark 数字与 release 行为不一致。opt-level 默认 3 就够。
+[profile.bench]
+lto = "thin"
+codegen-units = 1
+
+# v0.13 阶段 1：6 个 hot path 的 criterion benchmark。
+# harness = false 是 criterion 标准要求——让 criterion_main! 接管 main 函数。
+# bench 文件路径 benches/{name}.rs，共享 fixture 在 benches/common/mod.rs。
+[[bench]]
+name = "bench_rebuild_sorted_cache"
+harness = false
+
+[[bench]]
+name = "bench_refresh_heavy"
+harness = false
+
+[[bench]]
+name = "bench_tui_draw"
+harness = false
+
+[[bench]]
+name = "bench_record_serialize"
+harness = false
+
+[[bench]]
+name = "bench_filter_expr_apply"
+harness = false
+
+[[bench]]
+name = "bench_search_hot_path"
+harness = false
