@@ -50,8 +50,12 @@ impl SignatureStatus {
     /// - `Unsigned` / `Revoked` → ⚠（与 stage-4.md 原方案 `Untrusted → ⚠` 对齐）
     /// - `Expired` / `UntrustedRoot` → ⚠（v0.12 阶段 3：有签名但有问题，与
     ///   Unsigned/Revoked 同档让用户立即看到红旗）
-    /// - `ChainError` → ❓（与 Unknown 同档——验证不完整，没有足够信息判定）
-    /// - `Unknown` → ❓
+    /// - `ChainError` → ❓（v0.12 阶段 3：链断裂 / 名称不匹配 / 签名无效——admin 下偶尔
+    ///   出现的真问题，需要 ❓ 高亮）
+    /// - `Unknown` → 空（v0.12.1：非 admin 启动 proc 时所有进程都返 Unknown，❓ 退化为
+    ///   噪音；admin 极少出现 API 失败的 Unknown 也归空。状态仍可在 Inspector Summary
+    ///   Tab 看到，避免进程列表全屏 ❓。原 v0.11 stage 4 设计把 Unknown 归 ❓ 是 admin
+    ///   场景优化，但忽略了非 admin 退化场景——见 REVIEW-14 后用户反馈）
     #[must_use]
     pub fn badge(self) -> &'static str {
         match self {
@@ -59,8 +63,8 @@ impl SignatureStatus {
             Self::Unsigned | Self::Revoked | Self::Expired | Self::UntrustedRoot => {
                 " \u{26A0}\u{FE0F}"
             } // ⚠️
-            Self::Unknown | Self::ChainError => " \u{2753}", // ❓
-            Self::Pending | Self::Signed => "",
+            Self::ChainError => " \u{2753}", // ❓
+            Self::Pending | Self::Signed | Self::Unknown => "",
         }
     }
 }

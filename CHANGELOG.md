@@ -9,6 +9,14 @@
 
 下次 cycle（v0.13.0+）的工作面：候选方向见下方 v0.12.0 段末尾「下一步候选」+ tech-debt v0.12 REVIEW-14 P2 归档（TD-38+）。
 
+## [0.12.1] - 2026-07-04
+
+v0.12.0 release 后用户实际使用反馈：**非 admin 启动 proc 时进程列表全屏 ❓**——`SignatureStatus::Unknown` badge 设计把 ❓ 用于「验证失败」红旗，但非 admin 场景下 `verify_signature` 直接返 Unknown（不调 `WinVerifyTrust`），全屏 ❓ 退化为噪音且失去区分作用。
+
+- Fix: **SignatureStatus::Unknown badge 从 ❓ 改空串**（与 Pending / Signed 同款「无信息不显示」原则）—— `src/security/signature.rs::SignatureStatus::badge` 的 `match` 把 `Unknown` 从 `Unknown | ChainError => ❓` 移到 `Pending | Signed | Unknown => ""`。`ChainError` 单独保留 ❓（admin 下偶尔出现的链断裂 / 名称不匹配 / 签名无效是真问题，需要高亮）。状态仍可在 Inspector Summary Tab 看到（`Display` 文案「未知（需管理员权限）」不变），进程列表不再有视觉噪音。原 v0.11 stage 4 设计把 Unknown 归 ❓ 是 admin 场景优化（API 失败时高亮），忽略了非 admin 退化场景——v0.12.1 修复后两个场景都正确。
+- Tests: `tests/test_signature.rs` 改 `badge_unknown_returns_question_mark` → `badge_unknown_returns_empty_to_avoid_noise_for_non_admin`；`badge_pending_and_signed_are_empty_to_avoid_column_jitter` → `badge_pending_signed_unknown_are_empty_to_avoid_column_jitter`（加 Unknown 断言）；`badge_chain_error_returns_question_mark` 注释更新（ChainError 单独保留 ❓）。
+- Docs: `src/tui/process_table.rs` 注释更新；README FAQ「proc 显示我的应用是 ⚠️（无签名）」+ emoji badge 列表更新；CONTEXT.md 演进历史加 v0.12.1 行。
+
 ## [0.12.0] - 2026-07-04
 
 v0.12.0 cycle 围绕 **Windows-only 平台定位**（ADR-0022 决策，移除全部 Linux/macOS 代码 + 历史遗留 eBPF / PSI / nvtop / nethogs 整模块删）+ **UX polish cycle**（修 v0.11 REVIEW-13 P2 归档的 12 个 TD）两条主线，分 6 阶段推进（stage 1 Spike / stage 2 Linux 移除 / stage 3 签名完整度 / stage 4 FilterExpr 修复 / stage 5 杂项 / stage 6 Review + 收尾）。**全量回归 1115 passed / 0 failed / 3 ignored**（v0.11.0 基线 1146 → -31：stage 2 删除 ~46 个 Linux 相关测试，加 stage 3-5 新测试 ~15 个，净减 31）；0 个新依赖进默认依赖图（windows-rs 既有 feature 复用 + 删除 libc / aya / aya-log / nvml-wrapper 之外的 Linux 依赖）。

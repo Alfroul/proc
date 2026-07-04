@@ -255,21 +255,26 @@ fn badge_expired_and_untrusted_root_return_warning_emoji() {
 
 #[test]
 fn badge_chain_error_returns_question_mark() {
-    // ChainError 与 Unknown 同档（验证不完整，没有足够信息判定）。
+    // ChainError 是链断裂 / 名称不匹配 / 签名无效——admin 下偶尔出现的真问题。
+    // v0.12.1：Unknown 改空串后，ChainError 单独保留 ❓ 让用户看到「验证不完整 + 有问题」。
     assert_eq!(SignatureStatus::ChainError.badge(), " \u{2753}"); // " ❓"
 }
 
 #[test]
-fn badge_unknown_returns_question_mark() {
-    assert_eq!(SignatureStatus::Unknown.badge(), " \u{2753}"); // " ❓"
+fn badge_unknown_returns_empty_to_avoid_noise_for_non_admin() {
+    // v0.12.1：Unknown 从 ❓ 改空串——非 admin 启动 proc 时所有进程都返 Unknown，
+    // 全屏 ❓ 退化为噪音。admin 极少出现 API 失败的 Unknown 也归空。状态仍可在
+    // Inspector Summary Tab 看到。与 Pending / Signed 同款「无信息不显示」原则。
+    assert_eq!(SignatureStatus::Unknown.badge(), "");
 }
 
 #[test]
-fn badge_pending_and_signed_are_empty_to_avoid_column_jitter() {
-    // 关键 UX 契约：Pending（默认值）/ Signed 不渲染占位，避免每行 name 列宽波动。
+fn badge_pending_signed_unknown_are_empty_to_avoid_column_jitter() {
+    // 关键 UX 契约：Pending（默认值）/ Signed / Unknown 不渲染占位，避免每行 name 列宽波动。
     // 与 v0.7 EcoQoS Non-Eco 处理一致（src/throttle.rs::EcoQoSState::badge）。
     assert_eq!(SignatureStatus::Pending.badge(), "");
     assert_eq!(SignatureStatus::Signed.badge(), "");
+    assert_eq!(SignatureStatus::Unknown.badge(), "");
 }
 
 // ── serde：兼容旧录屏（缺字段默认 Pending）────────────────────────────────

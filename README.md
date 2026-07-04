@@ -502,7 +502,7 @@ proc docker exec <container> bash -lc "env"       # exec 指定命令
 
 **进程名旁边的 🔒 / ⚠️ / ❓ 是什么？**<sup>v0.11.0</sup> 签名状态标记（ADR-0021）：🔒 Trusted（签名链追溯到微软 / 已知 CA）/ ⚠️ Unsigned 或 Revoked（无签名 / 签名被吊销）/ ❓ Unknown（验证失败 / 非管理员运行）。`Pending`（启动后头 1-2 个 heavy refresh 内的默认值）和 `Signed`（已签名但非受信 CA）不显示 emoji 避免列宽波动。Inspector Summary Tab 显示完整状态（如「签名: 受信签名 (微软/已知 CA)」）。CLI 走 `proc ls --filter 'security_score < 80'` 可过滤出扣分进程。详见 [ADR-0021](docs/adr/0021-process-signature-verification.md)。
 
-**proc 显示我的应用是 ⚠️（无签名），但我明明有签名？**<sup>v0.11.0</sup> 三步排查：(1) proc 是否以管理员身份运行？非 elevated 时 `verify_signature` 直接返回 Unknown（不调 `WinVerifyTrust`），所有进程显示 ❓ 而非 ⚠️；(2) 签名链是否完整？中间证书缺失会让 `WinVerifyTrust` 返 `TRUST_E_SUBJECT_NOT_SIGNED` 或链断裂错误（落入 Unknown）；(3) 是不是 `.cat` 文件签名？驱动 + 系统组件走 `.cat` 关联签名，`WinVerifyTrust` 直接验 `.exe` 会返 Unsigned——这是已知限制，留 TD。跑 `proc ls --json | jq '.[] | select(.signature_status=="Unsigned")'` 拿到完整列表后用 `sigcheck /a your.exe`（Sysinternals）交叉验证。
+**proc 显示我的应用是 ⚠️（无签名），但我明明有签名？**<sup>v0.11.0 · v0.12.1 改进</sup> 三步排查：(1) proc 是否以管理员身份运行？**非 elevated 时 `verify_signature` 直接返回 Unknown（不调 `WinVerifyTrust`），v0.12.1 起进程列表不显示任何 emoji（Unknown 与 Pending / Signed 同款空串），进 Inspector Summary Tab 才能看到「未知（需管理员权限）」状态**——以管理员身份重启 proc 即可激活 WinVerifyTrust 真实验证；(2) 签名链是否完整？中间证书缺失会让 `WinVerifyTrust` 返 `TRUST_E_SUBJECT_NOT_SIGNED` 或链断裂错误（落入 Unknown / ChainError）；(3) 是不是 `.cat` 文件签名？驱动 + 系统组件走 `.cat` 关联签名，`WinVerifyTrust` 直接验 `.exe` 会返 Unsigned——这是已知限制，留 TD。跑 `proc ls --json | jq '.[] | select(.signature_status=="Unsigned")'` 拿到完整列表后用 `sigcheck /a your.exe`（Sysinternals）交叉验证。
 
 **Windows Flow graph 怎么用？**<sup>v0.10.0</sup> Windows admin 自动启用 Schannel ETW worker（不需要 feature flag）：启动 proc → 端口面板按 `F` 切到 Flow 子视图 → curl / 浏览器触发 TLS handshake → 看到 SNI 列表。CLI 走 `proc flows` 同款显示，`proc flows --json` 输出含 `"source": "schannel"` 字段。非管理员 / Win10 < 1809 / x86 进程 → worker 启动失败 / 不 fire，UI 显示降级提示。详见 [ADR-0018](docs/adr/0018-windows-schannel-sni.md)。
 
@@ -552,7 +552,7 @@ proc docker exec <container> bash -lc "env"       # exec 指定命令
 - `Revoked`：扣 35（签名被吊销，曾经受信但被 CA 撤销）
 - `Unknown`：扣 5（Windows 非管理员降级 / 验证 API 错误）
 
-badge 显示：🔒 Trusted / ⚠️ Unsigned / Revoked / Expired / UntrustedRoot / ❓ Unknown / ChainError / 空 Pending / Signed。详见 [ADR-0021](docs/adr/0021-process-signature-verification.md)。
+badge 显示：🔒 Trusted / ⚠️ Unsigned / Revoked / Expired / UntrustedRoot / ❓ ChainError / 空 Pending / Signed / Unknown（v0.12.1：Unknown 从 ❓ 改空串避免非 admin 全屏噪音）。详见 [ADR-0021](docs/adr/0021-process-signature-verification.md)。
 
 **proc 显示 Adobe / Docker / Cisco 等进程是 ⚠️ 或扣分（Signed），但我配了 `trusted_signers.toml` 还是不升级到 🔒？**<sup>v0.12.0</sup> v0.12 阶段 3 TD-27 落地，三步排查：(1) **CompanyName 字段值**：`trusted_signers.toml` 匹配的是 FileVersion Information 的 `CompanyName`（不是 X.509 certificate subject CN）。用 `sigcheck /a your.exe`（Sysinternals）或 PowerShell `(Get-Item your.exe).VersionInfo.CompanyName` 看真实值。(2) **regex 大小写**：用户 `vendor_pattern` 默认大小写敏感——需要不敏感请加 `(?i)` 前缀（如 `(?i)^adobe`）。内置 24 vendor 列表（v0.12 扩）已含 Adobe / Cisco / Oracle / VMWare / Docker / Red Hat / Apache / Python / GitHub / Electron / AMD 等，零配置即生效。(3) **配置文件位置 + 格式**：`~/.config/proc/trusted_signers.toml`（Windows = `C:\Users\{user}\.config\proc\trusted_signers.toml`），格式 `[[signer]] name / vendor_pattern / reason(可选)`，TOML 解析失败 / regex 编译失败会**静默降级为空**——查 `~/.config/proc/proc.log` 看 `trusted_signers rule「xxx」vendor_pattern 正则编译失败` 警告。示例：
    ```toml
