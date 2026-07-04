@@ -520,6 +520,40 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 ---
 
 
+---
+
+## v0.14.0+ 候选补遗（v0.13.0 stage 3 REVIEW-v0.13 归档）
+
+> v0.13.0 cycle stage 3 Review 产出 [`docs/reviews/REVIEW-v0.13.md`](reviews/REVIEW-v0.13.md)，P2 = 1 项归档到此段。
+
+### TD-48（REVIEW-v0.13 P2-1）：未覆盖 hot path 的 criterion benchmark 补充
+
+**位置**：v0.13 stage 1 选了 6 个核心 hot path bench（搜索 / 排序 / heavy refresh / TUI 渲染 / 录屏序列化 / FilterExpr apply），未单独 bench 的 7 类路径：
+- `src/tui/port_table.rs`（port / flow 渲染）
+- `src/tui/sidebar.rs`（monitor_sidebar hardware 指标面板）
+- `src/view_models/docker_panel.rs`（containers / events / logs 渲染）
+- `src/tui/detail_view.rs:69-72`（handles 每帧 `to_lowercase()` + `format!("{:x}", raw_handle)`，侦察报告疑点 3）
+- `src/security/signature.rs` BackgroundScorer（admin 场景验签）
+- `src/filter/mod.rs::FilterExpr::apply_network`（Flow 视图 FilterExpr）
+- `src/security/flow.rs::check_flow_risk`（大规模 flows 评分）
+
+**现状**：上述路径要么在 worker 独立线程（signature verify / docker logs），要么低频触发（detail_view 仅在选中进程时）。stage 2 PERF-BASELINE 用侧面数据 / 线程归属 / 触发频率论证非瓶颈，但**缺直接 criterion 数字**——v0.14+ cycle 如要做「performance guard」（每次 PR 跑 bench 比对），这些路径无 baseline。
+
+**影响**：
+- 上述路径要么在 worker 独立线程，要么是低频触发——stage 2 已用「不在 UI 主线程 / 偶发触发 / 复用同款 AST」等侧面论证，但**没有直接 bench 数字**
+- 用户报「卡」时如涉及上述路径（如 docker_panel 渲染卡），无 baseline 对照定位
+
+**修复方案**：v0.14+ cycle 评估时，按优先级补 bench：
+1. **优先**：`signature verify async`（admin 场景每进程验签，BackgroundScorer 独立线程但影响评分延迟）+ `detail_view_handles`（侦察报告疑点 3，每帧渲染开销未实测）
+2. **中**：`port_table / docker_panel` 渲染（用户报「卡」时定位成本）
+3. **低**：`monitor_sidebar / Flow view filter / check_flow_risk`（间接路径或低频触发）
+
+**验证**：每个新 bench 跑 100 / 500 / 1000 进程 × 3 档 fixture，加入 PERF-BASELINE-v0.14 报告。
+
+**v0.13 stage 3 决策**：归档 v0.14+ cycle 评估。理由：(1) stage 2 拍板清单问题 4 用户已确认「不加」——v0.13 cycle 范围已锁定；(2) 上述路径在 stage 2 已用侧面数据论证非瓶颈，不阻断 v0.13.0 发布；(3) v0.14+ cycle 重新评估时，可基于 v0.13 baseline + 用户反馈重新选优先级。
+
+---
+
 ## 历史回顾
 
 - v0.6.0 Review（本文件来源）：`docs/reviews/REVIEW-7.md` 产出 1 P0 + 9 P1 + 14 P2。
