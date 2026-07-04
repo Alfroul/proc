@@ -179,69 +179,58 @@ pub(crate) fn verify_signature_with_policy(
     policy_override: Option<i32>,
     trusted_rules: &[TrustedSignersRule],
 ) -> SignatureStatus {
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(result) = policy_override {
-            return from_wintrust_result(result);
-        }
-
-        use windows::Win32::Security::WinTrust::{
-            WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_UNION_CHOICE,
-            WINTRUST_FILE_INFO, WinVerifyTrust,
-        };
-        use windows::core::PCWSTR;
-
-        if !crate::collect::is_elevated() {
-            return SignatureStatus::Unknown;
-        }
-
-        let path_wide: Vec<u16> = exe_path.encode_utf16().chain(std::iter::once(0)).collect();
-
-        unsafe {
-            let mut file_info = WINTRUST_FILE_INFO {
-                cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
-                pcwszFilePath: PCWSTR(path_wide.as_ptr()),
-                ..Default::default()
-            };
-
-            let mut trust_data = WINTRUST_DATA {
-                cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
-                dwUnionChoice: WINTRUST_DATA_UNION_CHOICE(1),
-                ..Default::default()
-            };
-            trust_data.Anonymous.pFile = &mut file_info;
-
-            let mut action_id = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-            let result = WinVerifyTrust(None, &mut action_id, &mut trust_data as *mut _ as *mut _);
-
-            let status = from_wintrust_result(result);
-            if matches!(status, SignatureStatus::Signed)
-                && let Some(company) = get_file_company_name(exe_path)
-                && (is_trusted_signer(&company)
-                    || super::trusted_signers::matches_any_rule(&company, trusted_rules))
-            {
-                return SignatureStatus::Trusted;
-            }
-            if matches!(status, SignatureStatus::Unknown) {
-                tracing::debug!(
-                    "WinVerifyTrust unknown error 0x{:08X} for {}",
-                    result as u32,
-                    exe_path
-                );
-            }
-            status
-        }
+    // v0.12.2（TD-38）：删 `#[cfg(not(target_os = "windows"))]` mock policy 块——
+    // proc 转为 Windows-only 后此分支永不编译；mock 路径（policy_override = Some）
+    // 在下方 Windows 分支开头的 `if let Some(result) = policy_override` 已短路。
+    if let Some(result) = policy_override {
+        return from_wintrust_result(result);
     }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        // 非 Windows 无 WinVerifyTrust API，仅走 mock policy 路径。
-        if let Some(result) = policy_override {
-            return from_wintrust_result(result);
+    use windows::Win32::Security::WinTrust::{
+        WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_UNION_CHOICE,
+        WINTRUST_FILE_INFO, WinVerifyTrust,
+    };
+    use windows::core::PCWSTR;
+
+    if !crate::collect::is_elevated() {
+        return SignatureStatus::Unknown;
+    }
+
+    let path_wide: Vec<u16> = exe_path.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let mut file_info = WINTRUST_FILE_INFO {
+            cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
+            pcwszFilePath: PCWSTR(path_wide.as_ptr()),
+            ..Default::default()
+        };
+
+        let mut trust_data = WINTRUST_DATA {
+            cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
+            dwUnionChoice: WINTRUST_DATA_UNION_CHOICE(1),
+            ..Default::default()
+        };
+        trust_data.Anonymous.pFile = &mut file_info;
+
+        let mut action_id = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+        let result = WinVerifyTrust(None, &mut action_id, &mut trust_data as *mut _ as *mut _);
+
+        let status = from_wintrust_result(result);
+        if matches!(status, SignatureStatus::Signed)
+            && let Some(company) = get_file_company_name(exe_path)
+            && (is_trusted_signer(&company)
+                || super::trusted_signers::matches_any_rule(&company, trusted_rules))
+        {
+            return SignatureStatus::Trusted;
         }
-        // 真实路径无 API 可调，返回 Unknown（非 elevated 等价语义）。
-        let _ = (exe_path, trusted_rules);
-        SignatureStatus::Unknown
+        if matches!(status, SignatureStatus::Unknown) {
+            tracing::debug!(
+                "WinVerifyTrust unknown error 0x{:08X} for {}",
+                result as u32,
+                exe_path
+            );
+        }
+        status
     }
 }
 

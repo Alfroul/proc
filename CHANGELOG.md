@@ -7,7 +7,19 @@
 
 ## [Unreleased]
 
-下次 cycle（v0.13.0+）的工作面：候选方向见下方 v0.12.0 段末尾「下一步候选」+ tech-debt v0.12 REVIEW-14 P2 归档（TD-38+）。
+下次 cycle（v0.13.0+）的工作面：候选方向见下方 v0.12.0 段末尾「下一步候选」+ tech-debt v0.12 REVIEW-14 P2 归档（TD-40 / TD-41，TD-38 / TD-39 / TD-42 / TD-43 已在 v0.12.2 闭环）。
+
+## [0.12.2] - 2026-07-04
+
+v0.12.0 release 后留下的 GitHub Actions 残留 + 可选 cfg gate 清理。v0.12 Windows-only 决策（ADR-0022）后 Linux / macOS CI 永远失败（TD-42），release.yml 还有 Linux / macOS build target（TD-43）；同时清理 v0.12 stage 2 cfg gate 清理时保留的两个跨平台残留块（TD-38 / TD-39，stage 6 REVIEW-14 P2 归档项，原「保留更安全」决策在 v0.12 release 稳定后翻盘）。
+
+- Fix: **TD-42（`.github/workflows/ci.yml` `check-linux` job 残留）** — 删除整个 `check-linux` job（原 ubuntu-latest 上跑全量 `cargo test --release` + cfg-gate 校验）。v0.12 stage 2 已删 `src/` Linux 路径，ubuntu-latest 上 `cargo build` 直接不通过，PR check 永远红叉。`check-macos` / `msrv` / `audit` 三个 job 保留（与 Windows-only 平台决策无冲突，`msrv` 验证 `rust-version = "1.85"` 声明 + `audit` 扫描 Cargo.lock 漏洞与平台无关）。
+- Fix: **TD-43（`.github/workflows/release.yml` Linux / macOS build target 残留）** — build matrix 从 5 个 target（`x86_64-pc-windows-msvc` / `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-gnu` / `aarch64-apple-darwin` / `x86_64-apple-darwin`）裁到 1 个（仅 `x86_64-pc-windows-msvc`）。同步删除 Linux musl tools 安装步 / Linux ebpf kernel + userspace 二进制构建步 / 对应的 Package / Upload artifact / Upload to Release 条件分支。`update-winget` job 不动（原本就只引用 Windows artifact）。
+- Removed: **TD-38（`src/security/signature.rs` mock policy 路径 cfg gate 残留）** — 删除 `verify_signature_with_policy` 内的 `#[cfg(not(target_os = "windows"))]` 块（约 10 行）+ 同步移除 Windows 分支上的 `#[cfg(target_os = "windows")]` 属性（proc 转为 Windows-only 后所有平台都是 Windows，attr 冗余）。mock policy 路径（`policy_override = Some(...)`）由函数顶部的 `if let Some(result) = policy_override` 短路，行为完全一致；7 个 `mock_policy_*` unit test 全过。
+- Removed: **TD-39（`tests/test_inspect.rs` macOS stub 测试 mod cfg gate 残留）** — 删除整个 `non_target_stubs` mod（约 30 行）。proc 转为 Windows-only 后此 mod 永不编译。文件顶部 doc comment 同步把「三类用例」改「两类用例」（删「跨平台：macOS 等非 Linux/Windows 平台返回 PermissionDenied」条目）。
+- Docs: tech-debt TD-38 / 39 / 42 / 43 标 ✅ Fixed in v0.12.2；CONTEXT.md 演进历史加 v0.12.2 行。
+- Tests: 全量回归 1115 passed / 0 failed / 3 ignored（v0.12.1 基线不变——TD-38 / 39 删的是 cfg-gated dead branch，无测试用例变化）。
+- Release: `git tag -a v0.12.2 -m "v0.12.2 patch：CI / release.yml Linux+macOS 残留清理 + TD-38 / TD-39 cfg gate 残留清理"`（等用户确认后 push）。
 
 ## [0.12.1] - 2026-07-04
 
@@ -26,7 +38,7 @@ v0.12.0 cycle 围绕 **Windows-only 平台定位**（ADR-0022 决策，移除全
 - **Win10 < 1809**：Schannel event 1793 不 fire（延续 v0.10.0 / v0.11.0 已知限制，TD-20）；worker 启动成功但 UI 显示 0 条 Schannel flow。
 - **Worker restart 3 次失败后仍永久死亡**：v0.11.0 落地的指数退避（5s/30s/5min）+ MAX_RETRIES=3 止损保持不变。
 - **DNS ETW 仅 Windows 管理员启用**：非管理员降级到 PowerShell fallback（v0.5.0 路径保留）。
-- **`.github/workflows/ci.yml` `check-linux` job 仍在**（TD-42，v0.13+ 整理候选）；用户主要本地 Windows 开发，GitHub Actions 是次要 CI。
+- ~~**`.github/workflows/ci.yml` `check-linux` job 仍在**（TD-42，v0.13+ 整理候选）；用户主要本地 Windows 开发，GitHub Actions 是次要 CI。~~ **TD-42 已在 v0.12.2 修复**——见 [0.12.2] 段。
 
 ### 阶段 6 — Review + 收尾 + tag v0.12.0（本次发布）
 

@@ -402,25 +402,25 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 ## v0.13.0+ 候选（v0.12.0 stage 6 REVIEW-14 P2 归档）
 
-> v0.12.0 cycle stage 6 全局 Review（详见 [`docs/reviews/REVIEW-14.md`](reviews/REVIEW-14.md)）产出 7 个 P2，归档为 TD-38 ~ TD-43。覆盖跨平台残留 cfg gate 清理 / regex DoS 防护 / SYSTEM_BOOT_ENTRIES 严格化 / CI workflow 更新等方向。
+> v0.12.0 cycle stage 6 全局 Review（详见 [`docs/reviews/REVIEW-14.md`](reviews/REVIEW-14.md)）产出 7 个 P2，归档为 TD-38 ~ TD-43。覆盖跨平台残留 cfg gate 清理 / regex DoS 防护 / SYSTEM_BOOT_ENTRIES 严格化 / CI workflow 更新等方向。**v0.12.2 闭环 4 项**（TD-38 / 39 / 42 / 43），剩余 TD-40 / TD-41 留 v0.13+。
 
-### TD-38（REVIEW-14 P2-1）：`signature.rs` mock policy 路径 cfg gate 残留
+### TD-38（REVIEW-14 P2-1）：`signature.rs` mock policy 路径 cfg gate 残留 ✅ Fixed in v0.12.2
 
 **位置**：`src/security/signature.rs:232`（`#[cfg(not(target_os = "windows"))]` 块）
 **现状**：v0.11 stage 4 ADR-0021 设计的 mock policy 测试入口——`policy_override` 路径让非 Windows CI 也能跑 mock HRESULT。v0.12 Windows-only 后此块永不编译（mock 路径在 Windows 分支 `if let Some(result) = policy_override` 已短路）。
 **影响**：代码冗余（约 10 行 dead branch），不影响功能；保留更安全（让代码能在非 Windows cargo check 通过）。
 **修复**：surgical 清理——删除 `#[cfg(not(target_os = "windows"))]` 块；mock policy 路径合并到 Windows 分支前的 `if let Some(result) = policy_override` 短路逻辑。
 **验证**：`cargo build --release` + 7 个 mock_policy_* unit test 全过。
-**v0.12.0 stage 6 决策**：不修。理由：(1) 不影响功能；(2) 保留让代码跨平台 cargo check 友好；(3) surgical 原则下「保留更安全」（stage 6 doc 跨平台审查项明确建议）。归档为 v0.13+ 代码质量候选。
+**v0.12.2 决策**：✅ **已修复**。删 `verify_signature_with_policy` 内的 `#[cfg(not(target_os = "windows"))]` 块 + 同步移除 Windows 分支上的 `#[cfg(target_os = "windows")]` 属性（proc 转为 Windows-only 后 attr 冗余）。7 个 `mock_policy_*` unit test 全过，行为完全一致（mock 路径由函数顶部的 `if let Some(result) = policy_override` 短路）。原 stage 6 决策「保留让代码跨平台 cargo check 友好」在 v0.12 release 稳定后翻盘——proc 已正式 Windows-only，不再追求跨平台 cargo check。
 
-### TD-39（REVIEW-14 P2-2）：`tests/test_inspect.rs` macOS stub 测试 mod cfg gate 残留
+### TD-39（REVIEW-14 P2-2）：`tests/test_inspect.rs` macOS stub 测试 mod cfg gate 残留 ✅ Fixed in v0.12.2
 
 **位置**：`tests/test_inspect.rs:97`（`#[cfg(not(any(target_os = "windows", target_os = "linux")))]`）
 **现状**：macOS / 其他非 Win/Linux 平台的 stub 测试 mod（env / dlls / handles / memory 在不支持平台返 PermissionDenied）。v0.12 Windows-only 后此 mod 永不编译。
 **影响**：约 30 行测试代码冗余，不影响功能；保留让代码能在 macOS cargo check 通过（贡献者用 macOS 开发时 cargo test 不报错）。
 **修复**：删除整个 `non_target_stubs` mod。
 **验证**：`cargo test --release` 全过（无 macOS 测试需要保留）。
-**v0.12.0 stage 6 决策**：不修。理由：(1) 不影响功能；(2) macOS 贡献者友好；(3) surgical 原则下「保留更安全」。归档为 v0.13+ 测试清理候选。
+**v0.12.2 决策**：✅ **已修复**。删整个 `non_target_stubs` mod；文件顶部 doc comment 同步把「三类用例」改「两类用例」（删 macOS 跨平台条目）。原 stage 6 决策「macOS 贡献者友好」在 v0.12 release 稳定后翻盘——贡献者实际只在 Windows 开发，保留 dead mod 反而误导。
 
 ### TD-40（REVIEW-14 P2-3）：`trusted_signers.toml` regex 无复杂度限制
 
@@ -440,23 +440,23 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **验证**：构造非系统目录的 `services.exe` → 验证不被白名单命中。
 **v0.12.0 stage 6 决策**：不修。理由：(1) 攻击场景需先 privilege escalation，安全评分已是事后防线；(2) 修复需引入新的 windows-rs API 调用 + 缓存机制（性能影响）；(3) surgical 原则下当前实现可接受。归档为 v0.13+ 安全候选。
 
-### TD-42（REVIEW-14 P2-6）：`.github/workflows/ci.yml` 仍有 `check-linux` job
+### TD-42（REVIEW-14 P2-6）：`.github/workflows/ci.yml` 仍有 `check-linux` job ✅ Fixed in v0.12.2
 
 **位置**：`.github/workflows/ci.yml:36-42`（`check-linux` job 在 ubuntu-latest 上跑全量 cargo test）
 **现状**：v0.12 Windows-only 后 Linux CI 永远失败（src/ Linux 路径已删，ubuntu-latest 上 cargo build 不通过）。stage 2 doc 任务 7 应删但未删。
 **影响**：GitHub Actions PR check 永远红叉，掩盖真正的 CI 问题；contributor 困惑。
 **修复**：删除整个 `check-linux` job。
 **验证**：GitHub Actions PR check 不再有 Linux job。
-**v0.12.0 stage 6 决策**：不修。理由：(1) 用户主要本地 Windows 开发，GitHub Actions 是次要 CI；(2) 修复需评估是否同时删 `.github/workflows/release.yml` 的 Linux target（stage 2 doc 任务 7 也要求但未做）；(3) 归档为 v0.13+ CI 整理候选（连同 release.yml 一并处理）。**注**：本 TD 在用户确认 v0.12 release 流程前可手动 skip。
+**v0.12.2 决策**：✅ **已修复**。删整个 `check-linux` job。`check-macos` / `msrv` / `audit` 三个 job 保留（`msrv` 验证 `rust-version = "1.85"` + `audit` 扫描 Cargo.lock 漏洞，与平台无关；`check-macos` 即使 cargo check 失败也只是黄叉不阻断 master push，留着无害）。原 stage 6 决策「归档为 v0.13+ CI 整理候选」在 v0.12.0 release 稳定后翻盘——TD-43 同本批次处理。
 
-### TD-43（REVIEW-14 P2-7）：`.github/workflows/release.yml` Linux / macOS target 应删
+### TD-43（REVIEW-14 P2-7）：`.github/workflows/release.yml` Linux / macOS target 应删 ✅ Fixed in v0.12.2
 
 **位置**：`.github/workflows/release.yml`（如有 Linux / macOS build matrix target）
 **现状**：v0.12 Windows-only 后 Linux / macOS build target 永远失败（src/ Linux 路径已删）。stage 2 doc 任务 7 应删但未删。
 **影响**：release workflow 触发时 Linux / macOS build 步骤失败，整个 release 卡住。
 **修复**：删 Linux / macOS build target，仅保留 `x86_64-pc-windows-msvc`。
 **验证**：触发 release workflow 全过。
-**v0.12.0 stage 6 决策**：不修。理由：(1) v0.12.0 tag 不 push（stage 6 doc 任务 10），release workflow 不触发；(2) 修复需评估 release.yml 完整结构（可能涉及 binary rename / archive 命名）；(3) 归档为 v0.13+ release 整理候选（与 TD-42 一同处理）。
+**v0.12.2 决策**：✅ **已修复**。build matrix 从 5 target 裁到 1 target（仅 `x86_64-pc-windows-msvc`），同步删 Linux musl tools 安装步 / Linux ebpf kernel + userspace 二进制构建步 / 对应的 Package / Upload artifact / Upload to Release 条件分支。`update-winget` job 不动（原本只引用 Windows artifact）。
 
 ---
 

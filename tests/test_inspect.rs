@@ -1,9 +1,8 @@
 //! 阶段 12 — Inspector v1 数据层集成测试（ADR-0004）。
 //!
-//! 三类用例：
+//! 两类用例：
 //! 1. 自己进程：env 应含 PATH，dlls 应非空，net 应返回 Ok。
-//! 2. 跨平台：macOS 等非 Linux/Windows 平台返回 PermissionDenied。
-//! 3. `inspect()` 聚合：三个 Vec 至少能拿到一项数据。
+//! 2. `inspect()` 聚合：三个 Vec 至少能拿到一项数据。
 
 use proc::inspect::{self, DllInfo, EnvVar, InspectionData};
 
@@ -91,34 +90,9 @@ fn unknown_pid_returns_err_or_empty() {
 }
 
 // ===========================================================================
-// 非 Linux/Windows 平台（macOS）走 PermissionDenied stub
+// v0.12.2（TD-39）：删 macOS / 其他非 Win/Linux 平台的 stub 测试 mod——
+// proc 转为 Windows-only 后此 mod 永不编译，原 cfg gate 残留清理。
 // ===========================================================================
-
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
-mod non_target_stubs {
-    use proc::error::ProcError;
-    use proc::inspect::{dlls, env};
-
-    #[test]
-    fn env_unsupported_platform() {
-        let err = env::collect_env(std::process::id()).unwrap_err();
-        assert!(
-            matches!(err, ProcError::PermissionDenied { .. }),
-            "got {:?}",
-            err
-        );
-    }
-
-    #[test]
-    fn dlls_unsupported_platform() {
-        let err = dlls::collect_dlls(std::process::id()).unwrap_err();
-        assert!(
-            matches!(err, ProcError::PermissionDenied { .. }),
-            "got {:?}",
-            err
-        );
-    }
-}
 
 // ===========================================================================
 // 阶段 4：A1 handles + A3 memory 集成测试
