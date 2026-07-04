@@ -7,7 +7,64 @@
 
 ## [Unreleased]
 
-下次 cycle（v0.13.0+）的工作面：候选方向见下方 v0.12.0 段末尾「下一步候选」+ tech-debt v0.12 REVIEW-14 P2 归档（TD-40 / TD-41，TD-38 / TD-39 / TD-42 / TD-43 已在 v0.12.2 闭环）。
+下次 cycle（v0.14.0+）的候选方向：基于 v0.13 PERF-BASELINE 报告（6 个 criterion benchmark × 多档 fixture 共 25 数据点，proc 当前架构在 1000 进程规模下无显著性能瓶颈）+ tech-debt v0.14.0+ 候选段（TD-44 / TD-45 / TD-46 / TD-47 stage 2 PERF-BASELINE 归档 + TD-48 stage 3 REVIEW-v0.13 归档）。可选 theme：(1) 性能优化 cycle（首选 TD-47 parent_chain Arc 重构，唯一有量化 before/after 数字的候选）；(2) 录屏回放 v2 / 多 Inspector 对比 / 用户报 bug 一键诊断包等用户面向新功能；(3) App 上帝对象继续拆（代码质量 cycle）。由用户在新 cycle brainstorm 时拍板。
+
+## [0.13.0] - 2026-07-05
+
+v0.13.0 cycle 是 **性能验证 cycle**（**方案 c**：4 stage 收尾，不动业务代码）。cycle 主线：建立 criterion benchmark suite + 产出 PERF-BASELINE 瓶颈分析报告 + 用户拍板跳过 stage 3+ 优化（proc 当前架构在 1000 进程规模下无显著瓶颈）+ cycle 全局 Review + 收尾 tag。
+
+**cycle 4 stage 全交付**（stage 1 Spike / stage 2 Slice / stage 3 Review / stage 4 收尾）：
+
+### 阶段 4 — 批量修复与收尾 + tag v0.13.0（本次发布）
+
+> 本次发布 commit：Cargo.toml 0.12.2 → 0.13.0；CHANGELOG / README / CONTEXT 同步 v0.13.0；4 个 stage doc 头部加 ✅ 已发布标记；REVIEW-v0.13 P0/P1/P2 状态闭环；tech-debt TD-44 ~ TD-48 终态确认（4 项 stage 2 归档 + 1 项 stage 3 归档）。
+
+- Docs: CONTEXT.md 演进历史加 v0.13.0 阶段 4 行（与 stage 1/2/3 行对齐，本地 .gitignore 不入 commit）；brainstorm.md 阶段总览表 4/4 ✅ + 末尾加 cycle 总结段。
+- Release: `git tag -a v0.13.0 -m "v0.13.0：性能 baseline cycle（criterion suite + PERF-BASELINE 报告，方案 c 无业务代码改动）"`（等用户确认后 push）。
+
+### 阶段 3 — Review（cycle 全局 Review）
+
+> 产出 `docs/reviews/REVIEW-v0.13.md`（~370 行）：6 子项审查（代码质量 / 架构 / 性能 / 完整性 / 安全跨平台 / P0-P1-P2 列表），分级 **P0 0 / P1 3 / P2 1**。P1 集中在文档完整性（CONTEXT 演进历史缺 stage 2 行 + stage 1/2 docs 头部 ✅ 标记），不影响 baseline 数字 / bench 基础设施 / PERF-BASELINE 报告质量。
+
+- Docs: **`docs/reviews/REVIEW-v0.13.md`**（新）— cycle 全局 Review 报告。审查覆盖 stage 1-2 全部产出（criterion 0.5 dev-dep + `[profile.bench]` 配置 + 6 个 bench 文件 + `benches/common/mod.rs` 共享 fixture builder + PERF-BASELINE 报告 + 用户拍板方案 c + 4 候选归档决策），分级 **P0 0 / P1 3 / P2 1**。无阻断问题（基线 1115 passed + fmt/clippy/no-default-features build/bench --no-run 全通过）；P1 集中在完整性（CONTEXT 演进历史 / stage docs ✅ / tech-debt 归档），不影响核心功能。
+- Fix: **REVIEW-v0.13 P1-1 ~ P1-3** — CONTEXT.md 加 stage 2 行（stage 1 行已在 stage 1 落地时加，stage 2 行 stage 3 Review 时发现漏补）；stage 1 / 2 / 3 docs 头部加 ✅ 已完成标记（与 v0.11 / v0.12 stage docs 同款惯例）；tech-debt TD-44 ~ TD-48 终态确认（v0.14.0+ 候选段 + v0.14.0+ 候选补遗段）。
+- Docs: tech-debt.md 加 v0.14.0+ 候选补遗段（TD-48 = 未覆盖 hot path 的 criterion benchmark 补充，留 v0.14+ cycle 评估）。
+- Tests: 全量回归 1115 passed / 0 failed / 3 ignored（v0.12.2 → v0.13 stage 1 → v0.13 stage 2 → v0.13 stage 3 全程基线不变——cycle 不动业务代码）。
+
+### 阶段 2 — Slice（PERF-BASELINE 报告 + 方案 c 拍板）
+
+> 产出 `docs/reviews/PERF-BASELINE-v0.13.md`（~350 行）：6 个 bench × 多档 fixture 共 25 数据点表格 + Pareto 排序 + 3 候选 ROI 评估 + 方案 a/b/c + 用户拍板清单 4 问题 + 归档段 TD-44 ~ TD-47 + 附录侦察报告疑点对照表 8 项。**用户选方案 c**：cycle 缩到 4 stage（baseline + 报告 + Review + 收尾），4 候选（1 中 ROI parent_chain Arc 重构 + 2 低 ROI tui_draw format! / record deserialize + 1 侦察报告误读 command_palette fuzzy）全部归档 TD-44 ~ TD-47 留 v0.14+ cycle 评估。**核心结论**：proc 当前架构在 1000 进程规模下无显著性能瓶颈；唯一 mean > 5 ms 的 hot path（parent_chain 16.5 ms @ 1000 进程）在 worker 独立线程不阻塞 UI 帧预算（0.83% 持续 CPU）；其他 5 个 hot path 全部 < 1 ms 用户无感区。
+
+- Docs: **`docs/reviews/PERF-BASELINE-v0.13.md`**（新）— v0.13 cycle stage 2 Slice 产出（~350 行）。25 数据点表格（含 mean / median / stddev / stddev 占比 / throughput 5 列）+ Pareto 排序表（按 1000 进程 mean 排序的 top 10 hot path）+ 3 候选优化点 ROI 评估（候选 1 parent_chain Arc 重构中 ROI / 候选 2 tui_draw format! 风暴低 ROI bench 高估 / 候选 3 record deserialize 加速低 ROI 兼容性风险高）+ cycle 后续 stage 建议 a/b/c 三方案 + 用户拍板清单 4 问题 + 归档段 TD-44 ~ TD-47 + 附录侦察报告 8 个疑点对照表（已闭环 1 + 误读 1 + 命中但非用户感知 1 + 非瓶颈 5）。
+- Docs: **`docs/stages/v0.13-brainstorm.md`**（用户拍板记录段）— 加「用户拍板记录（2026-07-04）」段说明方案 c 理由（3 条）+ 候选归档说明；阶段总览表 stage 1 / 2 标 ✅；stage 数量自适应规则段标 ✅ 命中第 1 条（无显著瓶颈 → 4 stage 收尾）。
+- Docs: **`docs/tech-debt.md`** 加 v0.14.0+ 候选段（TD-44 tui_draw format! / TD-45 record deserialize / TD-46 command_palette fuzzy 误读纠错 / TD-47 parent_chain Arc 重构中 ROI 首选）。
+- Tests: 无新增（不动业务代码，仅产出报告）。
+
+### 阶段 1 — Spike（criterion 基础设施 + 6 个 benchmark + sidecar 文档修复）
+
+> 铺设 criterion benchmark 基础设施 + 写 6 个 hot path 的 benchmark + 跑出 baseline 数字。本阶段**不动业务代码**（Spike 原则，除 sidecar 文档修复）。
+
+- Added: **criterion 0.5 dev-dependency** — `[dev-dependencies]` 段加 `criterion = "0.5"`（与 MSRV 1.85 兼容，0.5 要求 Rust 1.70+）。`[profile.bench]` 段加 `lto = "thin"` + `codegen-units = 1`（与 release profile 对齐，避免 benchmark 数字与 release 行为不一致）。6 个 `[[bench]]` entry `harness = false` 让 `criterion_main!` 接管 main。
+- Added: **`benches/common/mod.rs`** 共享 fixture builder（~235 行）— `make_processes` / `make_processes_map` / `make_flows` / `make_ui_frame` 4 个 builder。fixture 完全 fake（不调 sysinfo / 不读真实进程 / 不依赖 admin），用 5 类 vendor 进程名（chrome / firefox / svchost / explorer / powershell）+ pid 派生 cpu_usage（`pid % 30` ∈ [0, 29]）+ pid 派生 memory（`pid * 8MB`）+ 线性 parent_chain（pid N 指向 pid N-1）。这让 benchmark 在任何机器 / CI / developer 数字有可比性。
+- Added: **6 个 benchmark 文件** — `bench_rebuild_sorted_cache.rs`（搜索 + 排序 hot path，含 substring / filter_expr 两档 query mode）/ `bench_refresh_heavy.rs`（HeavyWorker parent_chain 批量构建单轮）/ `bench_tui_draw.rs`（ratatui TestBackend 单帧渲染，5 个 panel case）/ `bench_record_serialize.rs`（UiFrame bincode 序列化 + 反序列化）/ `bench_filter_expr_apply.rs`（FilterExpr apply 4 类表达式：cpu_gt / regex / cpu_and_mem / sni_in HashSet）/ `bench_search_hot_path.rs`（搜索按键 → filter 全链路，3 档 query 长度）。每 bench 用 `criterion::black_box` 防优化器消除 + `Throughput::Elements` 标注 + `iter_batched` 避免状态泄漏。
+- Docs: **CONTEXT.md 1.5s → 2s 文档不一致修复**（HeavyWorker 周期）— 侦察报告发现 CONTEXT.md 多处写 `HeavyWorker 1.5s`（包括当前术语段 + v0.6.0 阶段 4 演进历史段），但 `src/collect.rs:1868` 实际 `pub const HEAVY_REFRESH_INTERVAL: Duration = Duration::from_secs(2)` = **2 秒**。这是 5+ cycle 流传的文档漂移——v0.6.0 阶段 4 重采改造时可能临时把周期从 1.5s 调到 2s（更稳定的 sysinfo CPU 采样窗口）但文档没同步。stage 1 sidecar 修，零代码改动。**CONTEXT.md 是 .gitignore 私有文件，commit 不含此文件改动**。
+- Docs: stage 1 doc 末尾「Baseline 数字」段填 25 数据点 + 数字环境 + 6 个 bench 子段 + 关键洞察 5 条。
+- Tests: 全量回归 1115 passed / 0 failed / 3 ignored（v0.12.2 基线不变——criterion 是 dev-dep，不影响 release 依赖图）。
+
+**已知限制（v0.13.0 不引入新限制）**：
+
+延续 v0.12.0 / v0.12.1 / v0.12.2 的 5 条已知限制：(1) Windows-only 平台（ADR-0022）；(2) Win10 < 1809 Schannel event 1793 不 fire（TD-20）；(3) Worker restart 3 次失败后永久死亡；(4) DNS ETW 仅 Windows 管理员启用；(5) v0.12.2 已修 TD-42 / TD-43。v0.13 cycle 全程不动业务代码，不引入新限制。
+
+**关键数字（来自 PERF-BASELINE-v0.13.md）**：
+
+| hot path | 1000 进程 mean | 线程归属 | 用户感知 |
+|---|---|---|---|
+| `refresh_heavy_parent_chain` | 16.5 ms | worker（独立线程，2s 周期 = 0.83% CPU） | 无（不阻塞 UI） |
+| `tui_draw_process_table` | 5.6 ms（**bench 高估**，生产 < 1 ms） | UI 主线程 | 无（真实 < 1 ms） |
+| `rebuild_sorted_cache` (filter_expr) | 270 µs | UI 主线程 | 无（< 1 ms） |
+| `record_deserialize` | 165 µs | replay 主线程（偶发） | 无 |
+| `filter_expr_apply` (regex) @ 500 | 124 µs | UI 主线程 | 无 |
+| 其他 4 个 hot path | < 100 µs | 各 | 无 |
 
 ## [0.12.2] - 2026-07-04
 

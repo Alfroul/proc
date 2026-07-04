@@ -2,6 +2,8 @@
 
 Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中。**Windows-only 应用**（Windows 10 1809+ / Windows 11 x64，详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。
 
+> **v0.13.0（2026-07-05）— 性能 baseline cycle**：建立 criterion benchmark suite（6 个 hot path × 多档 fixture = 25 数据点）+ 产出 [PERF-BASELINE 报告](docs/reviews/PERF-BASELINE-v0.13.md)。**用户拍板方案 c**：验证 proc 当前架构在 1000 进程规模下无显著性能瓶颈，跳过 stage 3+ 优化。cycle 全程**不动业务代码**（1115 passed / 0 failed / 3 ignored 基线不变）；4 个候选项（parent_chain Arc 重构 / tui format! 风暴 / record deserialize 加速 / command_palette fuzzy）归档 tech-debt [TD-44/45/46/47](docs/tech-debt.md) 留 v0.14+ cycle 评估（含 1 个侦察报告误读纠错）。
+
 > **v0.12.0（2026-07-04）** Windows-only 平台定位 + UX polish cycle：**ADR-0022 锁定 Windows-only 决策**（移除全部 Linux/macOS 代码——src/ebpf/ 整模块 + src/psi.rs + nvtop / nethogs / unsupported.rs 删 + ~25 文件 cfg gate 清理）/ **签名验证完整度**（SignatureStatus 9 状态机加 Expired/UntrustedRoot/ChainError + TRUSTED_SIGNERS 扩到 24 vendor + 用户配置 `trusted_signers.toml`）/ **FilterExpr 修复**（`mem > 50%` 按总内存换算 silent bug + regex `\/` escape 让 CIDR / URL pattern 能写）/ **6 个 v0.11 REVIEW-13 P2 修复**（diag JSON 加 dns_collector / NetworkIn HashSet O(1) / R17 系统启动白名单 / R18 Downloads 去重 / property_at_index lifetime 修正 / MCP DNS 持久 collector）。全量回归 1115 tests passed / 0 failed。详见 [CHANGELOG](CHANGELOG.md)。
 
 > **已知限制**：**Windows-only 平台**（v0.12 起 proc 转为 Windows-only，Linux / macOS 用户迁移路径 `git checkout v0.11.0`）；Win10 < 1809 admin 下 Schannel event 1793 不 fire；worker restart 3 次失败后仍永久死亡；DNS ETW 仅 Windows 管理员启用（非 admin 走 PowerShell fallback）。详见 [tech-debt](docs/tech-debt.md)。
@@ -581,6 +583,19 @@ RUST_LOG=proc::port_map=debug proc ls    # CLI 子命令也生效
 未设置 `RUST_LOG` 时默认级别为 `info`。
 
 **如何报 worker 性能问题？**<sup>v0.6.0</sup> 跑 `proc diag` 输出所有 worker 的 metrics JSON（avg_us/max_us/polls/drops/last_error），附在 bug 报告里。TUI 内按 `?` 进入帮助页也可看精简版（带 `✓` / `⚠` 健康徽章）。
+
+## Benchmark
+
+v0.13.0 起仓库含 criterion benchmark suite（6 个 hot path：搜索 / 排序 / heavy refresh / TUI 渲染 / 录屏序列化 / FilterExpr apply）。本地跑：
+
+```bash
+cargo bench                                  # 跑全部 6 个 benchmark
+cargo bench --bench bench_refresh_heavy      # 单独跑一个
+```
+
+输出在 `target/criterion/<name>/<fixture>/new/estimates.json`（含 mean / median / stddev）。**不在 CI 跑**——criterion 在 GitHub Actions 共享 runner 抖动大，仅本地手跑。
+
+当前 baseline 数字（13th Gen Intel i7-13700HX / Win11 / Rust 1.95.0）见 [`docs/reviews/PERF-BASELINE-v0.13.md`](docs/reviews/PERF-BASELINE-v0.13.md)。**核心结论**：proc 当前架构在 1000 进程规模下无显著性能瓶颈；唯一 mean > 5 ms 的 hot path（parent_chain 16.5 ms @ 1000 进程）在 worker 独立线程不阻塞 UI 帧预算。报「卡」时附 `cargo bench` 数字可大幅降低定位成本。
 
 ## License
 
