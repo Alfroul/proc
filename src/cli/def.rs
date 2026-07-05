@@ -216,6 +216,11 @@ pub enum Command {
     Replay {
         /// 录制文件路径
         file: std::path::PathBuf,
+
+        /// 仅显示录屏元数据（不开 TUI）。v0.14 stage 1 落地，读 v3 footer
+        /// 或 v1/v2 `.prec.idx` sidecar 后输出帧数 / 时长 / 异常数 / 最高 CPU 等。
+        #[arg(long)]
+        info: bool,
     },
 
     /// 导出当前进程快照

@@ -88,7 +88,7 @@ impl ReplayController {
     #[must_use]
     pub fn current_frame(&self) -> Option<crate::record::UiFrame> {
         let idx = self.timeline_state.as_ref()?.current_frame;
-        self.replay_player.as_ref()?.frame_at(idx).cloned()
+        self.replay_player.as_ref()?.frame_at(idx)
     }
 
     /// 当前帧对应的 `AppMode`（用于 TUI 渲染录制时活跃的面板）。

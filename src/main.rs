@@ -39,7 +39,7 @@ fn main() {
         if path.exists() {
             let _log_guard = init_tracing();
             install_panic_hook();
-            cli::record::run_replay(&path);
+            cli::record::run_replay(&path, false);
             return;
         }
     }
@@ -50,7 +50,7 @@ fn main() {
         if path.exists() {
             let _log_guard = init_tracing();
             install_panic_hook();
-            cli::record::run_replay(&path);
+            cli::record::run_replay(&path, false);
             return;
         }
     }

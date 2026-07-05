@@ -71,7 +71,7 @@ pub fn run_subcommand(cmd: &Command) {
             filter,
         } => flows::run_flows(limit, *json, filter.as_deref()),
         Command::Record { output } => record::run_record(output),
-        Command::Replay { file } => record::run_replay(file),
+        Command::Replay { file, info } => record::run_replay(file, *info),
         Command::Export {
             format,
             output,
