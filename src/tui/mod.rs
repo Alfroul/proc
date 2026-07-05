@@ -96,6 +96,10 @@ pub fn run_app(terminal: &mut Tui, app: &mut App) -> Result<()> {
             let path = default_vt_recording_path();
             match VtRecorder::start(path, size.width, size.height) {
                 Ok(rec) => {
+                    // v0.14 stage 2：把录屏路径告诉 App（停止时 flush 书签 sidecar 用），
+                    // 并复位帧计数 / 累积书签（防止上一轮录屏残留）。
+                    app.set_recording_path(rec.path().clone());
+                    app.set_recording_frame_count(0);
                     app.set_status("VT100 录制已开始，按 Shift+R 停止".to_string());
                     vt_recorder = Some(rec);
                 }
@@ -112,6 +116,9 @@ pub fn run_app(terminal: &mut Tui, app: &mut App) -> Result<()> {
                 Ok(path) => app.set_status(format!("录制已保存: {}", path.display())),
                 Err(e) => app.set_status(format!("录制保存失败: {}", e)),
             }
+            // v0.14 stage 2：录制停止 → flush 累积书签到 .prec.bookmarks.json sidecar。
+            // recorder.stop() 完成后再调（保证 sidecar 写时录屏本体已落盘，size/mtime 稳定）。
+            app.flush_recording_bookmarks();
         }
 
         if data_changed || app.pending_redraw {
@@ -131,9 +138,10 @@ pub fn run_app(terminal: &mut Tui, app: &mut App) -> Result<()> {
             }
         }
 
-        // Update recording elapsed in App for sidebar display
+        // Update recording elapsed + frame count in App for sidebar display + 书签 frame_idx
         if let Some(ref rec) = vt_recorder {
             app.set_recording_elapsed(rec.elapsed_secs());
+            app.set_recording_frame_count(rec.frame_count());
         }
 
         let elapsed = start.elapsed();
@@ -146,6 +154,8 @@ pub fn run_app(terminal: &mut Tui, app: &mut App) -> Result<()> {
     // thread and flushes the underlying file.
     if let Some(rec) = vt_recorder.take() {
         rec.stop().ok();
+        // v0.14 stage 2：异常退出路径也 flush 书签（避免 Ctrl+C 丢书签）。
+        app.flush_recording_bookmarks();
     }
 
     app.shutdown();

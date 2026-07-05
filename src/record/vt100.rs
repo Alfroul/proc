@@ -242,6 +242,9 @@ pub struct VtRecorder {
     last_capture: Instant,
     path: PathBuf,
     stopped: bool,
+    /// v0.14 stage 2：成功 capture 的帧数（writer 线程 fetch_add 后主线程 load）。
+    /// 让录制中按 `b` 添加书签能拿到当前帧索引。
+    frame_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl VtRecorder {
@@ -268,6 +271,10 @@ impl VtRecorder {
 
         let (tx, rx) = mpsc::channel::<RecorderMsg>();
 
+        // v0.14 stage 2：capture 计数共享给主线程，让录制中按 `b` 能拿到当前帧索引。
+        let frame_count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let frame_count_writer = std::sync::Arc::clone(&frame_count);
+
         let thread = std::thread::Builder::new()
             .name("vt-recorder".to_string())
             .spawn(move || {
@@ -279,6 +286,9 @@ impl VtRecorder {
                                 let _ = file.write_all(&(bytes.len() as u64).to_le_bytes());
                                 let _ = file.write_all(&bytes);
                                 let _ = file.flush();
+                                // v0.14 stage 2：每写一帧 fetch_add（让主线程能 load 出当前帧数）
+                                frame_count_writer
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                         RecorderMsg::Stop => {
@@ -296,6 +306,7 @@ impl VtRecorder {
             last_capture: Instant::now() - std::time::Duration::from_millis(MIN_CAPTURE_MS),
             path,
             stopped: false,
+            frame_count,
         })
     }
 
@@ -307,6 +318,13 @@ impl VtRecorder {
         let frame = VtFrame::from_buffer(buffer, area, ts);
         let _ = self.tx.send(RecorderMsg::Frame(frame));
         self.last_capture = Instant::now();
+    }
+
+    /// v0.14 stage 2：成功写出的帧数（writer 线程 fetch_add 后主线程 load）。
+    /// 让录制中按 `b` 添加书签能拿到当前帧索引。
+    #[must_use]
+    pub fn frame_count(&self) -> usize {
+        self.frame_count.load(std::sync::atomic::Ordering::Relaxed) as usize
     }
 
     pub fn stop(mut self) -> anyhow::Result<PathBuf> {

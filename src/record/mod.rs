@@ -1,3 +1,4 @@
+pub mod bookmark;
 pub mod conversions;
 pub mod frame;
 pub mod reader;
@@ -5,6 +6,7 @@ pub mod sidecar;
 pub mod vt100;
 pub mod writer;
 
+pub use bookmark::{Bookmark, BookmarkFile, BookmarkPanelState};
 pub use frame::{
     FOOTER_MAGIC, FOOTER_TRAILER_LEN, FrameProcess, RECORDING_MAGIC, RECORDING_VERSION,
     RecordingFooter, RecordingHeader, UiFrame,

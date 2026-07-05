@@ -6,11 +6,14 @@
 //! `handle_key` / `tick` 返回 [`ReplayAction`] 枚举：副作用（写 `should_quit` /
 //! 把当前帧应用到 panels）通过 action 让 [`crate::app::App`] 派发，避免
 //! controller 反向依赖 App 的 15+ panel 字段（参考 `InspectorController`）。
+//!
+//! v0.14 stage 2：加 `bookmarks: Option<BookmarkFile>` + `bookmark_panel:
+//! Option<BookmarkPanelState>`，`B` 键打开书签面板，Up/Down/Enter/`e`/`d`/Esc 控制。
 
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::app_panel::AppMode;
-use crate::record::Player;
+use crate::record::{BookmarkFile, BookmarkPanelState, Player};
 
 /// 录屏回放速度档位。`Half` = 0.5x（每两个 tick 推进 1 帧），
 /// `Normal` = 1x，`Double` = 2x，`Quad` = 4x。
@@ -51,6 +54,10 @@ pub struct TimelineState {
 pub struct ReplayController {
     pub replay_player: Option<Player>,
     pub timeline_state: Option<TimelineState>,
+    /// v0.14 stage 2：书签 sidecar（start 时一次性 load；add/edit/delete 后写盘）。
+    pub bookmarks: Option<BookmarkFile>,
+    /// v0.14 stage 2：`B` 键打开的书签面板状态。None=未打开 / Some=打开中。
+    pub bookmark_panel: Option<BookmarkPanelState>,
 }
 
 impl Default for ReplayController {
@@ -65,6 +72,8 @@ impl ReplayController {
         Self {
             replay_player: None,
             timeline_state: None,
+            bookmarks: None,
+            bookmark_panel: None,
         }
     }
 
@@ -72,6 +81,8 @@ impl ReplayController {
     /// 调用方负责把首帧应用到 panels（[`crate::app::App::apply_replay_frame`]）。
     pub fn start(&mut self, player: Player) {
         let total = player.total_frames();
+        // v0.14 stage 2：load 书签 sidecar（不存在 / 损坏静默降级到空列表）
+        let bookmarks = BookmarkFile::load_or_empty(player.path());
         self.replay_player = Some(player);
         self.timeline_state = Some(TimelineState {
             current_frame: 0,
@@ -80,6 +91,8 @@ impl ReplayController {
             playing: false,
             half_tick: 0,
         });
+        self.bookmarks = Some(bookmarks);
+        self.bookmark_panel = None;
     }
 
     /// 取当前帧的克隆。返回 `None` 表示未启动 / 帧索引越界。调用方拿到后
@@ -115,15 +128,49 @@ impl ReplayController {
         AppMode::ProcessList
     }
 
+    /// v0.14 stage 2：当前书签 sidecar（start 时 load）。
+    #[must_use]
+    pub fn bookmarks(&self) -> Option<&BookmarkFile> {
+        self.bookmarks.as_ref()
+    }
+
+    /// v0.14 stage 2：当前书签面板状态（B 键打开）。
+    #[must_use]
+    pub fn bookmark_panel(&self) -> Option<&BookmarkPanelState> {
+        self.bookmark_panel.as_ref()
+    }
+
+    /// v0.14 stage 2：过滤后的书签索引列表（按 search_query 子串过滤 label / frame_idx 字符串）。
+    /// 让 UI 渲染 / cursor 移动用同一份数据。同时返回列表让 UI 和 controller 跑同一份逻辑。
+    #[must_use]
+    pub fn filtered_bookmark_indices(&self) -> Vec<usize> {
+        let Some(file) = self.bookmarks.as_ref() else {
+            return Vec::new();
+        };
+        let Some(panel) = self.bookmark_panel.as_ref() else {
+            return Vec::new();
+        };
+        filter_indices(file, panel)
+    }
+
     /// 回放模式键盘路由。原 `App::handle_replay_key` 整体迁过来。
     ///
     /// 返回 [`ReplayAction`]；副作用（`q` 退出 / 应用帧到 panels）由 App 派发。
     pub fn handle_key(&mut self, key: KeyEvent) -> ReplayAction {
+        // v0.14 stage 2：书签面板激活时优先处理面板键位
+        if self.bookmark_panel.is_some() {
+            return self.handle_bookmark_panel_key(key);
+        }
         let Some(ts) = self.timeline_state.as_mut() else {
             return ReplayAction::Noop;
         };
         match key.code {
             KeyCode::Char('q') => return ReplayAction::Quit,
+            KeyCode::Char('B') => {
+                // v0.14 stage 2：Shift+B 打开书签面板
+                self.bookmark_panel = Some(BookmarkPanelState::new());
+                return ReplayAction::BookmarkPanelToggled;
+            }
             KeyCode::Char(' ') => {
                 ts.playing = !ts.playing;
             }
@@ -184,10 +231,194 @@ impl ReplayController {
         ReplayAction::Noop
     }
 
+    /// v0.14 stage 2：书签面板激活时的键位路由。
+    /// 把 panel 从 self 取出操作，最后再放回 — 避免 `&mut self.bookmark_panel` 与
+    /// `&mut self.bookmarks` / `&self.replay_player` 借用冲突。
+    fn handle_bookmark_panel_key(&mut self, key: KeyEvent) -> ReplayAction {
+        let mut panel = match self.bookmark_panel.take() {
+            Some(p) => p,
+            None => return ReplayAction::Noop,
+        };
+
+        // 编辑模式优先（除 Enter / Esc 外字符都 push 到 editing_label）
+        if panel.is_editing() {
+            match key.code {
+                KeyCode::Esc => {
+                    panel.editing_label = None;
+                    panel.editing_id = None;
+                }
+                KeyCode::Enter => {
+                    if let (Some(file), Some(player)) =
+                        (self.bookmarks.as_mut(), self.replay_player.as_ref())
+                    {
+                        if let Some((id, new_label)) = panel.end_edit() {
+                            let trimmed = new_label.trim().to_string();
+                            // 空 input 时保留原 label（lookup by id）；非空则替换。
+                            let final_label = if trimmed.is_empty() {
+                                file.bookmarks
+                                    .iter()
+                                    .find(|b| b.id == id)
+                                    .map(|b| b.label.clone())
+                                    .unwrap_or_else(|| format!("书签 #{id}"))
+                            } else {
+                                trimmed
+                            };
+                            file.edit_label(id, final_label);
+                            file.write(player.path());
+                        }
+                    } else {
+                        panel.end_edit();
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(s) = panel.editing_label.as_mut() {
+                        s.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if !c.is_control()
+                        && let Some(s) = panel.editing_label.as_mut()
+                    {
+                        s.push(c);
+                    }
+                }
+                _ => {}
+            }
+            self.bookmark_panel = Some(panel);
+            return ReplayAction::Noop;
+        }
+
+        // 非编辑模式：先算 indices（panel 还在本地变量里，不冲突）
+        let indices = match self.bookmarks.as_ref() {
+            Some(file) => filter_indices(file, &panel),
+            None => Vec::new(),
+        };
+        let len = indices.len();
+        let action = match key.code {
+            KeyCode::Esc => {
+                // 关闭面板 — 不放回（self.bookmark_panel 已 take 走，保持 None）
+                ReplayAction::BookmarkPanelToggled
+            }
+            KeyCode::Up => {
+                if len > 0 {
+                    panel.cursor = panel.cursor.saturating_sub(1);
+                }
+                ReplayAction::Noop
+            }
+            KeyCode::Down => {
+                if len > 0 {
+                    panel.cursor = (panel.cursor + 1).min(len.saturating_sub(1));
+                }
+                ReplayAction::Noop
+            }
+            KeyCode::Enter => {
+                // 跳转到 cursor 处书签的 frame_idx
+                if len == 0 {
+                    ReplayAction::Noop
+                } else {
+                    let cursor = panel.cursor.min(len - 1);
+                    let bookmark_idx = indices[cursor];
+                    let frame_idx = self
+                        .bookmarks
+                        .as_ref()
+                        .and_then(|f| f.bookmarks.get(bookmark_idx))
+                        .map(|b| b.frame_idx);
+                    if let Some(idx) = frame_idx
+                        && let Some(ts) = self.timeline_state.as_mut()
+                    {
+                        ts.current_frame = idx.min(ts.total_frames.saturating_sub(1));
+                        ts.playing = false;
+                        ReplayAction::ApplyFrame
+                    } else {
+                        ReplayAction::Noop
+                    }
+                }
+            }
+            KeyCode::Char('d') => {
+                if len == 0 {
+                    ReplayAction::Noop
+                } else {
+                    let cursor = panel.cursor.min(len - 1);
+                    let bookmark_idx = indices[cursor];
+                    if let (Some(file), Some(player)) =
+                        (self.bookmarks.as_mut(), self.replay_player.as_ref())
+                    {
+                        if let Some(bm) = file.bookmarks.get(bookmark_idx).cloned() {
+                            file.remove(bm.id);
+                            file.write(player.path());
+                            let new_len = file.bookmarks.len();
+                            if new_len == 0 {
+                                panel.cursor = 0;
+                            } else if panel.cursor >= new_len {
+                                panel.cursor = new_len - 1;
+                            }
+                        }
+                    }
+                    ReplayAction::BookmarkPanelToggled
+                }
+            }
+            KeyCode::Char('e') => {
+                if len == 0 {
+                    ReplayAction::Noop
+                } else {
+                    let cursor = panel.cursor.min(len - 1);
+                    let bookmark_idx = indices[cursor];
+                    if let Some(file) = self.bookmarks.as_ref()
+                        && let Some(bm) = file.bookmarks.get(bookmark_idx).cloned()
+                    {
+                        // 编辑模式：清空 input buffer（fresh replacement）。用户按 Enter
+                        // 后若 input 为空则保留原 label（在 Enter 分支里 fallback）。
+                        panel.start_edit(bm.id, "");
+                    }
+                    ReplayAction::Noop
+                }
+            }
+            KeyCode::Backspace => {
+                panel.search_query.pop();
+                let new_len = match self.bookmarks.as_ref() {
+                    Some(file) => filter_indices(file, &panel).len(),
+                    None => 0,
+                };
+                if new_len == 0 {
+                    panel.cursor = 0;
+                } else if panel.cursor >= new_len {
+                    panel.cursor = new_len - 1;
+                }
+                ReplayAction::Noop
+            }
+            KeyCode::Char(c) => {
+                if !c.is_control() {
+                    panel.search_query.push(c);
+                    let new_len = match self.bookmarks.as_ref() {
+                        Some(file) => filter_indices(file, &panel).len(),
+                        None => 0,
+                    };
+                    if new_len == 0 {
+                        panel.cursor = 0;
+                    } else if panel.cursor >= new_len {
+                        panel.cursor = new_len - 1;
+                    }
+                }
+                ReplayAction::Noop
+            }
+            _ => ReplayAction::Noop,
+        };
+
+        // 把 panel 放回（除非 Esc 关闭）
+        if !matches!(key.code, KeyCode::Esc) {
+            self.bookmark_panel = Some(panel);
+        }
+        action
+    }
+
     /// 每 `REFRESH_INTERVAL` 调一次：按 `speed` 步进 `current_frame`。
     /// 推进了 → [`ReplayAction::ApplyFrame`]；未推进（paused / half-tick 间歇
     /// / 已到末尾）→ [`ReplayAction::Noop`]。到末尾自动暂停。
     pub fn tick(&mut self) -> ReplayAction {
+        // v0.14 stage 2：书签面板打开时暂停自动步进（用户在选书签，不要 push 帧）
+        if self.bookmark_panel.is_some() {
+            return ReplayAction::Noop;
+        }
         let Some(ts) = self.timeline_state.as_mut() else {
             return ReplayAction::Noop;
         };
@@ -227,6 +458,28 @@ pub enum ReplayAction {
     Quit,
     /// timeline 推进了，App 需要把当前帧重新应用到 panels（见
     /// [`crate::app::App::apply_replay_frame`]）。触发点：
-    /// Left / Right / Home / End / tick 自动步进。
+    /// Left / Right / Home / End / tick 自动步进 / 书签 Enter 跳转。
     ApplyFrame,
+    /// v0.14 stage 2：书签面板打开 / 关闭（App 设 status_message 提示用户）。
+    BookmarkPanelToggled,
+}
+
+/// v0.14 stage 2：按 search_query 过滤书签索引（label / frame_idx / id 三个字段子串匹配）。
+/// 顶层函数让 controller 与 UI 共用同一份过滤逻辑。
+#[must_use]
+fn filter_indices(file: &BookmarkFile, panel: &BookmarkPanelState) -> Vec<usize> {
+    let q = panel.search_query.trim().to_lowercase();
+    if q.is_empty() {
+        return (0..file.bookmarks.len()).collect();
+    }
+    file.bookmarks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| {
+            b.label.to_lowercase().contains(&q)
+                || b.frame_idx.to_string().contains(&q)
+                || b.id.to_string().contains(&q)
+        })
+        .map(|(i, _)| i)
+        .collect()
 }

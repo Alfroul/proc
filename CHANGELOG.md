@@ -7,7 +7,13 @@
 
 ## [Unreleased]
 
-下次 cycle（v0.14.0+）的候选方向：基于 v0.13 PERF-BASELINE 报告（6 个 criterion benchmark × 多档 fixture 共 25 数据点，proc 当前架构在 1000 进程规模下无显著性能瓶颈）+ tech-debt v0.14.0+ 候选段（TD-44 / TD-45 / TD-46 / TD-47 stage 2 PERF-BASELINE 归档 + TD-48 stage 3 REVIEW-v0.13 归档）。可选 theme：(1) 性能优化 cycle（首选 TD-47 parent_chain Arc 重构，唯一有量化 before/after 数字的候选）；(2) 录屏回放 v2 / 多 Inspector 对比 / 用户报 bug 一键诊断包等用户面向新功能；(3) App 上帝对象继续拆（代码质量 cycle）。由用户在新 cycle brainstorm 时拍板。
+### v0.14.0 cycle（开发中）— 录屏回放 v2 cycle（方案 A：完整 v2，5 stage）
+
+- **stage 1（Spike）已完成**：录屏文件格式 v3 落地（按需加载 + footer + v1/v2 sidecar + `--info`）。`RecordingFooter` 含 frame_offsets + 全 session 元数据；`Player::frame_at` 改 owned + 单帧 LRU 缓存；`open` 流程 seek trailer 检测 v3 / fallback `open_legacy`；`IdxSidecar` 让 v1/v2 老文件享受按需加载；CLI `proc replay recording.prec --info` 不开 TUI 输出 footer 元数据。
+- **stage 2（Slice）已完成**：录屏书签系统落地。`Bookmark { id, frame_idx, timestamp_secs, label, created_at }` + `BookmarkFile` sidecar `.prec.bookmarks.json`；录制时按 `b` inline label 输入（Enter 提交 / Esc 取消 / 空 label 默认「书签 #N」）；回放时按 `B`（Shift+B）打开书签面板（Up/Down 选择 · Enter 跳帧 · `e` 编辑 label · `d` 删除 · 子串搜索 · Esc 关闭）；面板激活时 tick 自动暂停。`VtRecorder` 加 `frame_count()` 让 `b` 能拿到当前帧索引。
+- stage 3-5 待启动：时间轴搜索 / 倒放 / REVIEW + tag v0.14.0。
+
+下次 cycle（v0.15.0+）的候选方向：基于 v0.14 cycle 落地情况 + tech-debt 残留项决定。
 
 ## [0.13.0] - 2026-07-05
 

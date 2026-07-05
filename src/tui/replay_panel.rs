@@ -1,7 +1,8 @@
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Constraint, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph};
 
 use crate::app::{App, AppMode, ReplaySpeed};
 use crate::tui::theme;
@@ -112,6 +113,20 @@ pub fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
             theme::style_muted(),
         ),
         Span::styled(format!("  [{}]", mode_label), theme::style_selected()),
+        // v0.14 stage 2：书签面板入口提示（无书签时也显示，提示用户功能存在）
+        Span::styled(
+            "  [B 书签]",
+            if app
+                .replay
+                .bookmarks()
+                .map(|f| !f.bookmarks.is_empty())
+                .unwrap_or(false)
+            {
+                theme::style_selected()
+            } else {
+                theme::style_muted()
+            },
+        ),
     ]);
     f.render_widget(Paragraph::new(info_line), info_area);
 
@@ -125,6 +140,127 @@ pub fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
         .gauge_style(theme::style_selected())
         .ratio(progress);
     f.render_widget(gauge_widget, gauge_area);
+
+    // v0.14 stage 2：书签面板 modal（B 键打开）
+    if app.replay.bookmark_panel.is_some() {
+        draw_bookmark_panel(f, area, app);
+    }
+}
+
+/// v0.14 stage 2：书签面板 modal — 居中浮层，列出全部书签（可子串过滤）。
+fn draw_bookmark_panel(f: &mut Frame, area: Rect, app: &App) {
+    let Some(file) = app.replay.bookmarks() else {
+        return;
+    };
+    let Some(panel) = app.replay.bookmark_panel() else {
+        return;
+    };
+
+    // 居中浮层 70% × 60%
+    let popup = centered_rect(70, 60, area);
+    f.render_widget(Clear, popup);
+
+    let title = if file.bookmarks.is_empty() {
+        " 书签（暂无）— Esc 关闭 ".to_string()
+    } else {
+        format!(
+            " 书签 ({}) — Up/Down 选择 · Enter 跳转 · e 编辑 · d 删除 · / 搜索 · Esc 关闭 ",
+            file.bookmarks.len()
+        )
+    };
+
+    let border_style = Style::default().add_modifier(Modifier::REVERSED);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(border_style);
+    f.render_widget(block, popup);
+
+    let inner = Rect::new(
+        popup.x + 1,
+        popup.y + 1,
+        popup.width.saturating_sub(2),
+        popup.height.saturating_sub(2),
+    );
+    let [list_area, search_area] =
+        ratatui::layout::Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+
+    // 过滤后的书签索引（与 ReplayController::filtered_bookmark_indices 一致）
+    let q = panel.search_query.trim().to_lowercase();
+    let filtered_indices: Vec<usize> = if q.is_empty() {
+        (0..file.bookmarks.len()).collect()
+    } else {
+        file.bookmarks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| {
+                b.label.to_lowercase().contains(&q)
+                    || b.frame_idx.to_string().contains(&q)
+                    || b.id.to_string().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    };
+
+    // 书签列表
+    let items: Vec<ListItem> = filtered_indices
+        .iter()
+        .map(|&i| {
+            let bm = &file.bookmarks[i];
+            let label_display = if panel.editing_id == Some(bm.id) {
+                let mut s = panel.editing_label.clone().unwrap_or_default();
+                if panel.is_editing() {
+                    s.push('_');
+                }
+                s
+            } else {
+                bm.label.clone()
+            };
+            let ts = format_timestamp(bm.timestamp_secs);
+            ListItem::new(Line::from(vec![
+                Span::raw(format!("#{}  ", bm.id)),
+                Span::raw(format!("帧 {:>5}  ", bm.frame_idx)),
+                Span::raw(format!("{}  ", ts)),
+                Span::raw(label_display),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .style(theme::style_normal())
+        .highlight_style(theme::style_selected().add_modifier(Modifier::REVERSED));
+    let mut state = ListState::default();
+    if !filtered_indices.is_empty() {
+        state.select(Some(panel.cursor.min(filtered_indices.len() - 1)));
+    }
+    f.render_stateful_widget(list, list_area, &mut state);
+
+    // 搜索行
+    let search_text = if panel.is_editing() {
+        format!(
+            " 编辑中: {}_  （Enter 提交 / Esc 取消）",
+            panel.editing_label.as_deref().unwrap_or("")
+        )
+    } else {
+        format!(" 搜索: {}_", panel.search_query)
+    };
+    let search_para = Paragraph::new(search_text)
+        .style(theme::style_muted())
+        .alignment(Alignment::Left);
+    f.render_widget(search_para, search_area);
+}
+
+/// 居中浮层尺寸（百分比 × 高度）。
+fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
+    let popup_width = r.width * percent_x / 100;
+    let x = r.width.saturating_sub(popup_width) / 2;
+    let y = r.height.saturating_sub(height) / 2;
+    Rect::new(
+        r.x + x,
+        r.y + y,
+        popup_width.min(r.width),
+        height.min(r.height),
+    )
 }
 
 fn mode_display_name(mode: &AppMode) -> &'static str {

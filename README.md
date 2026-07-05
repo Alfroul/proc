@@ -222,7 +222,11 @@ severity = "Warning"
 VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪色，已废弃）：
 
 - `proc record` 启动录制（TUI 内按 `R` 大写开关），状态栏显示 REC 指示
+- 录制中按 `b` 标记书签（v0.14 起）：inline 输入 label，Enter 提交 / Esc 取消 / 空 label 默认「书签 #N」
 - `proc replay <file>.prec` 回放：播放/暂停、逐帧 `←→`、倍速 `0.5× / 1× / 2× / 4×`、`Shift+←→` 跳 10 帧
+- 回放中按 `B`（Shift+B）打开书签面板（v0.14 起）：Up/Down 选择 · Enter 跳转到书签帧 · `e` 编辑 label · `d` 删除 · 子串搜索 · Esc 关闭
+- `proc replay <file>.prec --info`（v0.14 起）不开 TUI 直接显示录屏元数据（时长 / 帧数 / 异常事件 / 最高 CPU/mem）
+- 书签持久化到 `<file>.prec.bookmarks.json` sidecar（与录屏本体解耦，可单独分享 / 删除）
 - Ctrl+C 优雅退出，保证录制文件正常 flush（全局 `shutdown` 模块统一信号）
 - 时间戳格式 `MM-DD HH:MM:SS`，与操作日志对齐
 

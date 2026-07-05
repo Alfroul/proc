@@ -32,6 +32,7 @@ use crate::error::Result;
 use crate::inspect::{InspectorAction, InspectorController};
 use crate::port_map::{self, NetworkViewMode, PortEntry};
 use crate::record::Player;
+use crate::record::{Bookmark, BookmarkFile};
 use crate::replay::{ReplayAction, ReplayController};
 use crate::security::{BackgroundScorer, SecurityScore};
 use crate::tree::TreeNode;
@@ -150,6 +151,17 @@ pub struct App {
     /// v0.6.0 阶段 2：用户按 `R` 启动录屏时进入「待确认」状态，等 `y/n` 决定。
     pub pending_record_confirm: bool,
 
+    // v0.14 stage 2：录屏书签系统（录制路径）。
+    // 录制中按 `b` 触发 inline label 输入；Enter 提交书签；停止录制时 flush 到
+    // `.prec.bookmarks.json` sidecar（tui::run_app 调 take_*_for_flush）。
+    recording_bookmarks: Vec<Bookmark>,
+    /// 当前录屏文件路径（VT100 recorder 启动时由 tui::run_app 注入；sidecar flush 用）。
+    recording_path: Option<std::path::PathBuf>,
+    /// 当前录屏已写出的帧数（VtRecorder 每次成功 capture 时由 tui::run_app 注入）。
+    recording_frame_count: usize,
+    /// `b` 键打开的 inline label 输入状态：None=未激活 / Some=激活中。
+    pub pending_bookmark_label: Option<PendingBookmarkLabel>,
+
     // Throttle
     pub throttle_info: Option<crate::throttle::ThrottleInfo>,
     pub throttle_reason: crate::throttle::ThrottleReason,
@@ -188,6 +200,20 @@ pub struct App {
     pub active_layer: AppLayer,
     /// Ctrl+P 命令面板状态。常驻 App（避免每次打开重建 nucleo Matcher）。
     pub command_palette: CommandPalette,
+}
+
+/// v0.14 stage 2：录制中按 `b` 触发的 inline label 输入状态。
+///
+/// 激活后 App::handle_key 把字符键推到 `input`（Enter 提交 / Esc 取消）。
+/// label 可空 → 默认生成「书签 #N」。详见 `docs/stages/v0.14-stage-2.md`。
+#[derive(Debug, Clone)]
+pub struct PendingBookmarkLabel {
+    /// 标记瞬间的帧索引（capture 时的 recording_frame_count 快照）。
+    pub frame_idx: usize,
+    /// 标记瞬间的 unix epoch 秒。
+    pub timestamp_secs: u64,
+    /// 用户输入 buffer（可空 → 默认 label）。
+    pub input: String,
 }
 
 pub struct ProcHistory {
@@ -287,6 +313,10 @@ impl App {
             recording_wanted: false,
             recording_elapsed_secs: 0,
             pending_record_confirm: false,
+            recording_bookmarks: Vec::new(),
+            recording_path: None,
+            recording_frame_count: 0,
+            pending_bookmark_label: None,
             throttle_info: None,
             throttle_reason: crate::throttle::ThrottleReason::None,
             prev_process_disk: HashMap::new(),
@@ -322,6 +352,119 @@ impl App {
     }
     pub fn recording_elapsed(&self) -> u64 {
         self.recording_elapsed_secs
+    }
+
+    // --- v0.14 stage 2：录屏书签 ---
+
+    /// 当前录屏已写出的帧数（由 tui::run_app 每 tick 注入）。
+    pub fn recording_frame_count(&self) -> usize {
+        self.recording_frame_count
+    }
+    pub fn set_recording_frame_count(&mut self, n: usize) {
+        self.recording_frame_count = n;
+    }
+
+    /// 当前录屏文件路径（VT100 recorder 启动时由 tui::run_app 注入）。
+    pub fn set_recording_path(&mut self, p: std::path::PathBuf) {
+        self.recording_path = Some(p);
+    }
+
+    /// 录屏书签（录制中累积；停止录制时 tui::run_app 调 take_recording_bookmarks flush）。
+    pub fn recording_bookmarks(&self) -> &[Bookmark] {
+        &self.recording_bookmarks
+    }
+
+    /// 取走累积的书签（录制停止时 tui::run_app 调，flush 到 sidecar）。
+    pub fn take_recording_bookmarks(&mut self) -> Vec<Bookmark> {
+        std::mem::take(&mut self.recording_bookmarks)
+    }
+
+    /// 取走录屏路径（与 take_recording_bookmarks 配套使用）。
+    pub fn take_recording_path(&mut self) -> Option<std::path::PathBuf> {
+        self.recording_path.take()
+    }
+
+    /// 触发 inline label 输入（录制中按 `b` 调）。
+    /// `now` 是当前 unix epoch 秒（让测试可注入固定时间）。
+    fn start_bookmark_label_input(&mut self, now: u64) {
+        let frame_idx = self.recording_frame_count;
+        self.pending_bookmark_label = Some(PendingBookmarkLabel {
+            frame_idx,
+            timestamp_secs: now,
+            input: String::new(),
+        });
+        self.status_message = Some(format!(
+            "标记书签（帧 {frame_idx}）：输入 label，Enter 提交 / Esc 取消"
+        ));
+    }
+
+    /// 处理 inline label 输入态下的按键。返回 true 表示已消费。
+    fn handle_bookmark_label_input(&mut self, key: KeyEvent, now: u64) -> bool {
+        let Some(pending) = self.pending_bookmark_label.as_mut() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.pending_bookmark_label = None;
+                self.status_message = Some("书签标记取消".to_string());
+            }
+            KeyCode::Enter => {
+                // 移出 pending（解除借用），再 push 到 recording_bookmarks
+                let pending = self.pending_bookmark_label.take().unwrap();
+                let next_id = self
+                    .recording_bookmarks
+                    .iter()
+                    .map(|b| b.id)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                let label = if pending.input.trim().is_empty() {
+                    format!("书签 #{next_id}")
+                } else {
+                    pending.input.clone()
+                };
+                let frame_idx = pending.frame_idx;
+                self.recording_bookmarks.push(Bookmark {
+                    id: next_id,
+                    frame_idx,
+                    timestamp_secs: pending.timestamp_secs,
+                    label,
+                    created_at: now,
+                });
+                self.status_message = Some(format!("已加书签 #{next_id}（帧 {frame_idx}）"));
+            }
+            KeyCode::Backspace => {
+                pending.input.pop();
+            }
+            KeyCode::Char(c) if !c.is_control() => {
+                pending.input.push(c);
+            }
+            _ => {
+                // 其他键吞掉
+            }
+        }
+        true
+    }
+
+    /// 录制停止 hook：把累积书签 flush 到 sidecar。tui::run_app 调用。
+    /// 调用方负责在录制真正停止（recorder.stop 完成）后再调此方法。
+    pub fn flush_recording_bookmarks(&mut self) {
+        let Some(path) = self.recording_path.take() else {
+            // 无录屏路径（用户未真正启动 recorder，或路径已被取走）— 清书签防泄漏
+            self.recording_bookmarks.clear();
+            return;
+        };
+        if self.recording_bookmarks.is_empty() {
+            // 无书签 — 不写 sidecar（避免空文件污染用户目录）
+            return;
+        }
+        let mut file = BookmarkFile::load_or_empty(&path);
+        let bookmarks = std::mem::take(&mut self.recording_bookmarks);
+        for bm in bookmarks {
+            file.bookmarks.push(bm);
+        }
+        file.sort_by_frame();
+        file.write(&path);
     }
 
     // --- v0.6.0 阶段 3：worker 可观测性 ---
@@ -537,6 +680,17 @@ impl App {
             return;
         }
 
+        // v0.14 stage 2：书签 inline label 输入态 — 拦截所有按键
+        // （仅次于 kill_confirm 的优先级，让 Esc / Enter 不会被下层吃掉）
+        if self.pending_bookmark_label.is_some() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            self.handle_bookmark_label_input(key, now);
+            return;
+        }
+
         // v0.6.0 阶段 3：worker 崩溃 banner — 按 D 清空。
         // v0.7.0 阶段 3：palette 激活时让位 —— 'D' 喂给 palette 输入框（fuzzy 搜
         // "dismiss" 仍可触发 DismissCrashes action）。
@@ -623,6 +777,35 @@ impl App {
         // Help page — handle navigation/scroll directly, Esc/?/q exits
         if self.mode == AppMode::Help {
             self.handle_help_key(key);
+            return;
+        }
+
+        // v0.14 stage 2：录制中按 `b` 添加书签
+        // 激活条件：录制中 + 普通面板模式（非 Replay / ContainerExec / ProcessDetail）+ 无 search 激活
+        let bookmark_panel_modes = matches!(
+            self.mode,
+            AppMode::ProcessList
+                | AppMode::PortMap
+                | AppMode::UsbAssistant
+                | AppMode::MonitorPanel
+                | AppMode::DockerPanel
+        );
+        let any_search = self.process_panel.panel.search.is_active()
+            || self.process_panel.panel.tree_search.is_active()
+            || self.process_panel.panel.app_group_search.is_active()
+            || self.port_panel.panel.port_search.is_active()
+            || self.inspector.inspection_search.is_active();
+        if self.recording_wanted
+            && self.pending_bookmark_label.is_none()
+            && bookmark_panel_modes
+            && !any_search
+            && key.code == KeyCode::Char('b')
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            self.start_bookmark_label_input(now);
             return;
         }
 
@@ -971,12 +1154,22 @@ impl App {
 
     /// `ReplayController::handle_key` / `tick` 返回 [`ReplayAction`] 后，
     /// App 在此派发副作用：`Quit` → `should_quit`；`ApplyFrame` → 把当前帧
-    /// 应用到 15+ panel / metrics 字段；`Noop` 不动。
+    /// 应用到 15+ panel / metrics 字段；`BookmarkPanelToggled` → 设 status 提示；
+    /// `Noop` 不动。
     fn dispatch_replay_action(&mut self, action: ReplayAction) {
         match action {
             ReplayAction::Noop => {}
             ReplayAction::Quit => self.should_quit = true,
             ReplayAction::ApplyFrame => self.apply_replay_frame(),
+            ReplayAction::BookmarkPanelToggled => {
+                let open = self.replay.bookmark_panel.is_some();
+                self.status_message = Some(if open {
+                    "书签面板：Up/Down 选择 · Enter 跳转 · e 编辑 · d 删除 · Esc 关闭 / 搜索"
+                        .to_string()
+                } else {
+                    "书签面板已关闭".to_string()
+                });
+            }
         }
     }
 
