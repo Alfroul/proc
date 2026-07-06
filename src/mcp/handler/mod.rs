@@ -4,7 +4,27 @@
 //! 数据采集层，把结构化结果序列化成 JSON 返回给 MCP client。
 //! 不调 `crate::cli::*::run_*`（那些函数直接 println! 表格，对 LLM 无意义）。
 //!
-//! 详细设计见 ADR-0009 与 `docs/stages/v0.7-stage-2.md`。
+//! 详细设计见 ADR-0009（v0.7 MCP server）与 ADR-0023 / ADR-0024（v0.15 cycle
+//! inspect tool 合并 + handler 子 module 拆分决策）。
+//!
+//! # 模块结构（v0.15 阶段 1 落地）
+//!
+//! 顶层 [`handler`] 模块拆 4 个文件（rmcp 0.11 限制：`#[tool_router]` 只收集
+//! 当前 impl 块内 `#[tool]` 方法，不支持跨 module 收集，所以 32 个 `#[tool]`
+//! 都保留在本文件的 `#[tool_router] impl` 块里）：
+//!
+//! - `mod.rs`（本文件）：`ProcMcpHandler` struct / `Clone` / `Default` / `new`
+//!   / `#[tool_router] impl`（32 个 `#[tool]` 方法 = 17 v0.7 既有 + 15 v0.15
+//!   新增 stub）/ `ServerHandler` impl / `serve()` / `list_tool_names()` /
+//!   既有 17 helper / 公共 helper（`ok_result` / `err` / `parse_sort_field`）
+//! - [`cli`]：v0.15 类别 1（CLI 命令暴露，9 tool）Args + stub helper
+//! - [`inspect`]：v0.15 类别 2（详情页 6 Tab 合并，1 tool）Args + `InspectTab`
+//!   enum + stub helper
+//! - [`metrics`]：v0.15 类别 4（系统级 metrics，5 tool）Args + stub helper
+
+mod cli;
+mod inspect;
+mod metrics;
 
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +39,13 @@ use serde_json::{Value, json};
 
 use crate::collect::{self, SortField};
 use crate::dns_log::DnsLogCollector;
+
+// v0.15 阶段 1 子 module re-export：让本文件 `#[tool]` 方法可以直接调
+// `cli::make_flows_json(...)` / `inspect::make_inspect_json(...)` /
+// `metrics::make_metrics_system_json()`，不需要 `self::cli::` 前缀。
+use cli::*;
+use inspect::*;
+use metrics::*;
 
 /// MCP server 主入口（runtime 已在 [`super::run_mcp_serve`] 起好）。
 ///
@@ -388,6 +415,181 @@ impl ProcMcpHandler {
         Parameters(args): Parameters<DockerLogsArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_result(make_docker_logs_json(&args.name, args.tail.as_deref()))
+    }
+
+    // ====================================================================
+    // v0.15 阶段 1 stub 方法 — schema 注册占位，业务逻辑在 stage 2 / stage 3
+    // 各 Slice 填（详见 docs/stages/v0.15-stage-1.md）。stub 返
+    // `{ ok: true, stub: true, stage: "v0.15-stage-X", ... }` placeholder 让
+    // client（mcp-inspector）验证 schema 但不误用业务数据。
+    // ====================================================================
+
+    #[tool(
+        name = "proc_flows",
+        description = "List end-to-end network flows (ProcessFlow: pid + remote_addr/port + bytes_out/in + sni + dns_name + source). Stage 1 stub — business logic lands in v0.15 stage 2. Returns JSON { ok, stub: true, stage, received_limit }."
+    )]
+    fn proc_flows(
+        &self,
+        Parameters(args): Parameters<FlowsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_flows_json(args.limit))
+    }
+
+    #[tool(
+        name = "proc_throttle",
+        description = "Get or set Windows 11 EcoQoS / Efficiency Mode for a process. set=true throttles, set=false un-throttles, set=None queries current state. Stage 1 stub — business logic lands in v0.15 stage 2."
+    )]
+    fn proc_throttle(
+        &self,
+        Parameters(args): Parameters<ThrottleArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_throttle_json(args.pid, args.set))
+    }
+
+    #[tool(
+        name = "proc_export",
+        description = "Export process list to JSON or CSV (defaults to JSON on stdout — does NOT write a file unless the agent pipes output). format='csv' for CSV. Stage 1 stub — business logic lands in v0.15 stage 2."
+    )]
+    fn proc_export(
+        &self,
+        Parameters(args): Parameters<ExportArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_export_json(
+            args.format.as_deref(),
+            args.sort.as_deref(),
+            args.limit,
+        ))
+    }
+
+    #[tool(
+        name = "proc_docker_inspect",
+        description = "Docker container inspect (bollard::inspect_container equivalent). Returns the full bollard inspect JSON. Stage 1 stub — business logic lands in v0.15 stage 2."
+    )]
+    fn proc_docker_inspect(
+        &self,
+        Parameters(args): Parameters<DockerNameArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_docker_inspect_json(&args.name))
+    }
+
+    #[tool(
+        name = "proc_docker_images",
+        description = "List local Docker images with in_use flag (reverse-lookup from containers). Stage 1 stub — business logic lands in v0.15 stage 2."
+    )]
+    fn proc_docker_images(&self) -> Result<CallToolResult, McpError> {
+        ok_result(make_docker_images_json())
+    }
+
+    #[tool(
+        name = "proc_docker_volumes",
+        description = "List Docker volumes with in_use flag (reverse-lookup from containers). Stage 1 stub — business logic lands in v0.15 stage 2."
+    )]
+    fn proc_docker_volumes(&self) -> Result<CallToolResult, McpError> {
+        ok_result(make_docker_volumes_json())
+    }
+
+    #[tool(
+        name = "proc_docker_events",
+        description = "Drain recent Docker daemon events (one-shot, NOT follow mode — MCP is request-response). limit defaults to 100. Stage 1 stub — business logic lands in v0.15 stage 2."
+    )]
+    fn proc_docker_events(
+        &self,
+        Parameters(args): Parameters<DockerEventsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_docker_events_json(args.limit))
+    }
+
+    #[tool(
+        name = "proc_monitor_add",
+        description = "Add a process/port/command monitor. target_kind='pid'|'port'|'command'. dry_run defaults to FALSE (real add); pass dry_run=true to preview. Stage 1 stub — business logic lands in v0.15 stage 2."
+    )]
+    fn proc_monitor_add(
+        &self,
+        Parameters(args): Parameters<MonitorAddArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_monitor_add_json(
+            &args.target_kind,
+            &args.target,
+            args.restart_policy.as_deref(),
+            args.dry_run,
+        ))
+    }
+
+    #[tool(
+        name = "proc_monitor_remove",
+        description = "Remove a configured monitor by ID. dry_run defaults to FALSE (real remove); pass dry_run=true to preview. Stage 1 stub — business logic lands in v0.15 stage 2."
+    )]
+    fn proc_monitor_remove(
+        &self,
+        Parameters(args): Parameters<MonitorRemoveArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_monitor_remove_json(&args.id, args.dry_run))
+    }
+
+    #[tool(
+        name = "proc_inspect",
+        description = "Inspect a process by PID + tab. tab='summary' (default) returns basic info + R1-R18 risk factors + signature_status + parent_chain. tab='env' returns env vars (secret masked unless reveal=true). tab='network' returns listening + established + recent DNS. tab='dlls' returns loaded modules. tab='memory_map' returns memory regions. tab='handles' returns open handles (same schema as proc_handles). Stage 1 stub — business logic lands in v0.15 stage 2."
+    )]
+    fn proc_inspect(
+        &self,
+        Parameters(args): Parameters<ProcInspectArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_inspect_json(args.pid, &args.tab, args.reveal))
+    }
+
+    #[tool(
+        name = "proc_metrics_system",
+        description = "System-level metrics: CPU/memory/swap usage %, 30-second sparkline history, uptime, network interface IPs. Stage 1 stub — business logic lands in v0.15 stage 3."
+    )]
+    fn proc_metrics_system(
+        &self,
+        Parameters(_args): Parameters<MetricsSystemArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_metrics_system_json())
+    }
+
+    #[tool(
+        name = "proc_metrics_gpu",
+        description = "GPU metrics: NVIDIA via NVML (VRAM/temperature/power/utilization) + DXGI for all-vendor VRAM + PDH utilization. Stage 1 stub — business logic lands in v0.15 stage 3."
+    )]
+    fn proc_metrics_gpu(
+        &self,
+        Parameters(_args): Parameters<MetricsGpuArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_metrics_gpu_json())
+    }
+
+    #[tool(
+        name = "proc_metrics_disk_io",
+        description = "Per-disk and per-process disk I/O rates (uses ETW NT Kernel Logger on Windows for accuracy; falls back to sysinfo delta). Stage 1 stub — business logic lands in v0.15 stage 3."
+    )]
+    fn proc_metrics_disk_io(
+        &self,
+        Parameters(args): Parameters<MetricsDiskIoArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_metrics_disk_io_json(args.device.as_deref()))
+    }
+
+    #[tool(
+        name = "proc_metrics_smart",
+        description = "SMART disk health aggregated summary (device=None) or single-disk detail (device set). Note: v0.7 proc_smart overlaps with this — relationship TBD in stage 4 review. Stage 1 stub — business logic lands in v0.15 stage 3."
+    )]
+    fn proc_metrics_smart(
+        &self,
+        Parameters(args): Parameters<MetricsSmartArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_metrics_smart_json(args.device.as_deref()))
+    }
+
+    #[tool(
+        name = "proc_metrics_thermal",
+        description = "Per-core CPU frequency + temperature + throttle flags (THERMAL / POWER). Stage 1 stub — business logic lands in v0.15 stage 3."
+    )]
+    fn proc_metrics_thermal(
+        &self,
+        Parameters(_args): Parameters<MetricsThermalArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(make_metrics_thermal_json())
     }
 }
 
