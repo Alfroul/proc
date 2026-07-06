@@ -69,8 +69,10 @@ pub fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     ])
     .areas(inner);
 
+    // v0.14 stage 4：timeline icon 反映方向。播放中按 direction 显 ▶ / ◀；
+    // 暂停态显 ⏸（不区分方向，UX 与「播放中」对齐）。
     let icon = if ts.playing {
-        "\u{25B6}" // ▶
+        ts.direction.icon()
     } else {
         "\u{23F8}" // ⏸
     };
@@ -100,35 +102,68 @@ pub fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
     // Show which panel was active during recording
     let mode_label = mode_display_name(&frame_mode);
 
-    let info_line = Line::from(vec![
-        Span::styled(format!(" {} ", icon), theme::style_selected()),
-        Span::styled(format!("{} ", speed_label), theme::style_muted()),
-        Span::styled(
-            format!("{} / {} ", current_str, end_str),
-            theme::style_normal(),
-        ),
-        Span::styled(format!("({})", duration), theme::style_muted()),
-        Span::styled(
-            format!("  帧 {}/{}", current + 1, total),
-            theme::style_muted(),
-        ),
-        Span::styled(format!("  [{}]", mode_label), theme::style_selected()),
-        // v0.14 stage 2：书签面板入口提示（无书签时也显示，提示用户功能存在）
-        Span::styled(
-            "  [B 书签]",
-            if app
-                .replay
-                .bookmarks()
-                .map(|f| !f.bookmarks.is_empty())
-                .unwrap_or(false)
-            {
-                theme::style_selected()
+    // v0.14 stage 3：搜索输入态激活时改显示搜索文本（让用户看到正在输入的内容）。
+    if app.replay.search_input_active {
+        let input_line = Line::from(vec![
+            Span::styled(" 搜索: ".to_string(), theme::style_selected()),
+            Span::styled(
+                app.replay.search.input.clone(),
+                theme::style_normal().add_modifier(Modifier::REVERSED),
+            ),
+            Span::styled("_", theme::style_normal()),
+            Span::styled(
+                "  （Enter 提交 · Esc 取消 · n/N 跳转）".to_string(),
+                theme::style_muted(),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(input_line), info_area);
+    } else {
+        let search_status_span = if app.replay.search.matches.is_empty() {
+            if app.replay.search.is_active() {
+                Span::styled("  [搜索:0帧]", theme::style_muted())
             } else {
-                theme::style_muted()
-            },
-        ),
-    ]);
-    f.render_widget(Paragraph::new(info_line), info_area);
+                Span::styled("  [/ 搜索]", theme::style_muted())
+            }
+        } else {
+            // 命中 N 帧 · cursor+1/total_matches
+            let cursor_n = app.replay.search.cursor + 1;
+            let total_m = app.replay.search.matches.len();
+            Span::styled(
+                format!("  [搜索 {cursor_n}/{total_m}帧 · n/N 跳转]"),
+                theme::style_selected(),
+            )
+        };
+        let info_line = Line::from(vec![
+            Span::styled(format!(" {} ", icon), theme::style_selected()),
+            Span::styled(format!("{} ", speed_label), theme::style_muted()),
+            Span::styled(
+                format!("{} / {} ", current_str, end_str),
+                theme::style_normal(),
+            ),
+            Span::styled(format!("({})", duration), theme::style_muted()),
+            Span::styled(
+                format!("  帧 {}/{}", current + 1, total),
+                theme::style_muted(),
+            ),
+            Span::styled(format!("  [{}]", mode_label), theme::style_selected()),
+            // v0.14 stage 2：书签面板入口提示（无书签时也显示，提示用户功能存在）
+            Span::styled(
+                "  [B 书签]",
+                if app
+                    .replay
+                    .bookmarks()
+                    .map(|f| !f.bookmarks.is_empty())
+                    .unwrap_or(false)
+                {
+                    theme::style_selected()
+                } else {
+                    theme::style_muted()
+                },
+            ),
+            search_status_span,
+        ]);
+        f.render_widget(Paragraph::new(info_line), info_area);
+    }
 
     let progress = if total > 0 {
         (current as f64 / total.saturating_sub(1).max(1) as f64).min(1.0)
@@ -136,10 +171,40 @@ pub fn draw_timeline(f: &mut Frame, area: Rect, app: &App) {
         0.0
     };
 
-    let gauge_widget = Gauge::default()
-        .gauge_style(theme::style_selected())
-        .ratio(progress);
-    f.render_widget(gauge_widget, gauge_area);
+    // v0.14 stage 3：搜索命中帧位置 overlay 在 gauge 上 — 用自定义 Paragraph
+    // 替代 Gauge：先渲染进度条字符（`─` × progress），再叠加命中位置 `●` +
+    // 当前位置 `■`。仅当有命中时使用；否则保留 Gauge（既有视觉）。
+    let has_matches = !app.replay.search.matches.is_empty();
+    if has_matches {
+        let width = gauge_area.width.max(1) as usize;
+        let mut cells = vec![' '; width];
+        // 进度条背景（淡色）
+        let progress_chars = ((progress * width as f64) as usize).min(width);
+        for (i, c) in cells.iter_mut().enumerate() {
+            *c = if i < progress_chars { '─' } else { ' ' };
+        }
+        // 命中位置：按帧索引均匀分布到 timeline 宽度
+        let last = total.saturating_sub(1).max(1);
+        for &m in &app.replay.search.matches {
+            let pos = ((m as f64 / last as f64) * (width as f64 - 1.0)) as usize;
+            if pos < width {
+                cells[pos] = '●';
+            }
+        }
+        // 当前帧位置（反色块）
+        let cur_pos = ((current as f64 / last as f64) * (width as f64 - 1.0)) as usize;
+        if cur_pos < width {
+            cells[cur_pos] = '■';
+        }
+        let line: String = cells.iter().collect();
+        let para = Paragraph::new(line).style(theme::style_selected());
+        f.render_widget(para, gauge_area);
+    } else {
+        let gauge_widget = Gauge::default()
+            .gauge_style(theme::style_selected())
+            .ratio(progress);
+        f.render_widget(gauge_widget, gauge_area);
+    }
 
     // v0.14 stage 2：书签面板 modal（B 键打开）
     if app.replay.bookmark_panel.is_some() {

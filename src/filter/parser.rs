@@ -31,7 +31,7 @@ use nom::{
     sequence::{pair, tuple},
 };
 
-use super::{CmpOp, Field, FilterExpr, NetworkField, Value};
+use super::{CmpOp, Field, FilterExpr, FrameField, NetworkField, Value};
 
 /// Parser 错误。`position` 是字节偏移（与 input.as_bytes()[position] 对齐）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,9 +54,36 @@ impl std::error::Error for ParseError {}
 
 type NomRes<'a, T> = IResult<&'a str, T, VerboseError<&'a str>>;
 
-/// 入口：把整个 input 解析为单个 [`FilterExpr`]，trailing 非空白字符算错误。
+/// v0.14 阶段 3：parser 模式 — Process 模式（默认）/ Frame 模式（timeline 搜索）。
+///
+/// Process 模式：`cpu` / `mem` / `name` 解析成 [`Field`]（ProcessInfo 字段），
+/// 用于 List / Tree / AppGroup 视图过滤，与 v0.7 阶段 4 行为一致。
+/// Frame 模式：`cpu` / `mem` 解析成 [`FrameField`]（UiFrame 字段），额外支持
+/// `timestamp` / `anomaly.severity` 字段；`name` 也走 [`FrameField::Name`]。
+/// Network 字段在两种模式下都识别（保险，不强制 — 实际 timeline 搜索不会用
+/// network 字段，但允许写 `cpu > 80 AND sni =~ /evil/` 这类混合表达式）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseMode {
+    Process,
+    Frame,
+}
+
+/// 入口：把整个 input 解析为单个 [`FilterExpr`]（Process 模式），trailing
+/// 非空白字符算错误。
+///
+/// v0.14 阶段 3：本入口是 Process 模式默认入口；timeline 搜索请走 [`parse_frame`]。
 pub fn parse(input: &str) -> Result<FilterExpr, ParseError> {
-    match parse_expr(input) {
+    parse_with_mode(input, ParseMode::Process)
+}
+
+/// v0.14 阶段 3：Frame 模式入口（timeline 搜索）。`cpu` / `mem` / `name` 解析成
+/// [`FrameField`]，额外支持 `timestamp` / `anomaly.severity`。
+pub fn parse_frame(input: &str) -> Result<FilterExpr, ParseError> {
+    parse_with_mode(input, ParseMode::Frame)
+}
+
+fn parse_with_mode(input: &str, mode: ParseMode) -> Result<FilterExpr, ParseError> {
+    match parse_expr(input, mode) {
         Ok((rest, expr)) => {
             let trimmed = rest.trim_start();
             if trimmed.is_empty() {
@@ -117,7 +144,7 @@ fn to_parse_error(input: &str, e: NomErr<VerboseError<&str>>) -> ParseError {
 /// `[A-Za-z0-9_]+` 段当作未知字段名。提不到（边界情况）→ 退到无标识符版本。
 #[must_use]
 fn unknown_field_message(rest: &str) -> String {
-    const SUPPORTED: &str = "cpu/mem/pid/name/user/cmd/disk_read/disk_write/net_sent/net_recv/security_score/sni/dns_name/remote_addr/remote_port/bytes_out/bytes_in";
+    const SUPPORTED: &str = "cpu/mem/pid/name/user/cmd/disk_read/disk_write/net_sent/net_recv/security_score/sni/dns_name/remote_addr/remote_port/bytes_out/bytes_in/timestamp/anomaly.severity";
     let ident: String = rest
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
@@ -179,33 +206,37 @@ fn error_kind_to_chinese(kind: &ErrorKind) -> &'static str {
 
 // --- 递归下降 ---
 
-fn parse_expr(i: &str) -> NomRes<'_, FilterExpr> {
-    parse_or(i)
+fn parse_expr(i: &str, mode: ParseMode) -> NomRes<'_, FilterExpr> {
+    parse_or(i, mode)
 }
 
-fn parse_or(i: &str) -> NomRes<'_, FilterExpr> {
-    let (i, first) = parse_and(i)?;
+fn parse_or(i: &str, mode: ParseMode) -> NomRes<'_, FilterExpr> {
+    let (i, first) = parse_and(i, mode)?;
     // AND/OR 关键字两侧必须吃空白 —— `cpu > 5 AND mem > 100` 中 AND 前后都有空格，
     // 否则 tag("AND") 会因 leading space 失败让 many0 提前结束。
-    let (i, rest) = many0(tuple((multispace0, keyword("OR"), multispace0, parse_and)))(i)?;
+    let (i, rest) = many0(tuple((multispace0, keyword("OR"), multispace0, |i| {
+        parse_and(i, mode)
+    })))(i)?;
     let result = rest.into_iter().fold(first, |acc, (_, _, _, next)| {
         FilterExpr::Or(Box::new(acc), Box::new(next))
     });
     Ok((i, result))
 }
 
-fn parse_and(i: &str) -> NomRes<'_, FilterExpr> {
-    let (i, first) = parse_not(i)?;
-    let (i, rest) = many0(tuple((multispace0, keyword("AND"), multispace0, parse_not)))(i)?;
+fn parse_and(i: &str, mode: ParseMode) -> NomRes<'_, FilterExpr> {
+    let (i, first) = parse_not(i, mode)?;
+    let (i, rest) = many0(tuple((multispace0, keyword("AND"), multispace0, |i| {
+        parse_not(i, mode)
+    })))(i)?;
     let result = rest.into_iter().fold(first, |acc, (_, _, _, next)| {
         FilterExpr::And(Box::new(acc), Box::new(next))
     });
     Ok((i, result))
 }
 
-fn parse_not(i: &str) -> NomRes<'_, FilterExpr> {
+fn parse_not(i: &str, mode: ParseMode) -> NomRes<'_, FilterExpr> {
     let (i, not_kw) = opt(tuple((keyword("NOT"), multispace0)))(i)?;
-    let (i, primary) = parse_primary(i)?;
+    let (i, primary) = parse_primary(i, mode)?;
     Ok((
         i,
         if not_kw.is_some() {
@@ -216,16 +247,16 @@ fn parse_not(i: &str) -> NomRes<'_, FilterExpr> {
     ))
 }
 
-fn parse_primary(i: &str) -> NomRes<'_, FilterExpr> {
+fn parse_primary(i: &str, mode: ParseMode) -> NomRes<'_, FilterExpr> {
     let (i, _) = multispace0(i)?;
     // 先尝试括号子表达式，再退到 leaf。
-    alt((paren_expr, leaf))(i)
+    alt((|i| paren_expr(i, mode), |i| leaf(i, mode)))(i)
 }
 
-fn paren_expr(i: &str) -> NomRes<'_, FilterExpr> {
+fn paren_expr(i: &str, mode: ParseMode) -> NomRes<'_, FilterExpr> {
     let (i, _) = char('(')(i)?;
     let (i, _) = multispace0(i)?;
-    let (i, expr) = parse_expr(i)?;
+    let (i, expr) = parse_expr(i, mode)?;
     let (i, _) = multispace0(i)?;
     // TD-16：括号闭合失败用 cut 转 Failure，让 alt 不回退到 leaf。
     // 否则 `(cpu > 5` 缺 `)` 时 alt 会 fallback 到 leaf 解析整个 `(cpu > 5`，
@@ -235,8 +266,8 @@ fn paren_expr(i: &str) -> NomRes<'_, FilterExpr> {
     Ok((i, expr))
 }
 
-fn leaf(i: &str) -> NomRes<'_, FilterExpr> {
-    let (i, field) = parse_field(i)?;
+fn leaf(i: &str, mode: ParseMode) -> NomRes<'_, FilterExpr> {
+    let (i, field) = parse_field_with(i, mode)?;
     let (i, _) = multispace0(i)?;
     // 先尝试 regex 路径（=~），不命中再走 in / cmp。
     let (i, regex_path) = opt(tuple((tag("=~"), multispace0, parse_regex_lit)))(i)?;
@@ -259,15 +290,21 @@ fn leaf(i: &str) -> NomRes<'_, FilterExpr> {
                 re,
                 case_insensitive: ci,
             },
+            ParsedField::Frame(f) => FilterExpr::FrameRegex {
+                field: f,
+                re,
+                case_insensitive: ci,
+            },
         };
         return Ok((i, expr));
     }
-    // v0.11 阶段 3：`in` 操作符（仅 NetworkField 支持）。
+    // v0.11 阶段 3 / v0.14 阶段 3：`in` 操作符（Network + Frame 字段支持；
+    // process 字段暂不支持 — surgical：仅在 Flow / Timeline view 设计文档要求）。
     let (i, in_path) = opt(tuple((keyword("in"), multispace0, parse_in_list)))(i)?;
     if let Some((_, _, values)) = in_path {
         let expr = match field {
             ParsedField::Process(_) => {
-                // process 字段暂不支持 in（surgical：仅在 Flow view 设计文档要求）。
+                // process 字段不支持 in（surgical：仅 network / frame 字段支持）。
                 // cut → Failure 让 alt 不回退；错误锚点回退到字段起点附近。
                 return Err(NomErr::Failure(VerboseError::from_error_kind(
                     i,
@@ -275,6 +312,7 @@ fn leaf(i: &str) -> NomRes<'_, FilterExpr> {
                 )));
             }
             ParsedField::Network(f) => FilterExpr::NetworkIn { field: f, values },
+            ParsedField::Frame(f) => FilterExpr::FrameIn { field: f, values },
         };
         return Ok((i, expr));
     }
@@ -292,42 +330,76 @@ fn leaf(i: &str) -> NomRes<'_, FilterExpr> {
             op,
             value,
         },
+        ParsedField::Frame(f) => FilterExpr::FrameFieldCmp {
+            field: f,
+            op,
+            value,
+        },
     };
     Ok((i, expr))
 }
 
-/// parser 内部用的字段归属：process 系（作用 `ProcessInfo`）或 network 系
-/// （作用 `ProcessFlow`）。`leaf` 拿到归属后再决定构造 `FieldCmp` /
-/// `Regex` 还是 `NetworkFieldCmp` / `NetworkRegex` / `NetworkIn`。
+/// parser 内部用的字段归属：process 系（作用 `ProcessInfo`）/ network 系
+/// （作用 `ProcessFlow`）/ frame 系（作用 `UiFrame`，v0.14 阶段 3 新增）。
+/// `leaf` 拿到归属后再决定构造 `FieldCmp` / `Regex` / `NetworkFieldCmp` /
+/// `NetworkRegex` / `NetworkIn` / `FrameFieldCmp` / `FrameRegex` / `FrameIn`。
 #[derive(Debug, Clone, Copy)]
 enum ParsedField {
     Process(Field),
     Network(NetworkField),
+    Frame(FrameField),
 }
 
-fn parse_field(i: &str) -> NomRes<'_, ParsedField> {
+/// v0.14 阶段 3：parse_field 切到 parse_field_with(input, mode)。
+/// 既有调用点（Process 模式）走 [`parse_field_with`]`(_, ParseMode::Process)`；
+/// timeline 搜索走 Frame 模式。
+fn parse_field_with(i: &str, mode: ParseMode) -> NomRes<'_, ParsedField> {
     let (after_ident, ident) = take_while1(|c: char| c.is_ascii_alphanumeric() || c == '_')(i)?;
-    let field = match ident {
-        // process 系字段（v0.7 阶段 4 落地）
-        "cpu" => ParsedField::Process(Field::Cpu),
-        "mem" | "memory" => ParsedField::Process(Field::Mem),
-        "pid" => ParsedField::Process(Field::Pid),
-        "name" => ParsedField::Process(Field::Name),
-        "user" => ParsedField::Process(Field::User),
-        "cmd" => ParsedField::Process(Field::Cmd),
-        "disk_read" | "diskread" => ParsedField::Process(Field::DiskRead),
-        "disk_write" | "diskwrite" => ParsedField::Process(Field::DiskWrite),
-        "net_sent" | "netsent" => ParsedField::Process(Field::NetSent),
-        "net_recv" | "netrecv" => ParsedField::Process(Field::NetRecv),
-        "security_score" | "security" => ParsedField::Process(Field::SecurityScore),
-        // network 系字段（v0.11 阶段 3 新增）
-        "sni" => ParsedField::Network(NetworkField::Sni),
-        "dns_name" | "dnsname" => ParsedField::Network(NetworkField::DnsName),
-        "remote_addr" | "remoteaddr" => ParsedField::Network(NetworkField::RemoteAddr),
-        "remote_port" | "remoteport" => ParsedField::Network(NetworkField::RemotePort),
-        "bytes_out" | "bytesout" => ParsedField::Network(NetworkField::BytesOut),
-        "bytes_in" | "bytesin" => ParsedField::Network(NetworkField::BytesIn),
+    // v0.14 阶段 3：anomaly.severity 含点号 → 用专门的 take_while1 包含 `.`。
+    // 但 parser 主流字段不含 `.`，特殊处理 anomaly.severity 在 take_while1 之外
+    // 走显式 prefix match（让 `.` 仍是 terminator）。
+    let field = match (ident, mode) {
+        // 共有：network 字段（在两种模式下都识别 — 让混合表达式如 `cpu > 80 AND
+        // sni =~ /evil/` 在 timeline 搜索也能写。Flow 视图与 timeline 视图都不
+        // 调对方 ctx 的 apply 方法，所以网络字段在 timeline 中只会让表达式失败
+        // 命中，不会跨 ctx 误用数据）
+        ("sni", _) => ParsedField::Network(NetworkField::Sni),
+        ("dns_name" | "dnsname", _) => ParsedField::Network(NetworkField::DnsName),
+        ("remote_addr" | "remoteaddr", _) => ParsedField::Network(NetworkField::RemoteAddr),
+        ("remote_port" | "remoteport", _) => ParsedField::Network(NetworkField::RemotePort),
+        ("bytes_out" | "bytesout", _) => ParsedField::Network(NetworkField::BytesOut),
+        ("bytes_in" | "bytesin", _) => ParsedField::Network(NetworkField::BytesIn),
+        // Process 模式专属（与 v0.7 阶段 4 行为一致）
+        ("cpu", ParseMode::Process) => ParsedField::Process(Field::Cpu),
+        ("mem" | "memory", ParseMode::Process) => ParsedField::Process(Field::Mem),
+        ("pid", ParseMode::Process) => ParsedField::Process(Field::Pid),
+        ("name", ParseMode::Process) => ParsedField::Process(Field::Name),
+        ("user", ParseMode::Process) => ParsedField::Process(Field::User),
+        ("cmd", ParseMode::Process) => ParsedField::Process(Field::Cmd),
+        ("disk_read" | "diskread", ParseMode::Process) => ParsedField::Process(Field::DiskRead),
+        ("disk_write" | "diskwrite", ParseMode::Process) => ParsedField::Process(Field::DiskWrite),
+        ("net_sent" | "netsent", ParseMode::Process) => ParsedField::Process(Field::NetSent),
+        ("net_recv" | "netrecv", ParseMode::Process) => ParsedField::Process(Field::NetRecv),
+        ("security_score" | "security", ParseMode::Process) => {
+            ParsedField::Process(Field::SecurityScore)
+        }
+        // Frame 模式专属（v0.14 阶段 3 新增）
+        ("cpu", ParseMode::Frame) => ParsedField::Frame(FrameField::Cpu),
+        ("mem" | "memory", ParseMode::Frame) => ParsedField::Frame(FrameField::Mem),
+        ("name", ParseMode::Frame) => ParsedField::Frame(FrameField::Name),
+        ("timestamp" | "ts", ParseMode::Frame) => ParsedField::Frame(FrameField::Timestamp),
+        ("severity", ParseMode::Frame) => ParsedField::Frame(FrameField::AnomalySeverity),
         _ => {
+            // v0.14 阶段 3：检查是不是 `anomaly.severity`（点号需在 take_while1
+            // 之外显式 match，因为 take_while1 终止于 `.`）。
+            if mode == ParseMode::Frame && (ident == "anomaly") {
+                // 试 `anomaly.severity`
+                if let Ok((rest, _)) =
+                    tag::<&str, &str, VerboseError<&str>>(".severity")(after_ident)
+                {
+                    return Ok((rest, ParsedField::Frame(FrameField::AnomalySeverity)));
+                }
+            }
             // 错误锚点放在字段名起点（i），让 to_parse_error 能从 input[off..]
             // 提取出未知字段名拼出友好提示（v0.11 阶段 3）。
             return Err(NomErr::Error(VerboseError::from_error_kind(

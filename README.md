@@ -225,6 +225,8 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 - 录制中按 `b` 标记书签（v0.14 起）：inline 输入 label，Enter 提交 / Esc 取消 / 空 label 默认「书签 #N」
 - `proc replay <file>.prec` 回放：播放/暂停、逐帧 `←→`、倍速 `0.5× / 1× / 2× / 4×`、`Shift+←→` 跳 10 帧
 - 回放中按 `B`（Shift+B）打开书签面板（v0.14 起）：Up/Down 选择 · Enter 跳转到书签帧 · `e` 编辑 label · `d` 删除 · 子串搜索 · Esc 关闭
+- 回放中按 `/` 进入时间轴搜索（v0.14 起）：5 维度 FilterExpr（`cpu > 80` / `mem > 500mb` / `name =~ /chrome/i` / `anomaly.severity = critical` / `timestamp > 1234567890`）+ substring 子串模式；命中帧位置 `●` 在 timeline 高亮；`n` / `N` 跳下一 / 上一命中帧；Enter 提交 / Esc 取消输入态后 `n` / `N` 仍可跳转
+- 回放中按 `r` 切正/倒放方向（v0.14 起）：倒放速度档位同正向（Half / Normal / Double / Quad），timeline icon `▶` / `◀` / `⏸` 反映方向 + 播放状态，倒放到首帧自动暂停（与正向到末帧暂停对称）
 - `proc replay <file>.prec --info`（v0.14 起）不开 TUI 直接显示录屏元数据（时长 / 帧数 / 异常事件 / 最高 CPU/mem）
 - 书签持久化到 `<file>.prec.bookmarks.json` sidecar（与录屏本体解耦，可单独分享 / 删除）
 - Ctrl+C 优雅退出，保证录制文件正常 flush（全局 `shutdown` 模块统一信号）

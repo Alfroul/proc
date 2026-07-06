@@ -15,7 +15,8 @@ const DNS_LOG_BUFFER_CAP: usize = 1000;
 pub use crate::app_panel::{AppGroupSortField, AppMode, KillRequest, MonitorAddSubmenu, OpRecord};
 // v0.6.0 阶段 5：ReplaySpeed / TimelineState 搬到 `crate::replay`，
 // 这里 re-export 让 `crate::app::ReplaySpeed` 等旧路径继续可用（TUI 不动 import）。
-pub use crate::replay::{ReplaySpeed, TimelineState};
+// v0.14 stage 4：扩 re-export `ReplayDirection`（与 ReplaySpeed 对称）。
+pub use crate::replay::{ReplayDirection, ReplaySpeed, TimelineState};
 
 use crate::alert::AlertManager;
 use crate::app_panel::{Panel, PanelAction, PanelContext};
@@ -1155,7 +1156,8 @@ impl App {
     /// `ReplayController::handle_key` / `tick` 返回 [`ReplayAction`] 后，
     /// App 在此派发副作用：`Quit` → `should_quit`；`ApplyFrame` → 把当前帧
     /// 应用到 15+ panel / metrics 字段；`BookmarkPanelToggled` → 设 status 提示；
-    /// `Noop` 不动。
+    /// `SearchInputToggled` / `SearchMatchesUpdated` → 设 status 提示命中数；
+    /// `DirectionToggled` → 设 status 提示当前方向；`Noop` 不动。
     fn dispatch_replay_action(&mut self, action: ReplayAction) {
         match action {
             ReplayAction::Noop => {}
@@ -1168,6 +1170,35 @@ impl App {
                         .to_string()
                 } else {
                     "书签面板已关闭".to_string()
+                });
+            }
+            ReplayAction::SearchInputToggled => {
+                let active = self.replay.search_input_active;
+                self.status_message = Some(if active {
+                    "搜索输入：输入表达式 / substring，Enter 提交 / Esc 取消（n/N 跳转）"
+                        .to_string()
+                } else {
+                    "搜索输入已退出（n/N 仍可跳转命中帧）".to_string()
+                });
+            }
+            ReplayAction::SearchMatchesUpdated => {
+                let n = self.replay.search.matches.len();
+                let error_msg = self
+                    .replay
+                    .search
+                    .error
+                    .as_ref()
+                    .map(|e| format!("  ⚠ {}", e.msg))
+                    .unwrap_or_default();
+                self.status_message = Some(format!("搜索命中 {n} 帧{error_msg}"));
+            }
+            ReplayAction::DirectionToggled => {
+                let dir = self.replay.timeline_state.as_ref().map(|ts| ts.direction);
+                self.status_message = Some(match dir {
+                    Some(ReplayDirection::Reverse) => "倒放中（再按 r 切回正向）".to_string(),
+                    Some(ReplayDirection::Forward) | None => {
+                        "正向播放（再按 r 切倒放）".to_string()
+                    }
                 });
             }
         }

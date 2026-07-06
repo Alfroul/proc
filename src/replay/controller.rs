@@ -14,6 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::app_panel::AppMode;
 use crate::record::{BookmarkFile, BookmarkPanelState, Player};
+use crate::replay::search::ReplaySearch;
 
 /// 录屏回放速度档位。`Half` = 0.5x（每两个 tick 推进 1 帧），
 /// `Normal` = 1x，`Double` = 2x，`Quad` = 4x。
@@ -37,12 +38,56 @@ impl ReplaySpeed {
     }
 }
 
+/// v0.14 stage 4：录屏回放方向。`Forward` = 帧索引递增（默认），
+/// `Reverse` = 帧索引递减（倒放）。
+///
+/// 设计取舍：作为独立枚举（而非扩 ReplaySpeed 8 档）—— speed 与 direction
+/// 正交（任意 speed × 任意 direction 组合），独立字段更清晰，UI 渲染 / 配置
+/// 序列化也直观（未来 `proc replay --speed 2x --reverse` CLI flag 时不动
+/// ReplaySpeed 序列化契约）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReplayDirection {
+    /// 默认方向：帧索引递增。
+    #[default]
+    Forward,
+    /// 倒放：帧索引递减。
+    Reverse,
+}
+
+impl ReplayDirection {
+    #[must_use]
+    pub fn is_reverse(self) -> bool {
+        matches!(self, Self::Reverse)
+    }
+
+    /// v0.14 stage 4：UI icon（与 timeline 渲染共用同一字符表）。
+    /// 暂停态由调用方决策（playing == false 时显示 ⏸，与本方法无关）。
+    #[must_use]
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Forward => "\u{25B6}", // ▶
+            Self::Reverse => "\u{25C0}", // ◀
+        }
+    }
+
+    /// 切方向（Forward ↔ Reverse）。
+    #[must_use]
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Forward => Self::Reverse,
+            Self::Reverse => Self::Forward,
+        }
+    }
+}
+
 /// 时间线游标 + 播放状态。`half_tick` 在 `Half` 速度下隔帧推进用。
 #[derive(Debug, Clone)]
 pub struct TimelineState {
     pub current_frame: usize,
     pub total_frames: usize,
     pub speed: ReplaySpeed,
+    /// v0.14 stage 4：回放方向。默认 Forward（与既有行为兼容）。
+    pub direction: ReplayDirection,
     pub playing: bool,
     pub half_tick: u32,
 }
@@ -58,6 +103,12 @@ pub struct ReplayController {
     pub bookmarks: Option<BookmarkFile>,
     /// v0.14 stage 2：`B` 键打开的书签面板状态。None=未打开 / Some=打开中。
     pub bookmark_panel: Option<BookmarkPanelState>,
+    /// v0.14 stage 3：时间轴搜索状态。始终存在（默认空 input / 无 expr），
+    /// `is_active()` 决定是否生效。
+    pub search: ReplaySearch,
+    /// v0.14 stage 3：搜索输入态（`/` 进入 / Esc 或 Enter 退出）。
+    /// 与 `search.is_active()` 不同：input 可在退出输入态后仍非空（n/N 跳转用）。
+    pub search_input_active: bool,
 }
 
 impl Default for ReplayController {
@@ -74,6 +125,8 @@ impl ReplayController {
             timeline_state: None,
             bookmarks: None,
             bookmark_panel: None,
+            search: ReplaySearch::new(),
+            search_input_active: false,
         }
     }
 
@@ -88,11 +141,15 @@ impl ReplayController {
             current_frame: 0,
             total_frames: total,
             speed: ReplaySpeed::Normal,
+            direction: ReplayDirection::Forward,
             playing: false,
             half_tick: 0,
         });
         self.bookmarks = Some(bookmarks);
         self.bookmark_panel = None;
+        // v0.14 stage 3：reset 搜索（cycle 内每次 start 重新开始）
+        self.search.reset();
+        self.search_input_active = false;
     }
 
     /// 取当前帧的克隆。返回 `None` 表示未启动 / 帧索引越界。调用方拿到后
@@ -155,11 +212,20 @@ impl ReplayController {
 
     /// 回放模式键盘路由。原 `App::handle_replay_key` 整体迁过来。
     ///
+    /// 优先级（v0.14 stage 2 + stage 3 + stage 4）：
+    /// 1. 书签面板激活 → 走 [`Self::handle_bookmark_panel_key`]
+    /// 2. 搜索输入态激活 → 走搜索输入键位
+    /// 3. 普通模式 → q / space / Left / Right / + / - / Home / End / B / `/` / `n` / `N` / `r`
+    ///
     /// 返回 [`ReplayAction`]；副作用（`q` 退出 / 应用帧到 panels）由 App 派发。
     pub fn handle_key(&mut self, key: KeyEvent) -> ReplayAction {
         // v0.14 stage 2：书签面板激活时优先处理面板键位
         if self.bookmark_panel.is_some() {
             return self.handle_bookmark_panel_key(key);
+        }
+        // v0.14 stage 3：搜索输入态激活时优先处理输入键位
+        if self.search_input_active {
+            return self.handle_search_input_key(key);
         }
         let Some(ts) = self.timeline_state.as_mut() else {
             return ReplayAction::Noop;
@@ -170,6 +236,41 @@ impl ReplayController {
                 // v0.14 stage 2：Shift+B 打开书签面板
                 self.bookmark_panel = Some(BookmarkPanelState::new());
                 return ReplayAction::BookmarkPanelToggled;
+            }
+            KeyCode::Char('r') => {
+                // v0.14 stage 4：切播放方向（小写 r）。不与录制键 R 冲突——
+                // 录制键 R 是 Shift+R 在 App 主路径触发 toggle_recording，
+                // ReplayController 仅在回放路径激活，路由不到。
+                ts.direction = ts.direction.toggle();
+                return ReplayAction::DirectionToggled;
+            }
+            KeyCode::Char('/') => {
+                // v0.14 stage 3：进入搜索输入态
+                self.search_input_active = true;
+                // 不清空 input — 让用户在既有搜索基础上修改（按 Esc 后 n/N 仍可用）
+                return ReplayAction::SearchInputToggled;
+            }
+            KeyCode::Char('n') => {
+                // v0.14 stage 3：跳转到下一命中帧
+                if let Some(idx) = self.search.next_match() {
+                    if let Some(ts) = self.timeline_state.as_mut() {
+                        ts.current_frame = idx.min(ts.total_frames.saturating_sub(1));
+                        ts.playing = false;
+                        return ReplayAction::ApplyFrame;
+                    }
+                }
+                return ReplayAction::Noop;
+            }
+            KeyCode::Char('N') => {
+                // v0.14 stage 3：跳转到上一命中帧
+                if let Some(idx) = self.search.prev_match() {
+                    if let Some(ts) = self.timeline_state.as_mut() {
+                        ts.current_frame = idx.min(ts.total_frames.saturating_sub(1));
+                        ts.playing = false;
+                        return ReplayAction::ApplyFrame;
+                    }
+                }
+                return ReplayAction::Noop;
             }
             KeyCode::Char(' ') => {
                 ts.playing = !ts.playing;
@@ -229,6 +330,57 @@ impl ReplayController {
             _ => {}
         }
         ReplayAction::Noop
+    }
+
+    /// v0.14 stage 3：搜索输入态键位路由。
+    /// - Esc / Enter → 退出输入态（保留 input + matches；n/N 仍可用）
+    /// - Backspace → pop 末字符 + reparse + clear matches
+    /// - 字符 → push + reparse + clear matches
+    /// - 其他键 → 吞掉（避免意外触发 q / space 等）
+    fn handle_search_input_key(&mut self, key: KeyEvent) -> ReplayAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.search_input_active = false;
+                ReplayAction::SearchInputToggled
+            }
+            KeyCode::Enter => {
+                // 退出输入态；触发一次 recompute（n/N 跳转用）
+                self.search_input_active = false;
+                self.recompute_search_matches();
+                ReplayAction::SearchMatchesUpdated
+            }
+            KeyCode::Backspace => {
+                self.search.pop_char();
+                self.recompute_search_matches();
+                ReplayAction::SearchMatchesUpdated
+            }
+            KeyCode::Char(c) if !c.is_control() => {
+                self.search.push_char(c);
+                self.recompute_search_matches();
+                ReplayAction::SearchMatchesUpdated
+            }
+            _ => ReplayAction::Noop,
+        }
+    }
+
+    /// v0.14 stage 3：用 player 的 frame_at 重新计算命中帧列表。
+    /// 借用拆分：先 take `&mut self.search`，再读 `&self.replay_player`，
+    /// 最后把更新后的 search 放回（实际上 search 是字段，直接调即可——
+    /// frame_at 通过 closure 注入）。
+    fn recompute_search_matches(&mut self) {
+        // 借用拆分：把 search 字段先取出（take + replace），让 self 只持 player 借用
+        let mut search = std::mem::take(&mut self.search);
+        let total = self
+            .timeline_state
+            .as_ref()
+            .map(|ts| ts.total_frames)
+            .unwrap_or(0);
+        if let Some(player) = self.replay_player.as_ref() {
+            search.recompute_matches(total, |idx| player.frame_at(idx));
+        } else {
+            search.matches.clear();
+        }
+        self.search = search;
     }
 
     /// v0.14 stage 2：书签面板激活时的键位路由。
@@ -439,10 +591,22 @@ impl ReplayController {
         if step == 0 {
             return ReplayAction::Noop;
         }
-        let last = ts.total_frames.saturating_sub(1);
-        ts.current_frame = (ts.current_frame + step).min(last);
-        if ts.current_frame >= last {
-            ts.playing = false;
+        // v0.14 stage 4：方向分支。正向 saturating_add + clamp 到末帧；
+        // 倒放 saturating_sub + clamp 到首帧。到边界自动暂停（对称）。
+        match ts.direction {
+            ReplayDirection::Forward => {
+                let last = ts.total_frames.saturating_sub(1);
+                ts.current_frame = (ts.current_frame + step).min(last);
+                if ts.current_frame >= last {
+                    ts.playing = false;
+                }
+            }
+            ReplayDirection::Reverse => {
+                ts.current_frame = ts.current_frame.saturating_sub(step);
+                if ts.current_frame == 0 {
+                    ts.playing = false;
+                }
+            }
         }
         ReplayAction::ApplyFrame
     }
@@ -458,10 +622,17 @@ pub enum ReplayAction {
     Quit,
     /// timeline 推进了，App 需要把当前帧重新应用到 panels（见
     /// [`crate::app::App::apply_replay_frame`]）。触发点：
-    /// Left / Right / Home / End / tick 自动步进 / 书签 Enter 跳转。
+    /// Left / Right / Home / End / tick 自动步进 / 书签 Enter 跳转 / 搜索 n/N 跳转。
     ApplyFrame,
     /// v0.14 stage 2：书签面板打开 / 关闭（App 设 status_message 提示用户）。
     BookmarkPanelToggled,
+    /// v0.14 stage 3：搜索输入态打开 / 关闭（App 设 status_message 提示用户）。
+    SearchInputToggled,
+    /// v0.14 stage 3：命中帧列表更新（用户输入变化或 recompute 触发）。
+    /// App 设 status_message 提示命中数。
+    SearchMatchesUpdated,
+    /// v0.14 stage 4：方向切换（r 键）。App 设 status_message 提示当前方向。
+    DirectionToggled,
 }
 
 /// v0.14 stage 2：按 search_query 过滤书签索引（label / frame_idx / id 三个字段子串匹配）。

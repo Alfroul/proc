@@ -19,15 +19,30 @@
 //! dns_name in ("a.com", "b.com")
 //! remote_addr = 1.2.3.4 AND source = schannel
 //! ```
+//!
+//! **v0.14.0 阶段 3 增量**：加 [`FrameField`] / [`FrameEvalCtx`] / 三个 Frame
+//! 变体，让录屏时间轴搜索（[`crate::record::UiFrame`]）也能走 FilterExpr。
+//! 入口 [`crate::filter::parser::parse_frame`]（Frame 模式，`cpu`/`mem` 解析
+//! 成 [`FrameField`]；既有 [`crate::filter::parser::parse`] 走 Process 模式
+//! 不变，向后兼容 List / Tree / Flow 视图）：
+//!
+//! ```text
+//! cpu > 80
+//! mem > 500mb
+//! timestamp > 1234567890
+//! name =~ /chrome/i
+//! anomaly.severity = critical
+//! ```
 
 pub mod parser;
 
-pub use parser::{ParseError, parse};
+pub use parser::{ParseError, parse, parse_frame};
 
 use std::collections::HashSet;
 
 use crate::collect::ProcessInfo;
 use crate::flow::ProcessFlow;
+use crate::record::UiFrame;
 
 /// 过滤表达式 AST。每个节点是一个布尔判定，[`FilterExpr::apply`] 是执行入口。
 ///
@@ -72,6 +87,28 @@ pub enum FilterExpr {
     /// 降到 1_000 hash 查找。
     NetworkIn {
         field: NetworkField,
+        values: HashSet<Value>,
+    },
+    /// v0.14 阶段 3：录屏帧字段比较，例 `cpu > 80` / `timestamp > 1234567890`。
+    /// 作用对象 [`UiFrame`]（FrameEvalCtx）。文本字段（Name / AnomalySeverity）
+    /// 走「帧内集合任一匹配」语义（`any_match`），数值字段（Timestamp / Cpu / Mem）
+    /// 走 extract_first + apply_num。
+    FrameFieldCmp {
+        field: FrameField,
+        op: CmpOp,
+        value: Value,
+    },
+    /// v0.14 阶段 3：录屏帧字段正则匹配，例 `name =~ /chrome/i`。仅文本字段
+    /// （Name / AnomalySeverity）支持；数值字段在该变体下永远返 false。
+    FrameRegex {
+        field: FrameField,
+        re: regex::Regex,
+        case_insensitive: bool,
+    },
+    /// v0.14 阶段 3：录屏帧字段 in 集合，例 `name in ("chrome", "edge")` /
+    /// `anomaly.severity in ("critical", "warning")`。文本字段 only。
+    FrameIn {
+        field: FrameField,
         values: HashSet<Value>,
     },
     And(Box<FilterExpr>, Box<FilterExpr>),
@@ -268,6 +305,16 @@ pub struct NetworkEvalCtx<'a> {
     pub flow: &'a ProcessFlow,
 }
 
+/// v0.14 阶段 3：录屏帧求值上下文。作用对象是 [`UiFrame`]（timeline 搜索），
+/// 与 [`EvalCtx`] / [`NetworkEvalCtx`] 平级分离。
+///
+/// 设计取舍（与 stage 2 FilterExpr 同款原则）：分一套 ctx + 一个 apply 方法
+/// 让类型系统保证字段不会跨 ctx 误用——`cpu > 5` 在 timeline 搜索时是「帧整体
+/// CPU」（FrameField），在 List 视图是「单进程 CPU」（Field），语义不同。
+pub struct FrameEvalCtx<'a> {
+    pub frame: &'a UiFrame,
+}
+
 impl FilterExpr {
     /// v0.11 阶段 8 REVIEW-13 P1-2：检测表达式是否含 process 字段变体
     /// ([`Self::FieldCmp`] / [`Self::Regex`]，作用于 [`ProcessInfo`])。
@@ -282,9 +329,12 @@ impl FilterExpr {
     pub fn contains_process_field(&self) -> bool {
         match self {
             Self::FieldCmp { .. } | Self::Regex { .. } => true,
-            Self::NetworkFieldCmp { .. } | Self::NetworkRegex { .. } | Self::NetworkIn { .. } => {
-                false
-            }
+            Self::NetworkFieldCmp { .. }
+            | Self::NetworkRegex { .. }
+            | Self::NetworkIn { .. }
+            | Self::FrameFieldCmp { .. }
+            | Self::FrameRegex { .. }
+            | Self::FrameIn { .. } => false,
             Self::And(l, r) | Self::Or(l, r) => {
                 l.contains_process_field() || r.contains_process_field()
             }
@@ -339,10 +389,13 @@ impl FilterExpr {
             Self::And(l, r) => l.apply(ctx) && r.apply(ctx),
             Self::Or(l, r) => l.apply(ctx) || r.apply(ctx),
             Self::Not(e) => !e.apply(ctx),
-            // Network 变体在 ProcessInfo ctx 下无意义 → false（不报错，surgical 容错）。
-            Self::NetworkFieldCmp { .. } | Self::NetworkRegex { .. } | Self::NetworkIn { .. } => {
-                false
-            }
+            // Network / Frame 变体在 ProcessInfo ctx 下无意义 → false（不报错，surgical 容错）。
+            Self::NetworkFieldCmp { .. }
+            | Self::NetworkRegex { .. }
+            | Self::NetworkIn { .. }
+            | Self::FrameFieldCmp { .. }
+            | Self::FrameRegex { .. }
+            | Self::FrameIn { .. } => false,
         }
     }
 
@@ -381,8 +434,87 @@ impl FilterExpr {
             Self::And(l, r) => l.apply_network(ctx) && r.apply_network(ctx),
             Self::Or(l, r) => l.apply_network(ctx) || r.apply_network(ctx),
             Self::Not(e) => !e.apply_network(ctx),
-            // Process-字段变体在 NetworkEvalCtx 下无意义 → false。
-            Self::FieldCmp { .. } | Self::Regex { .. } => false,
+            // Process / Frame 变体在 NetworkEvalCtx 下无意义 → false。
+            Self::FieldCmp { .. }
+            | Self::Regex { .. }
+            | Self::FrameFieldCmp { .. }
+            | Self::FrameRegex { .. }
+            | Self::FrameIn { .. } => false,
+        }
+    }
+
+    /// v0.14 阶段 3：对单个 UiFrame 求值。true = 该帧通过过滤器（命中）。
+    ///
+    /// 与 [`Self::apply`] / [`Self::apply_network`] 对称：Frame 变体正常求值；
+    /// Process / Network 变体在本 ctx 下返 false（FrameEvalCtx 不持 ProcessInfo
+    /// / ProcessFlow）。And / Or / Not 递归两边都走 apply_frame。
+    ///
+    /// 文本字段（Name / AnomalySeverity）走「帧内集合任一匹配」（[`FrameField::any_match`]），
+    /// 数值字段（Timestamp / Cpu / Mem）走 extract_first + apply_num。
+    #[must_use]
+    pub fn apply_frame(&self, ctx: &FrameEvalCtx<'_>) -> bool {
+        match self {
+            Self::FrameFieldCmp { field, op, value } => {
+                if field.is_text() {
+                    // 文本字段（Name / AnomalySeverity）：帧内集合任一 Eq/Ne 匹配。
+                    // Gt/Lt/Ge/Le 在文本上无意义 → false（与 CmpOp::apply_text 一致）。
+                    let Value::Text(target) = value else {
+                        return false;
+                    };
+                    field.any_match_text(ctx.frame, |s| op.apply_text(s, target))
+                } else {
+                    // 数值字段（Timestamp / Cpu / Mem）：extract_first + apply_num。
+                    // Percent 在 frame ctx 下没有自然除数（与 disk_read/write 同款理由），
+                    // 走「数值直接比较」（cpu 自身就是 0-100 标度，`cpu > 5%` 与 `cpu > 5` 等价）。
+                    let fv = field.extract_first(ctx.frame);
+                    match (&fv, value) {
+                        (FieldValue::Num(a), Value::Number(b)) => op.apply_num(*a, *b),
+                        (FieldValue::Num(a), Value::Percent(b)) => op.apply_num(*a, *b),
+                        _ => false,
+                    }
+                }
+            }
+            Self::FrameRegex { field, re, .. } => {
+                // case_insensitive 在 parser 端通过 `(?i)` 内嵌标志编译进同一个 Regex。
+                if !field.is_text() {
+                    return false;
+                }
+                field.any_match_text(ctx.frame, |s| re.is_match(s))
+            }
+            Self::FrameIn { field, values } => {
+                if !field.is_text() {
+                    return false;
+                }
+                field.any_match_text(ctx.frame, |s| values.contains(&Value::Text(s.to_string())))
+            }
+            Self::And(l, r) => l.apply_frame(ctx) && r.apply_frame(ctx),
+            Self::Or(l, r) => l.apply_frame(ctx) || r.apply_frame(ctx),
+            Self::Not(e) => !e.apply_frame(ctx),
+            // Process / Network 变体在 FrameEvalCtx 下无意义 → false。
+            Self::FieldCmp { .. }
+            | Self::Regex { .. }
+            | Self::NetworkFieldCmp { .. }
+            | Self::NetworkRegex { .. }
+            | Self::NetworkIn { .. } => false,
+        }
+    }
+
+    /// v0.14 阶段 3：检测表达式是否含 Frame 变体（作用于 [`UiFrame`]）。
+    /// 让 timeline 搜索 / List 视图 detect 是否走 [`Self::apply_frame`] 路径。
+    /// 与 [`Self::contains_process_field`] 同款递归实现。
+    #[must_use]
+    pub fn contains_frame_field(&self) -> bool {
+        match self {
+            Self::FrameFieldCmp { .. } | Self::FrameRegex { .. } | Self::FrameIn { .. } => true,
+            Self::FieldCmp { .. }
+            | Self::Regex { .. }
+            | Self::NetworkFieldCmp { .. }
+            | Self::NetworkRegex { .. }
+            | Self::NetworkIn { .. } => false,
+            Self::And(l, r) | Self::Or(l, r) => {
+                l.contains_frame_field() || r.contains_frame_field()
+            }
+            Self::Not(e) => e.contains_frame_field(),
         }
     }
 }
@@ -436,6 +568,107 @@ impl NetworkField {
             Self::BytesIn => FieldValue::Num(f.bytes_in as f64),
         }
     }
+}
+
+/// v0.14 阶段 3：录屏帧字段枚举。作用对象 [`UiFrame`]，与 [`Field`]
+/// （[`ProcessInfo`]）/ [`NetworkField`]（[`ProcessFlow`]）平级分离。
+///
+/// UiFrame 含两类数据：(1) 帧级标量（timestamp / cpu_usage / memory_used）；
+/// (2) 帧内集合（processes / anomalies）。本枚举对应 timeline 搜索的 5 个维度。
+///
+/// **文本字段**：`Name`（任一进程名匹配）/ `AnomalySeverity`（任一异常严重度匹配）—
+/// 走「帧内集合任一匹配」（[`Self::any_match_text`]）。
+/// **数值字段**：`Timestamp` / `Cpu` / `Mem` — 走 extract_first + apply_num。
+///
+/// 设计取舍（与 stage 2 FilterExpr 同款原则）：分一套 ctx + 一个 apply 方法
+/// 让类型系统保证字段不会跨 ctx 误用——`cpu > 5` 在 timeline 搜索时是「帧整体
+/// CPU」（FrameField::Cpu），在 List 视图是「单进程 CPU」（Field::Cpu），
+/// Parser 通过 `parse_frame()` vs `parse()` 入口区分语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameField {
+    /// 帧绝对时间戳（unix epoch 秒）。数值字段。
+    Timestamp,
+    /// 帧整体 CPU 占用百分比（0-100，[`UiFrame::cpu_usage`]）。数值字段。
+    Cpu,
+    /// 帧整体内存（字节，[`UiFrame::memory_used`]）。数值字段。
+    Mem,
+    /// 帧内任一进程名匹配（[`crate::record::FrameProcess::name`]）。文本字段。
+    Name,
+    /// 帧内任一 anomaly 的 severity（[`crate::record::FrameAnomaly::severity`]）。
+    /// 典型值 `info` / `warning` / `critical`。文本字段。
+    AnomalySeverity,
+}
+
+impl FrameField {
+    /// 文本字段（Name / AnomalySeverity）走 [`FieldValue::Text`]；
+    /// 数值字段（Timestamp / Cpu / Mem）走 [`FieldValue::Num`]。
+    #[must_use]
+    pub fn is_text(self) -> bool {
+        matches!(self, Self::Name | Self::AnomalySeverity)
+    }
+
+    /// 数值字段从 UiFrame 取单一值。文本字段调用方应改用 [`Self::any_match_text`]。
+    #[must_use]
+    pub fn extract_first(self, frame: &UiFrame) -> FieldValue {
+        match self {
+            Self::Timestamp => FieldValue::Num(frame.timestamp as f64),
+            Self::Cpu => FieldValue::Num(f64::from(frame.cpu_usage)),
+            Self::Mem => FieldValue::Num(frame.memory_used as f64),
+            Self::Name => FieldValue::Text(
+                frame
+                    .processes
+                    .first()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default(),
+            ),
+            Self::AnomalySeverity => FieldValue::Text(
+                frame
+                    .anomalies
+                    .first()
+                    .map(|a| a.severity.clone())
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+
+    /// 文本字段在帧内集合中**任一**项匹配（`pred` 返 true）。数值字段调用本方法
+    /// 返 false（不应到达此路径——apply_frame 在数值字段下走 extract_first）。
+    /// 让 [`FilterExpr::FrameFieldCmp`] / [`FilterExpr::FrameRegex`] / [`FilterExpr::FrameIn`]
+    /// 共用一套「帧内集合扫描」逻辑。
+    #[must_use]
+    pub fn any_match_text(self, frame: &UiFrame, pred: impl Fn(&str) -> bool) -> bool {
+        match self {
+            Self::Name => frame.processes.iter().any(|p| pred(&p.name)),
+            Self::AnomalySeverity => frame.anomalies.iter().any(|a| pred(&a.severity)),
+            _ => false,
+        }
+    }
+}
+
+/// v0.14 阶段 3：构造 substring 搜索表达式（timeline 搜索 `:` 前缀外的 fallback）。
+///
+/// 用户在 timeline 输入 `chrome`（无 `:` 前缀）→ 等价 `name =~ /chrome/i`。
+/// `regex::escape` 转义元字符让 `.` `*` `+` 等当字面量（避免用户输入 `chrome.exe`
+/// 时被解释为「chrome + 任意字符 + exe」匹配到 `chromexexe`）。
+///
+/// 输入为空时返 Err（让调用方短路，不进入 apply_frame 路径）。
+pub fn build_frame_substring_expr(input: &str) -> Result<FilterExpr, ParseError> {
+    if input.trim().is_empty() {
+        return Err(ParseError {
+            msg: "搜索内容为空".to_string(),
+            position: 0,
+        });
+    }
+    let escaped = regex::escape(input);
+    let re = regex::Regex::new(&format!("(?i){escaped}")).map_err(|_| ParseError {
+        msg: "正则编译失败".to_string(),
+        position: 0,
+    })?;
+    Ok(FilterExpr::FrameRegex {
+        field: FrameField::Name,
+        re,
+        case_insensitive: true,
+    })
 }
 
 #[cfg(test)]

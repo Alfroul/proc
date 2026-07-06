@@ -11,7 +11,9 @@
 
 - **stage 1（Spike）已完成**：录屏文件格式 v3 落地（按需加载 + footer + v1/v2 sidecar + `--info`）。`RecordingFooter` 含 frame_offsets + 全 session 元数据；`Player::frame_at` 改 owned + 单帧 LRU 缓存；`open` 流程 seek trailer 检测 v3 / fallback `open_legacy`；`IdxSidecar` 让 v1/v2 老文件享受按需加载；CLI `proc replay recording.prec --info` 不开 TUI 输出 footer 元数据。
 - **stage 2（Slice）已完成**：录屏书签系统落地。`Bookmark { id, frame_idx, timestamp_secs, label, created_at }` + `BookmarkFile` sidecar `.prec.bookmarks.json`；录制时按 `b` inline label 输入（Enter 提交 / Esc 取消 / 空 label 默认「书签 #N」）；回放时按 `B`（Shift+B）打开书签面板（Up/Down 选择 · Enter 跳帧 · `e` 编辑 label · `d` 删除 · 子串搜索 · Esc 关闭）；面板激活时 tick 自动暂停。`VtRecorder` 加 `frame_count()` 让 `b` 能拿到当前帧索引。
-- stage 3-5 待启动：时间轴搜索 / 倒放 / REVIEW + tag v0.14.0。
+- **stage 3（Slice）已完成**：时间轴搜索落地。FilterExpr 扩 `FrameField`（Timestamp / Cpu / Mem / Name / AnomalySeverity）5 维度 + `FrameEvalCtx { frame: &UiFrame }` + `apply_frame()` + `parse_frame()` Frame 模式入口；`ReplaySearch { input, expr, error, matches, cursor }` 状态机；`/` 进入搜索输入态、`n`/`N` 跳下一/上一命中帧、命中帧位置在 timeline `●` overlay 高亮；parse 失败保留上一次成功 AST；substring 模式（无 `:` 前缀）走 `build_frame_substring_expr` regex escape。
+- **stage 4（Slice）已完成**：录屏倒放落地。`ReplayDirection { Forward, Reverse }` 枚举（默认 Forward，与 ReplaySpeed 正交）+ `TimelineState.direction` 字段 + `ReplayController::handle_key` `r` 键切方向（小写 r；不与录制键 R 冲突——后者是 Shift+R 在 App 主路径）+ `tick` 双向分支（正向 clamp 到末帧暂停 / 倒放 clamp 到首帧暂停，对称）+ timeline icon `▶` / `◀` / `⏸` 三态（playing+Forward 时 ▶ / playing+Reverse 时 ◀ / paused 时 ⏸）+ `ReplayAction::DirectionToggled` 让 App 设 status_message 提示「倒放中 / 正向播放」；切方向不重置 `current_frame` / `half_tick`（节奏连续）。VT100 replay 路径不加倒放（字节流需反向解释器 ~1000+ 行，留 v0.15+）。
+- stage 5 待启动：REVIEW-v0.14 + 收尾 + tag v0.14.0。
 
 下次 cycle（v0.15.0+）的候选方向：基于 v0.14 cycle 落地情况 + tech-debt 残留项决定。
 

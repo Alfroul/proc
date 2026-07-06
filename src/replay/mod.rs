@@ -5,5 +5,7 @@
 //! 散落在 `App` 上帝对象中。
 
 pub mod controller;
+pub mod search;
 
-pub use controller::{ReplayAction, ReplayController, ReplaySpeed, TimelineState};
+pub use controller::{ReplayAction, ReplayController, ReplayDirection, ReplaySpeed, TimelineState};
+pub use search::ReplaySearch;
