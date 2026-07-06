@@ -539,7 +539,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_metrics_system",
-        description = "System-level metrics: CPU/memory/swap usage %, 30-second sparkline history, uptime, network interface IPs. Stage 1 stub — business logic lands in v0.15 stage 3."
+        description = "System-level metrics: CPU usage %, memory/swap/system_disk usage (used/total/pct), uptime_secs, processes_count, network_interfaces (filtered: excludes 169.254/127.0.0.1), tcp_stats (established/time_wait/close_wait/listen + 4 segment counters), cpu_temp_c, gpu_temp_c. One-shot snapshot (no sparkline history)."
     )]
     fn proc_metrics_system(
         &self,
@@ -550,7 +550,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_metrics_gpu",
-        description = "GPU metrics: NVIDIA via NVML (VRAM/temperature/power/utilization) + DXGI for all-vendor VRAM + PDH utilization. Stage 1 stub — business logic lands in v0.15 stage 3."
+        description = "GPU metrics: per-GPU {name, vendor (Nvidia/Amd/Intel/Unknown), utilization_pct, vram {used/total/budget bytes}, temperature_c, power_watts}. providers[] shows which data sources reported (nvml/dxgi/pdh). Returns gpus: [] + note when no providers available (non-Windows / no GPU)."
     )]
     fn proc_metrics_gpu(
         &self,
@@ -561,7 +561,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_metrics_disk_io",
-        description = "Per-disk and per-process disk I/O rates (uses ETW NT Kernel Logger on Windows for accuracy; falls back to sysinfo delta). Stage 1 stub — business logic lands in v0.15 stage 3."
+        description = "Disk I/O: total {read_bps, write_bps}, per_disk[] {name, mount_point, read_bps, write_bps}, disks[] {name, mount_point, used_bytes, total_bytes, is_removable}. Optional device filter narrows per_disk only (total/disks always return all)."
     )]
     fn proc_metrics_disk_io(
         &self,
@@ -572,7 +572,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_metrics_smart",
-        description = "SMART disk health aggregated summary (device=None) or single-disk detail (device set). Note: v0.7 proc_smart overlaps with this — relationship TBD in stage 4 review. Stage 1 stub — business logic lands in v0.15 stage 3."
+        description = "SMART disk health. device=None → aggregated mode: disks[] summary {device, model, serial, temperature, health (Ok/Warning/Failing/Unknown), attribute_count}. device=Some(\"PhysicalDrive0\") → single_device mode with full attributes[] (id/name/value/threshold/raw_value/failing). Note: v0.7 proc_smart overlaps single_device mode — relationship TBD in stage 4 review."
     )]
     fn proc_metrics_smart(
         &self,
@@ -583,7 +583,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_metrics_thermal",
-        description = "Per-core CPU frequency + temperature + throttle flags (THERMAL / POWER). Stage 1 stub — business logic lands in v0.15 stage 3."
+        description = "Per-core CPU frequency + temperature + throttle state. Returns per_core_freq_mhz[], per_core_temp_c[] (None=that core unavailable, same length), throttle {max_mhz, current_mhz, mhz_limit, is_throttled, throttle_pct} (null on non-Windows), reason string (None/Thermal/PowerPolicy/Idle/Unknown/Unavailable)."
     )]
     fn proc_metrics_thermal(
         &self,

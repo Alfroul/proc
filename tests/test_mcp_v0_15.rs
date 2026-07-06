@@ -413,3 +413,212 @@ fn test_proc_inspect_bogus_pid_dlls_returns_ok_or_empty() {
     assert!(out.get("ok").is_some(), "missing ok: {out}");
     // 不 panic 即可
 }
+
+// ===========================================================================
+// 类别 4（系统级 metrics，5 tool） — stage 3 新增
+// ===========================================================================
+
+use proc::mcp::handler::metrics;
+
+#[test]
+fn test_proc_metrics_system_returns_full_snapshot() {
+    let out = metrics::make_metrics_system_json();
+    assert_eq!(out["ok"], serde_json::json!(true));
+    // CPU / uptime / process count
+    assert!(out["cpu_usage_pct"].as_f64().is_some(), "cpu_usage_pct");
+    assert!(out["uptime_secs"].as_u64().is_some(), "uptime_secs");
+    assert!(out["processes_count"].as_u64().is_some(), "processes_count");
+    // memory / swap / system_disk 三段都有 used_bytes/total_bytes/pct
+    for field in ["memory", "swap", "system_disk"] {
+        let seg = &out[field];
+        assert!(seg.is_object(), "{field} must be object: {seg}");
+        assert!(seg["used_bytes"].as_u64().is_some(), "{field} used_bytes");
+        assert!(seg["total_bytes"].as_u64().is_some(), "{field} total_bytes");
+        assert!(seg["pct"].as_f64().is_some(), "{field} pct");
+    }
+}
+
+#[test]
+fn test_proc_metrics_system_network_interfaces_is_array_and_filtered() {
+    let out = metrics::make_metrics_system_json();
+    let arr = out["network_interfaces"]
+        .as_array()
+        .expect("network_interfaces array");
+    // 不强求数组非空（容器 / CI 可能没网卡），但每条不能含 169.254 / 127.0.0.1
+    for ni in arr {
+        if let Some(ip) = ni["ipv4"].as_str() {
+            assert!(!ip.starts_with("169.254."), "APIPA leaked: {ip}");
+            assert!(ip != "127.0.0.1", "loopback leaked: {ip}");
+        }
+    }
+}
+
+#[test]
+fn test_proc_metrics_system_tcp_stats_has_seven_fields() {
+    let out = metrics::make_metrics_system_json();
+    let tcp = &out["tcp_stats"];
+    assert!(tcp.is_object(), "tcp_stats object");
+    // 7 个字段（established/time_wait/close_wait/listen + 3 累计计数 + out_segs）
+    for field in [
+        "established",
+        "time_wait",
+        "close_wait",
+        "listen",
+        "retransmitted_segs",
+        "reset_segs",
+        "failed_connections",
+    ] {
+        assert!(tcp.get(field).is_some(), "tcp_stats missing {field}: {tcp}");
+    }
+}
+
+#[test]
+fn test_proc_metrics_gpu_returns_ok_with_providers_array() {
+    let out = metrics::make_metrics_gpu_json();
+    assert_eq!(out["ok"], serde_json::json!(true));
+    // providers 是字符串数组（即便空也必须是数组）
+    assert!(out["providers"].is_array(), "providers array");
+    // gpus 是数组
+    assert!(out["gpus"].is_array(), "gpus array");
+    // 空时 note 字段在
+    if out["gpus"].as_array().unwrap().is_empty() {
+        assert!(out.get("note").is_some(), "empty gpus should have note");
+    } else {
+        // 非空时每条 gpu 含 vendor / vram 字段
+        for g in out["gpus"].as_array().unwrap() {
+            assert!(g["vendor"].is_string(), "vendor string: {g}");
+            assert!(g["vram"].is_object(), "vram object: {g}");
+            assert!(g["vram"]["used_bytes"].as_u64().is_some());
+            assert!(g["vram"]["total_bytes"].as_u64().is_some());
+        }
+    }
+}
+
+#[test]
+fn test_proc_metrics_disk_io_returns_per_disk_array() {
+    let out = metrics::make_metrics_disk_io_json(None);
+    assert_eq!(out["ok"], serde_json::json!(true));
+    // total 段在
+    let total = &out["total"];
+    assert!(total["read_bps"].as_u64().is_some(), "total read_bps");
+    assert!(total["write_bps"].as_u64().is_some(), "total write_bps");
+    // per_disk / disks 都是数组
+    assert!(out["per_disk"].is_array(), "per_disk array");
+    assert!(out["disks"].is_array(), "disks array");
+    // 非空 per_disk 每条含 name/mount_point/read_bps/write_bps
+    for d in out["per_disk"].as_array().unwrap() {
+        assert!(d["name"].is_string(), "name: {d}");
+        assert!(d["read_bps"].as_u64().is_some(), "read_bps: {d}");
+        assert!(d["write_bps"].as_u64().is_some(), "write_bps: {d}");
+    }
+}
+
+#[test]
+fn test_proc_metrics_disk_io_filter_by_device_returns_subset_or_empty() {
+    // device=Some 不存在的设备 → per_disk 空，但 total/disks 字段仍返（决策 5）
+    let out = metrics::make_metrics_disk_io_json(Some("DEFINITELY_NOT_A_REAL_DEVICE_XYZ"));
+    assert_eq!(out["ok"], serde_json::json!(true));
+    assert_eq!(
+        out["device_filter"],
+        serde_json::json!("DEFINITELY_NOT_A_REAL_DEVICE_XYZ")
+    );
+    let per_disk = out["per_disk"].as_array().expect("per_disk array");
+    assert!(
+        per_disk.is_empty(),
+        "per_disk should be empty for bogus device"
+    );
+    // total / disks 不受 filter 影响
+    assert!(out["total"].is_object(), "total still present");
+    assert!(out["disks"].is_array(), "disks still present");
+}
+
+#[test]
+fn test_proc_metrics_smart_aggregated_returns_disks_array() {
+    let out = metrics::make_metrics_smart_json(None);
+    assert_eq!(out["ok"], serde_json::json!(true));
+    assert_eq!(out["mode"], serde_json::json!("aggregated"));
+    let arr = out["disks"].as_array().expect("disks array");
+    // 空 SMART-readable disks（容器 / VM / 无 smartctl）→ note 字段在
+    if arr.is_empty() {
+        assert!(
+            out.get("note").is_some(),
+            "empty aggregated should have note"
+        );
+    } else {
+        // 非空时每条含 device/model/health（read_smart 失败的 disk 用 error 字段，不在此断言）
+        for d in arr {
+            // 不是错误条目（含 error 字段）才校验 schema
+            if d.get("error").is_none() {
+                assert!(d["device"].is_string(), "device: {d}");
+                assert!(d["model"].is_string(), "model: {d}");
+                assert!(d["health"].is_string(), "health: {d}");
+            }
+        }
+    }
+}
+
+#[test]
+fn test_proc_metrics_smart_specific_device_returns_attributes_or_error() {
+    // 不存在的 device → ok=false / error 字段（read_smart 失败）
+    let out = metrics::make_metrics_smart_json(Some("DEFINITELY_NOT_A_REAL_DISK_XYZ"));
+    if out["ok"].as_bool() == Some(true) {
+        // 极端情况：read_smart 返了空 attributes 也不挂
+        assert_eq!(out["mode"], serde_json::json!("single_device"));
+        assert!(out["disk"].is_object(), "disk object");
+    } else {
+        // 预期路径：error 字段在
+        assert!(out.get("error").is_some(), "missing error: {out}");
+    }
+}
+
+#[test]
+fn test_proc_metrics_thermal_returns_per_core_arrays_same_length() {
+    let out = metrics::make_metrics_thermal_json();
+    assert_eq!(out["ok"], serde_json::json!(true));
+    // per_core_freq / per_core_temp 必须是数组
+    let freq = out["per_core_freq_mhz"]
+        .as_array()
+        .expect("per_core_freq_mhz array");
+    let temp = out["per_core_temp_c"]
+        .as_array()
+        .expect("per_core_temp_c array");
+    // 长度一致（决策 6）
+    assert_eq!(
+        freq.len(),
+        temp.len(),
+        "freq/temp length mismatch: {} vs {}",
+        freq.len(),
+        temp.len()
+    );
+    // throttle 字段在（含 null 路径）/ reason 字符串在
+    assert!(out.get("throttle").is_some(), "throttle field missing");
+    let reason = out["reason"].as_str().expect("reason string");
+    assert!(
+        matches!(
+            reason,
+            "None" | "Thermal" | "PowerPolicy" | "Idle" | "Unknown" | "Unavailable"
+        ),
+        "reason unexpected: {reason}"
+    );
+}
+
+#[test]
+fn test_proc_metrics_thermal_throttle_field_shape() {
+    let out = metrics::make_metrics_thermal_json();
+    // throttle 字段 null（无 PROCESSOR_POWER_INFORMATION）或完整 5 字段对象
+    if out["throttle"].is_null() {
+        assert_eq!(out["reason"], serde_json::json!("Unavailable"));
+    } else {
+        let ti = &out["throttle"];
+        assert!(ti.is_object(), "throttle object: {ti}");
+        for field in [
+            "max_mhz",
+            "current_mhz",
+            "mhz_limit",
+            "is_throttled",
+            "throttle_pct",
+        ] {
+            assert!(ti.get(field).is_some(), "throttle missing {field}: {ti}");
+        }
+    }
+}
