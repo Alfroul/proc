@@ -22,9 +22,9 @@
 //!   enum + stub helper
 //! - [`metrics`]：v0.15 类别 4（系统级 metrics，5 tool）Args + stub helper
 
-mod cli;
-mod inspect;
-mod metrics;
+pub mod cli;
+pub mod inspect;
+pub mod metrics;
 
 use std::sync::{Arc, Mutex};
 
@@ -426,7 +426,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_flows",
-        description = "List end-to-end network flows (ProcessFlow: pid + remote_addr/port + bytes_out/in + sni + dns_name + source). Stage 1 stub — business logic lands in v0.15 stage 2. Returns JSON { ok, stub: true, stage, received_limit }."
+        description = "List end-to-end network flows (ProcessFlow: pid + sni + dns_name + remote_addr/port + bytes_out/in + first/last_seen). Spawns a short-lived collector with 2s warm-up (Schannel ETW on Windows). Returns JSON { ok, count, worker, flows[] } — worker='unavailable' when Schannel worker cannot start (non-admin / x86 / session busy)."
     )]
     fn proc_flows(
         &self,
@@ -437,7 +437,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_throttle",
-        description = "Get or set Windows 11 EcoQoS / Efficiency Mode for a process. set=true throttles, set=false un-throttles, set=None queries current state. Stage 1 stub — business logic lands in v0.15 stage 2."
+        description = "Get or set Windows 11 EcoQoS / Efficiency Mode for a process. set=true throttles (🍃), set=false un-throttles, set=None queries current state. Returns JSON { ok, pid, action: 'get'|'set', state: 'Normal'|'Eco'|'Unknown' }. Windows 11 only (ADR-0022)."
     )]
     fn proc_throttle(
         &self,
@@ -448,7 +448,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_export",
-        description = "Export process list to JSON or CSV (defaults to JSON on stdout — does NOT write a file unless the agent pipes output). format='csv' for CSV. Stage 1 stub — business logic lands in v0.15 stage 2."
+        description = "Export process list to JSON or CSV (defaults to JSON; the payload field holds the formatted output — agent decides whether to write a file). format='csv' for CSV. sort/limit follow the same semantics as proc_ls. Returns JSON { ok, format, sort, count, payload }."
     )]
     fn proc_export(
         &self,
@@ -463,7 +463,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_docker_inspect",
-        description = "Docker container inspect (bollard::inspect_container equivalent). Returns the full bollard inspect JSON. Stage 1 stub — business logic lands in v0.15 stage 2."
+        description = "Docker container inspect: container info (id/name/image/state/health/ports) + health_detail + stats (cpu_percent/memory/network). Returns JSON { ok, container, health_detail, stats } or { ok: false, error } if container not found / Docker daemon unavailable."
     )]
     fn proc_docker_inspect(
         &self,
@@ -474,7 +474,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_docker_images",
-        description = "List local Docker images with in_use flag (reverse-lookup from containers). Stage 1 stub — business logic lands in v0.15 stage 2."
+        description = "List local Docker images with in_use flag (reverse-lookup from containers count). Returns JSON { ok, count, images[] } with { id, short_id, repo_tags, created, size, containers, in_use }."
     )]
     fn proc_docker_images(&self) -> Result<CallToolResult, McpError> {
         ok_result(make_docker_images_json())
@@ -482,7 +482,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_docker_volumes",
-        description = "List Docker volumes with in_use flag (reverse-lookup from containers). Stage 1 stub — business logic lands in v0.15 stage 2."
+        description = "List Docker volumes with in_use flag (reverse-lookup from container mounts). Returns JSON { ok, count, volumes[] } with { name, driver, mountpoint, created, size, in_use }."
     )]
     fn proc_docker_volumes(&self) -> Result<CallToolResult, McpError> {
         ok_result(make_docker_volumes_json())
@@ -490,7 +490,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_docker_events",
-        description = "Drain recent Docker daemon events (one-shot, NOT follow mode — MCP is request-response). limit defaults to 100. Stage 1 stub — business logic lands in v0.15 stage 2."
+        description = "Drain recent Docker daemon events (one-shot, NOT follow mode — MCP is request-response). Spawns a 500ms watcher window then drains up to `limit` (default 100) events. Returns JSON { ok, count, events[], note } — empty array + note when daemon is idle."
     )]
     fn proc_docker_events(
         &self,
@@ -501,7 +501,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_monitor_add",
-        description = "Add a process/port/command monitor. target_kind='pid'|'port'|'command'. dry_run defaults to FALSE (real add); pass dry_run=true to preview. Stage 1 stub — business logic lands in v0.15 stage 2."
+        description = "Add a process/port/command monitor. target_kind='pid'|'port'|'command'. restart_policy='notify_only' (default) | 'auto_restart'. dry_run defaults to FALSE (real add); pass dry_run=true to preview. Returns JSON { ok, dry_run, id?, target_kind, target, restart_policy }."
     )]
     fn proc_monitor_add(
         &self,
@@ -517,7 +517,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_monitor_remove",
-        description = "Remove a configured monitor by ID. dry_run defaults to FALSE (real remove); pass dry_run=true to preview. Stage 1 stub — business logic lands in v0.15 stage 2."
+        description = "Remove a configured monitor by ID. dry_run defaults to FALSE (real remove); pass dry_run=true to preview. Returns JSON { ok, dry_run, id } or { ok: false, error } if id is not a positive integer / not found."
     )]
     fn proc_monitor_remove(
         &self,
@@ -528,7 +528,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_inspect",
-        description = "Inspect a process by PID + tab. tab='summary' (default) returns basic info + R1-R18 risk factors + signature_status + parent_chain. tab='env' returns env vars (secret masked unless reveal=true). tab='network' returns listening + established + recent DNS. tab='dlls' returns loaded modules. tab='memory_map' returns memory regions. tab='handles' returns open handles (same schema as proc_handles). Stage 1 stub — business logic lands in v0.15 stage 2."
+        description = "Inspect a process by PID + tab. tab='summary' (default) returns basic info + parent_chain + signature_status + R1-R18 risk_factors + security_score. tab='env' returns env vars (secret masked unless reveal=true). tab='network' returns listening + established + dns_recent (top 5). tab='dlls' returns loaded modules. tab='memory_map' returns memory regions. tab='handles' returns open handles (same schema as proc_handles)."
     )]
     fn proc_inspect(
         &self,
