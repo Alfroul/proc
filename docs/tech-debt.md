@@ -586,6 +586,95 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 ---
 
+## v0.16.0+ 候选补遗（v0.15.0 stage 4 REVIEW-v0.15 归档）
+
+> v0.15.0 cycle stage 4 Review 产出 [`docs/reviews/REVIEW-v0.15.md`](reviews/REVIEW-v0.15.md)，P2 = 5 项归档到此段。
+
+### TD-50（REVIEW-v0.15 P2-1）：`proc_metrics_smart` vs `proc_smart` 入口重叠
+
+**位置**：
+- `src/mcp/handler/metrics.rs::make_metrics_smart_json`（device=None 走聚合 vs device=Some 走详细 attributes）
+- `src/mcp/handler/mod.rs::proc_smart`（v0.7 既有 17 tool 之一，单设备详细 attributes）
+- `src/mcp/handler/mod.rs::proc_metrics_smart`（v0.15 cat 4 新 tool）
+
+**现状**：v0.15 stage 3 决策 2 选 (b) 方案落地 —— `proc_metrics_smart(device=None)` 返系统级聚合（all disks 摘要），`proc_metrics_smart(device=Some)` 与 `proc_smart(device=Some)` 同款返详细 attributes。device=Some 时两 tool 100% 重叠。
+
+**影响**：agent 调用 confusion（两 tool 都能查单设备 SMART，schema 略不同但内容相同）。无功能阻断。
+
+**修复方案**（v0.16+ cycle 评估）：
+1. **(a) 废弃 `proc_smart`**（推荐）：标 Status Deprecated，schema 加 `x-deprecated: true` hint，agent 优先调 `proc_metrics_smart`。理由：`proc_metrics_smart` 双路径设计更通用（聚合 + 单设备），`proc_smart` 是 v0.7 历史遗留
+2. **(b) 合并入口**：`proc_smart` alias 到 `proc_metrics_smart`，统一 helper
+3. **(c) 保持现状**：documented 作为互补，agent 二选一
+
+**v0.15 stage 4 决策**：归档 v0.16+ cycle 评估。理由：(1) `proc_smart` 是 v0.7 既有 17 tool 之一，外部 client（Claude Desktop / Cursor）可能已集成，废弃需评估破坏性；(2) `proc_metrics_smart` 双路径设计是 stage 3 决策 2 落地，stage 1 §4c 待定项已闭环；(3) 保持现状 (c) 是 surgical 默认，agent 二选一不阻断。
+
+### TD-51（REVIEW-v0.15 P2-2）：`MonitorManager` 无持久化
+
+**位置**：
+- `src/mcp/handler/cli.rs::make_monitor_add_json` / `make_monitor_remove_json`（每次 `ProcMcpHandler::new()` 都新建 MonitorManager）
+- `src/monitor/manager.rs::MonitorManager::new()`（in-memory 空表）
+
+**现状**：`MonitorManager` 是 in-memory 的（无磁盘持久化），每次 `new()` 都是空表。v0.15 stage 2 的 `monitor_add` / `monitor_remove` 仅在 process 内有效，跨 tool call 丢失。与既有 `proc_monitor_list` v0.7 行为一致（都空表起步）。
+
+**影响**：agent 跨 tool call 配置监控规则无效（add 后 list 看不到）。无错误，但 agent 视角 confusion。
+
+**修复方案**（v0.16+ cycle 评估）：
+1. **加配置文件持久化**（推荐）：`~/.config/proc/monitors.toml`（与 `trusted_signers.toml` 同款路径），`MonitorManager::new()` 时 load，add/remove 时 write
+2. **加 MCP handler 持久 MonitorManager 字段**：与 v0.12 TD-36 持久 dns_collector 同款模式，`ProcMcpHandler` 加 `monitor_manager: Arc<Mutex<MonitorManager>>` 字段，跨 tool call 共享
+
+**v0.15 stage 4 决策**：归档 v0.16+ cycle 评估。理由：(1) v0.7 `proc_monitor_list` 既有契约是「空表起步」（list 在 production TUI 路径有持久化，但 MCP 路径未集成）；(2) agent 视角的监控配置应持久化是合理需求，但需评估配置 schema 与 TUI 路径一致性；(3) v0.16 cycle 主题 D2（操作 + 录屏类）会涉及更多写操作 MCP tool，统一评估持久化策略。
+
+### TD-52（REVIEW-v0.15 P2-3）：`metrics_system` sparkline 30s 历史不暴露
+
+**位置**：
+- `src/mcp/handler/metrics.rs::make_metrics_system_json`（仅返当前快照，无 sparkline 历史）
+- brainstorm §类别 4 提「30 秒火花线图历史」
+
+**现状**：v0.15 stage 3 决策 3 + 风险 5 明确「sparkline 30s 历史暂不做」—— MCP 一次性 request-response 模型不适合 worker 累积，需要持久化 + worker 1s tick 推送（与 LightWorker 同款）。
+
+**影响**：agent 看不到 CPU/内存 30s 趋势，只能看当前快照。无功能阻断（与 `proc_diag` 同款一次性快照语义）。
+
+**修复方案**（v0.16+ cycle 评估）：
+1. **加 MCP handler 持久 SystemSnapshot 历史**：`ProcMcpHandler` 加 `system_history: Arc<Mutex<Vec<SystemSnapshot>>>` 字段，1s tick push 一次，30s cap
+2. **加 Resource subscribe**：rmcp 0.11 `Resource subscribe` 模式，client 订阅 system metrics 更新事件（与 brainstorm 主题 B 可观测性 cycle 同款方向）
+
+**v0.15 stage 4 决策**：归档 v0.16+ cycle 评估。理由：(1) MCP 一次性 request-response 模型与 sparkline 持久化语义不直接兼容，需评估 rmcp 0.11 Resource subscribe 能力（与 brainstorm 主题 B 可观测性 cycle 同款方向）；(2) `proc_diag` 是 v0.7 既有一次性快照 tool，`metrics_system` 同款语义是 surgical 默认；(3) agent 当前能用 `metrics_system` 拿当前快照 + 多次调用对比，趋势需求可在 client 侧累积。
+
+### TD-53（REVIEW-v0.15 P2-4）：`metrics_disk_io` per-process 不暴露
+
+**位置**：
+- `src/mcp/handler/metrics.rs::make_metrics_disk_io_json`（仅返 total + per_disk + disks 三段，无 per-process）
+- `src/disk_io_etw/{mod.rs, provider.rs, thread_map.rs}`（v0.7 落地的 per-process disk_io ETW worker）
+
+**现状**：v0.15 stage 3 决策 5 明确「per-process disk_io 暂不暴露」—— 需要 ETW + thread_map（disk_io_etw worker 模式），MCP 一次性调用启动 ETW session 不实用（NT Kernel Logger 单实例限制 + 启动延迟 ~1s）。
+
+**影响**：agent 看不到 per-process disk_io BPS（`proc_ls --sort disk_read` 是另一种视角，列表 + 排序）。无功能阻断。
+
+**修复方案**（v0.16+ cycle 评估）：
+1. **加 MCP handler 持久 disk_io_etw_worker**：与 `dns_collector` 同款模式（v0.12 TD-36），`ProcMcpHandler` 加 `disk_io_etw: Arc<Mutex<Option<DiskIoEtwHandle>>>` 字段，handler spawn 时启动 worker，metrics_disk_io tool drain 一次
+2. **加 proc_inspect(disk_io) tab**：详情页视角看单进程 disk_io 历史
+
+**v0.15 stage 4 决策**：归档 v0.16+ cycle 评估。理由：(1) disk_io_etw worker 启动延迟（NT Kernel Logger单实例）+ 非管理员 / x86 fallback 复杂度高，MCP 一次性调用不适合；(2) `proc_ls --sort disk_read` 已覆盖列表视角，详情页视角 v0.16 cycle 评估；(3) v0.16 cycle 主题 D2（操作 + 录屏类）会涉及更多 worker 路径，统一评估 MCP handler 持久 worker 字段策略。
+
+### TD-54（REVIEW-v0.15 P2-5）：`proc_flows` / `metrics_*` 多次调用 SystemSnapshot::new + App::new 累积开销
+
+**位置**：
+- `src/mcp/handler/cli.rs::make_flows_json`（`App::new() + 2s warm-up` 每次 ~2s）
+- `src/mcp/handler/metrics.rs::make_metrics_*_json` 5 helper（`SystemSnapshot::new() + refresh()` 每次 ~500ms）
+- `src/mcp/handler/cli.rs::make_export_json`（同款 SystemSnapshot 路径）
+
+**现状**：v0.15 stage 2 风险 1 + stage 3 风险 4 文档化 —— 每次 tool call 都新建 App / SystemSnapshot，agent 多次调用累积开销大。
+
+**影响**：agent 多次调 metrics_* / proc_flows / proc_export 累积 ~500ms-2s/次。可接受（agent 典型 task 调 1-2 次）。
+
+**修复方案**（v0.16+ cycle 评估）：
+1. **加 MCP handler 持久 SystemSnapshot / App**：与 `dns_collector` 同款模式，`ProcMcpHandler` 加 `snapshot: Arc<Mutex<SystemSnapshot>>` 字段，1s tick refresh
+2. **加 TTL 缓存**：handler 内 `HashMap<ToolName, (timestamp, result)>` 缓存，TTL 1s（与 worker 1s tick 对齐）
+
+**v0.15 stage 4 决策**：归档 v0.16+ cycle 评估。理由：(1) `App::new()` 不是 Send + Sync（包含多个 worker handle + UI 状态），跨 tool call 共享需评估线程安全；(2) SystemSnapshot 共享较简单但需评估 freshness（worker 路径 vs MCP 路径同步）；(3) agent 实际不会高频调（典型 task 调 1-2 次），优化收益边际；(4) v0.16 cycle 主题 D2 涉及更多 worker 路径，统一评估。
+
+---
+
 ## 历史回顾
 
 - v0.6.0 Review（本文件来源）：`docs/reviews/REVIEW-7.md` 产出 1 P0 + 9 P1 + 14 P2。

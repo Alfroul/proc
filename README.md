@@ -2,6 +2,8 @@
 
 Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中。**Windows-only 应用**（Windows 10 1809+ / Windows 11 x64，详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。
 
+> **v0.15.0（2026-07-06）— MCP 全功能暴露 cycle（查询类）**：把 proc 已落地但 MCP 未暴露的查询类能力全部透出给 LLM agent——(1) **MCP 模块骨架重构**（`handler.rs` 单文件 1156 行 → `handler/{mod, cli, inspect, metrics}.rs` 4 子 module，[ADR-0024](docs/adr/0024-mcp-handler-module-split.md)）；(2) **CLI 命令 9 tool 直接暴露**（`proc_flows` / `proc_throttle` / `proc_export` / `proc_docker_inspect` / `proc_docker_images` / `proc_docker_volumes` / `proc_docker_events` / `proc_monitor_add` / `proc_monitor_remove`）；(3) **详情页 6 Tab 合并 1 个 `proc_inspect(pid, tab=...)` tool**（[ADR-0023](docs/adr/0023-mcp-inspect-tool-merge.md)，schema 自描述，与 v0.7 既有 `proc_handles` 互补）；(4) **系统级 metrics 5 tool**（`proc_metrics_system` / `gpu` / `disk_io` / `smart` / `thermal`，让 agent 看到系统全貌）。MCP tool 总数 **17 → 32**（agent 视角最大价值缺口补完，写操作 + 录屏类留 v0.16）。cycle 4 stage 全交付（~1700 行业务代码 + 39 新集成测试 + REVIEW-v0.15 P0 0 / P1 3 / P2 5，TD-50~54 归档）。详见 [CHANGELOG](CHANGELOG.md)。
+
 > **v0.14.0（2026-07-06）— 录屏回放 v2 cycle**：4 大能力补完录屏事后分析体验——(1) **文件格式 v3 按需加载**（解决长 session OOM：30 min × 1000 进程从 9s 启动 + 10 GB RAM 优化到 < 100ms + ~12 MB，PERF-BASELINE TD-45 闭环）+ `RecordingFooter` 元数据 + v1/v2 老文件 `.prec.idx` sidecar 兼容 + CLI `--info` 不开 TUI 输出元数据；(2) **书签系统**（`b` 录制时添加 / `B` 回放时打开面板 / `.bookmarks.json` sidecar 持久化）；(3) **时间轴搜索**（`/` 进入 FilterExpr 5 维度：`cpu > 80` / `mem > 500mb` / `name =~ /chrome/i` / `anomaly.severity = critical` / `timestamp > ...` + substring 模式 + `n`/`N` 跳转 + timeline `●` 高亮）；(4) **倒放**（`r` 切方向 + tick 双向分支 + timeline `▶`/`◀`/`⏸` 三态，倒放到首帧自动暂停与正向到末帧暂停对称）。cycle 5 stage 全交付（方案 A 完整 v2，~1750 行业务代码 + 127 新测试）；REVIEW-v0.14 P0 0 / P1 1 / P2 1，TD-49 归档（VT100 replay 无倒放/搜索 + 长录屏搜索遍历优化）。详见 [CHANGELOG](CHANGELOG.md)。
 
 > **v0.13.0（2026-07-05）— 性能 baseline cycle**：建立 criterion benchmark suite（6 个 hot path × 多档 fixture = 25 数据点）+ 产出 [PERF-BASELINE 报告](docs/reviews/PERF-BASELINE-v0.13.md)。**用户拍板方案 c**：验证 proc 当前架构在 1000 进程规模下无显著性能瓶颈，跳过 stage 3+ 优化。cycle 全程**不动业务代码**（1115 passed / 0 failed / 3 ignored 基线不变）；4 个候选项（parent_chain Arc 重构 / tui format! 风暴 / record deserialize 加速 / command_palette fuzzy）归档 tech-debt [TD-44/45/46/47](docs/tech-debt.md) 留 v0.14+ cycle 评估（含 1 个侦察报告误读纠错）。
@@ -259,11 +261,11 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 | `proc record` / `proc replay <file>` | VT100 录屏 |
 | `proc export --format json\|csv [-o file] [--sort] [--limit]` | 进程数据导出（含 ISO-8601 本地时间戳） |
 | `proc docker ps / inspect / top / logs / images / volumes / image-rm / volume-rm / compose / events / exec`<sup>v0.5.0</sup> | Docker 11 子命令 |
-| `proc mcp serve`<sup>v0.7.0</sup> | 启动 MCP server（stdio transport），把上述 17+ 子命令暴露为 `proc_*` MCP tools 供 Claude Desktop / Cursor 等 LLM agent 调用 |
+| `proc mcp serve`<sup>v0.7.0</sup> | 启动 MCP server（stdio transport），把上述 32 个子命令 / 详情页 Tab / 系统指标暴露为 `proc_*` MCP tools 供 Claude Desktop / Cursor 等 LLM agent 调用（v0.7 落地 17 tool，v0.15 扩到 32 tool） |
 
-### MCP server（LLM agent 接入）<sup>v0.7.0</sup>
+### MCP server（LLM agent 接入）<sup>v0.7.0 · 扩 v0.15.0</sup>
 
-`proc mcp serve` 把 proc 的进程 / 网络 / DNS / Docker 能力暴露为 [MCP](https://modelcontextprotocol.io/) tools，让 Claude Code / Cursor / Windsurf 等客户端直接调用。详见 [`docs/adr/0009-mcp-server.md`](docs/adr/0009-mcp-server.md)。
+`proc mcp serve` 把 proc 的进程 / 网络 / DNS / Docker / 详情页 Tab / 系统指标能力暴露为 [MCP](https://modelcontextprotocol.io/) tools，让 Claude Code / Cursor / Windsurf 等客户端直接调用。详见 [`docs/adr/0009-mcp-server.md`](docs/adr/0009-mcp-server.md)（v0.7 设计）+ [`docs/adr/0023-mcp-inspect-tool-merge.md`](docs/adr/0023-mcp-inspect-tool-merge.md)（v0.15 详情页 6 Tab 合并）+ [`docs/adr/0024-mcp-handler-module-split.md`](docs/adr/0024-mcp-handler-module-split.md)（v0.15 子 module 拆分）。
 
 **Claude Desktop 配置**（macOS：`~/Library/Application Support/Claude/claude_desktop_config.json`；Windows：`%APPDATA%\Claude\claude_desktop_config.json`）：
 
@@ -282,7 +284,9 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 
 **手动调试**：`npx mcp-inspector proc mcp serve` 在浏览器里看 schema、试调用。
 
-**可用 tool**（17 个）：
+**可用 tool**（**32 个**，v0.7 落地 17 + v0.15 新增 15）：
+
+##### 类别 0 — v0.7 既有 17 tool（列表视角）
 
 | Tool | 对应 CLI | 返回 JSON |
 |---|---|---|
@@ -304,9 +308,39 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 | `proc_docker_top` | `proc docker top` | `{ ok, count, processes[] }` |
 | `proc_docker_logs` | `proc docker logs` | `{ ok, count, lines[] }`（非 follow） |
 
-未暴露（对 LLM 无意义）：`proc_record` / `proc_replay` / `proc_export`。后续阶段追加：`proc_psi` / `proc_throttle` / `proc_disk_io` / `proc_flows`。
+##### 类别 1 — v0.15 新增 9 tool（CLI 命令直接暴露）
 
-**字段裁剪**：`proc_ls` 不返回 `exe` / `cwd` / `user_id`，避免 LLM 上下文泄漏敏感路径（详见 ADR-0009）。
+| Tool | 对应 CLI | 返回 JSON |
+|---|---|---|
+| `proc_flows` | `proc flows` | `{ ok, count, flows[], worker }`（Schannel ETW worker 不可用 → `worker: "unavailable"`）|
+| `proc_throttle` | `proc throttle` | `{ ok, pid, ecoqos_state }`（Windows 11 EcoQoS）|
+| `proc_export` | `proc export` | `{ ok, format, payload }`（json / csv）|
+| `proc_docker_inspect` | `proc docker inspect` | `{ ok, container, health_detail, stats }` |
+| `proc_docker_images` | `proc docker images` | `{ ok, count, images[] }`（含 in_use 反查）|
+| `proc_docker_volumes` | `proc docker volumes` | `{ ok, count, volumes[] }`（含 in_use 反查）|
+| `proc_docker_events` | `proc docker events` | `{ ok, count, events[], note }`（500ms 短超时 drain，非 follow）|
+| `proc_monitor_add` | `proc monitor --add` | `{ ok, id, target_kind, target, restart_policy }`（`dry_run=false` 默认，与 `proc_kill` 一致；`dry_run=true` opt-in 返 preview）|
+| `proc_monitor_remove` | `proc monitor --remove` | `{ ok, id, removed }` |
+
+##### 类别 2 — v0.15 新增 1 tool（详情页 6 Tab 合并）
+
+| Tool | 入参 | 返回 JSON（按 tab 分支）|
+|---|---|---|
+| `proc_inspect` | `pid, tab=summary\|env\|network\|dlls\|memory_map\|handles, reveal=false` | `summary`：完整 ProcessInfo + parent_chain + signature_status + risk_factors（详情页视角返完整 cmd/exe/cwd 真值）/ `env`：env_vars[]（secret 12 关键字默认 mask，`reveal=true` opt-in 显示真值）/ `network`：listening[] + established[] + dns_recent[] / `dlls`：dlls[]（path/base_addr/size）/ `memory_map`：regions[]（base_addr/size/state/protection/name）/ `handles`：与 `proc_handles` 同 schema |
+
+##### 类别 4 — v0.15 新增 5 tool（系统级 metrics）
+
+| Tool | 返回 JSON |
+|---|---|
+| `proc_metrics_system` | `{ ok, cpu_usage_pct, memory, swap, system_disk, uptime_secs, processes_count, network_interfaces[], tcp_stats, cpu_temp_c, gpu_temp_c }`（无 30s sparkline 历史 — TD-52 v0.16+ 候选）|
+| `proc_metrics_gpu` | `{ ok, gpus[], providers[] }`（providers 标 nvml/dxgi/pdh 数据源；无 GPU → `gpus: [], note`）|
+| `proc_metrics_disk_io` | `{ ok, total, per_disk[], disks[] }`（`device=Some` 仅过滤 per_disk）|
+| `proc_metrics_smart` | `device=None` → aggregated（disks[] 摘要，与 sidebar 同款）/ `device=Some` → 详细 attributes（与 `proc_smart` 同 schema）|
+| `proc_metrics_thermal` | `{ ok, per_core_freq_mhz[], per_core_temp_c[], throttle, reason }`（throttle null + reason="Unavailable" 兜底非 Windows）|
+
+未暴露（留 v0.16 cycle — brainstorm §主题 D 子方向 D2）：`proc_record_start/stop` / `proc_replay_info/search` / `proc_bookmarks_*`（录屏 + 操作类，~6 tool ~600 行）。
+
+**字段裁剪**：`proc_ls` 不返回 `exe` / `cwd` / `user_id`，避免 LLM 上下文泄漏敏感路径（列表视角，详见 ADR-0009）；`proc_inspect(summary)` 是**详情页视角**，返完整 cmd/exe/cwd 真值（agent 主动查单个进程 = 已同意看真值，与列表视角互补不冲突，详见 ADR-0023）；`proc_inspect(env)` 默认 mask secret 12 关键字（与 v0.6 env_reveal 同款契约，`reveal=true` opt-in 显示真值）；写操作（`proc_kill` / `proc_pkill` / `proc_monitor_add` / `proc_monitor_remove`）`dry_run=false` 默认（与 v0.7 契约一致，`dry_run=true` opt-in 预演）。
 
 ### 主题与持久化
 

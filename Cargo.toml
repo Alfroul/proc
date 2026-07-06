@@ -1,6 +1,6 @@
 [package]
 name = "proc"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.85"
 description = "交互式 TUI 系统进程管理器，集成进程/网络/USB/Docker/安全评分/录屏"

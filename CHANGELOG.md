@@ -7,7 +7,39 @@
 
 ## [Unreleased]
 
-下次 cycle（v0.15.0+）的候选方向：基于 v0.14 cycle 落地情况 + tech-debt TD-44~49 残留项决定。
+下次 cycle（v0.16.0+）的候选方向：基于 v0.15 cycle 落地情况 + tech-debt TD-50~54 残留项决定。**brainstorm §主题 D 子方向 D2 已锁定**——MCP 操作 + 录屏类 cycle（`proc_record_start/stop` / `proc_replay_info/search` / `proc_bookmarks_*` ~6 tool ~600 行）。其他候选：主题 B 可观测性 cycle（rmcp Resource subscribe / SSE transport，与 TD-52 sparkline 同款方向）/ 主题 A 性能优化 cycle（TD-54 MCP handler 内 SystemSnapshot/App 复用 + TD-44~47 残留）/ 主题 F VT100 replay 增强 cycle（TD-49 字节流转码 UiFrame）。
+
+## [0.15.0] - 2026-07-06
+
+v0.15.0 cycle 是 **MCP 全功能暴露 cycle（查询类）**（**主题 D 子方向 D1**：4 stage 中重 cycle，~1700 行业务代码）。cycle 主线：MCP 模块骨架重构（`handler.rs` 单文件 1156 行 → `handler/{mod, cli, inspect, metrics}.rs` 4 子 module）+ 15 个新查询类 tool 业务逻辑填充（cat 1 CLI 命令 9 tool + cat 2 `proc_inspect` 6 tab + cat 4 metrics 5 tool）+ ADR-0023（详情页 6 Tab 合并 1 个 tool 设计）+ ADR-0024（子 module 拆分决策）+ cycle 末段全局 Review + 收尾 tag。
+
+**cycle 4 stage 全交付**（stage 1 Spike / stage 2-3 Slice / stage 4 Review + 收尾）：
+
+### 阶段 4 — Review + 收尾 + tag v0.15.0（本次发布）
+
+> 本次发布 commit：Cargo.toml 0.14.0 → 0.15.0；CHANGELOG / README / brainstorm 同步 v0.15.0；4 个 stage doc 头部加 ✅ 已发布标记（stage 1 补，stage 2/3/4 已有）；REVIEW-v0.15 P0/P1/P2 状态闭环（**P0 0 / P1 3 / P2 5**）；tech-debt TD-50 ~ TD-54 归档（`proc_metrics_smart` vs `proc_smart` 重叠 / MonitorManager 无持久化 / metrics sparkline 历史不暴露 / per-process disk_io 不暴露 / metrics 多次调用 SystemSnapshot 累积开销，留 v0.16+ 评估）。
+
+- Docs: 产出 [`docs/reviews/REVIEW-v0.15.md`](docs/reviews/REVIEW-v0.15.md)（~340 行，6 子项审查 + 3 P1 修复 + 5 P2 归档）；CONTEXT.md 演进历史加 v0.15.0 阶段 4 行 + 术语段 / 演进段「开发中」改「已落地」（与 stage 1-3 行对齐，本地 .gitignore 不入 commit）；brainstorm.md 阶段总览表 4/4 ✅ + 末尾加 cycle 总结段 + §14 tool 标题加 miscount 注释（stage 1 §决策 2 拍板按表格列出的 9+1+5=15 实装）。
+- P1 修复: stage 1 doc 头部加 `> ✅ **已完成**` 标记（与 v0.14 stage 5 P1-1 同款问题）；brainstorm cycle 总览表 stage 1-4 ⬜ → ✅；brainstorm §14 tool 标题加 miscount 注释。
+- Release: `git tag -a v0.15.0 -m "v0.15.0：MCP 全功能暴露查询类 cycle（17 → 32 tool，~1700 行业务代码）"`（等用户确认后 push）。
+
+### 阶段 1-3 — 业务代码落地（cycle 累计 +39 新测试，1242 → 1281）
+
+- **Added**: `src/mcp/handler/{mod.rs(ProcMcpHandler 主 impl 块 32 个 #[tool] 方法 = 17 既有 + 15 新增，含 ServerHandler impl + serve + list_tool_names + 既有 17 helper + 公共 helper), cli.rs(新 568 行 = 9 个 cat 1 Args struct + 9 helper 替换 stub 为真实业务 + 4 内部 helper), inspect.rs(新 360 行 = ProcInspectArgs + InspectTab enum 6 变体 + 1 helper 替换 stub 为 6 tab 分支实装 + 2 内部 helper), metrics.rs(新 400 行 = 5 个 cat 4 Args struct + 5 helper 替换 stub 为真实业务 + 4 内部 helper usage_obj/matches_device/make_metrics_smart_aggregated/single)}` — stage 1 子 module 骨架 + stage 2 cat 1+2 业务逻辑 + stage 3 cat 4 业务逻辑落地。
+- **Added**: `docs/adr/{0023-mcp-inspect-tool-merge.md(新 ~150 行 详情页 6 Tab 合并 1 个 proc_inspect tool 设计), 0024-mcp-handler-module-split.md(新 ~120 行 handler.rs 单文件 → handler/ 子 module 重构决策，列 ToolRouter::add / SyncTool trait 替代方案)}` — stage 1 落地。
+- **Added**: `tests/test_mcp_v0_15.rs(新 624 行 39 case = stage 2 29 case cat 1 16 + cat 2 9 + 4 boundary + stage 3 10 case system 3 / gpu 1 / disk_io 2 / smart 2 / thermal 2)` — stage 2 + stage 3 落地。
+- **Changed**: `src/mcp/handler.rs(删，git mv 到 handler/mod.rs)` — stage 1 子 module 拆分；`src/mcp/handler/mod.rs(顶部 mod 声明 stage 1 私有 → stage 2 改 pub mod 让测试能 import Args struct)` — stage 2 surgical visibility 调整。
+- **Docs**: `docs/stages/v0.15-stage-{1..4}.md` 4 个 stage docs + `docs/stages/v0.15-brainstorm.md` cycle 总览 + `docs/reviews/REVIEW-v0.15.md`(新 ~340 行) + `docs/tech-debt.md`(加 v0.16.0+ 候选补遗段 TD-50~54) + `CONTEXT.md`(术语段 + 演进历史 4 行，本地不入 commit) + `README.md`(banner v0.15.0 段 + MCP 章节扩 32 tool 列表) + `CHANGELOG.md`(本段) + `Cargo.toml(0.14.0 → 0.15.0)` + `Cargo.lock(同步)`。
+
+**关键数字**：
+
+| 指标 | v0.14.0 基线 | v0.15.0 落地 |
+|---|---|---|
+| 全量回归 | 1242 passed / 0 failed / 3 ignored | **1281 passed / 0 failed / 3 ignored**（+39 新测试）|
+| MCP tool 总数 | 17（v0.7 落地）| **32**（17 既有 + 15 新增，agent 视角最大价值缺口补完）|
+| handler 模块结构 | `handler.rs` 单文件 1156 行 | **`handler/{mod.rs 1358, cli.rs 568, inspect.rs 360, metrics.rs 400}` 4 子 module = 2686 行**（含既有 17 tool + 15 新 tool + helper）|
+| 业务代码 | — | **~1700 行**（与主题 D 预期 ~1850 行接近）|
+| 集成测试 | — | **39 case**（cat 1 16 + cat 2 9 + 4 boundary + cat 4 10）|
 
 ## [0.14.0] - 2026-07-06
 
