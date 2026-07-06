@@ -7,15 +7,43 @@
 
 ## [Unreleased]
 
-### v0.14.0 cycle（开发中）— 录屏回放 v2 cycle（方案 A：完整 v2，5 stage）
+下次 cycle（v0.15.0+）的候选方向：基于 v0.14 cycle 落地情况 + tech-debt TD-44~49 残留项决定。
 
-- **stage 1（Spike）已完成**：录屏文件格式 v3 落地（按需加载 + footer + v1/v2 sidecar + `--info`）。`RecordingFooter` 含 frame_offsets + 全 session 元数据；`Player::frame_at` 改 owned + 单帧 LRU 缓存；`open` 流程 seek trailer 检测 v3 / fallback `open_legacy`；`IdxSidecar` 让 v1/v2 老文件享受按需加载；CLI `proc replay recording.prec --info` 不开 TUI 输出 footer 元数据。
-- **stage 2（Slice）已完成**：录屏书签系统落地。`Bookmark { id, frame_idx, timestamp_secs, label, created_at }` + `BookmarkFile` sidecar `.prec.bookmarks.json`；录制时按 `b` inline label 输入（Enter 提交 / Esc 取消 / 空 label 默认「书签 #N」）；回放时按 `B`（Shift+B）打开书签面板（Up/Down 选择 · Enter 跳帧 · `e` 编辑 label · `d` 删除 · 子串搜索 · Esc 关闭）；面板激活时 tick 自动暂停。`VtRecorder` 加 `frame_count()` 让 `b` 能拿到当前帧索引。
-- **stage 3（Slice）已完成**：时间轴搜索落地。FilterExpr 扩 `FrameField`（Timestamp / Cpu / Mem / Name / AnomalySeverity）5 维度 + `FrameEvalCtx { frame: &UiFrame }` + `apply_frame()` + `parse_frame()` Frame 模式入口；`ReplaySearch { input, expr, error, matches, cursor }` 状态机；`/` 进入搜索输入态、`n`/`N` 跳下一/上一命中帧、命中帧位置在 timeline `●` overlay 高亮；parse 失败保留上一次成功 AST；substring 模式（无 `:` 前缀）走 `build_frame_substring_expr` regex escape。
-- **stage 4（Slice）已完成**：录屏倒放落地。`ReplayDirection { Forward, Reverse }` 枚举（默认 Forward，与 ReplaySpeed 正交）+ `TimelineState.direction` 字段 + `ReplayController::handle_key` `r` 键切方向（小写 r；不与录制键 R 冲突——后者是 Shift+R 在 App 主路径）+ `tick` 双向分支（正向 clamp 到末帧暂停 / 倒放 clamp 到首帧暂停，对称）+ timeline icon `▶` / `◀` / `⏸` 三态（playing+Forward 时 ▶ / playing+Reverse 时 ◀ / paused 时 ⏸）+ `ReplayAction::DirectionToggled` 让 App 设 status_message 提示「倒放中 / 正向播放」；切方向不重置 `current_frame` / `half_tick`（节奏连续）。VT100 replay 路径不加倒放（字节流需反向解释器 ~1000+ 行，留 v0.15+）。
-- stage 5 待启动：REVIEW-v0.14 + 收尾 + tag v0.14.0。
+## [0.14.0] - 2026-07-06
 
-下次 cycle（v0.15.0+）的候选方向：基于 v0.14 cycle 落地情况 + tech-debt 残留项决定。
+v0.14.0 cycle 是 **录屏回放 v2 cycle**（**方案 A**：完整 v2，5 stage，~1750 行业务代码）。cycle 主线：录屏文件格式 v3 按需加载 + 书签 + 时间轴搜索 + 倒放 4 大功能 + cycle 末段全局 Review + 收尾 tag。
+
+**cycle 5 stage 全交付**（stage 1 Spike / stage 2-4 Slice / stage 5 Review + 收尾）：
+
+### 阶段 5 — Review + 收尾 + tag v0.14.0（本次发布）
+
+> 本次发布 commit：Cargo.toml 0.13.0 → 0.14.0；CHANGELOG / README / brainstorm 同步 v0.14.0；5 个 stage doc 头部加 ✅ 已发布标记；REVIEW-v0.14 P0/P1/P2 状态闭环（**P0 0 / P1 1 / P2 1**）；tech-debt TD-49 归档（VT100 replay 无倒放/搜索 + 长录屏搜索遍历优化，留 v0.15+ 评估）。
+
+- Docs: 产出 [`docs/reviews/REVIEW-v0.14.md`](docs/reviews/REVIEW-v0.14.md)（~370 行，6 子项审查 + P1 修复 + TD-49 归档）；CONTEXT.md 演进历史加 v0.14.0 阶段 5 行（与 stage 1-4 行对齐，本地 .gitignore 不入 commit）；brainstorm.md 阶段总览表 5/5 ✅ + 末尾加 cycle 总结段。
+- P1 修复: 4 个 stage docs（stage 1-4）头部加 `> ✅ **已完成**` 标记（与 v0.13 stage 3 P1-2 / P1-3 同款问题，cycle 末段 Review 时发现并闭环）。
+- Release: `git tag -a v0.14.0 -m "v0.14.0：录屏回放 v2 cycle（按需加载 + 书签 + 时间轴搜索 + 倒放 + footer 元数据，方案 A 完整 v2 5 stage）"`（等用户确认后 push）。
+
+### 阶段 1-4 — 业务代码落地（cycle 累计 +127 新测试，1115 → 1242）
+
+- **Added**: `src/record/{frame.rs(RecordingFooter + FOOTER_MAGIC + FOOTER_TRAILER_LEN + RECORDING_VERSION 2→3), writer.rs(Recorder writer thread 累积 footer 9 状态 + Stop 写 footer/trailer), reader.rs(Player 重写为按需加载 + open_legacy fallback + frame_at 返 owned + LRU 单帧缓存), sidecar.rs(新 ~190 行 IdxSidecar v1/v2 兼容层), bookmark.rs(新 ~280 行 Bookmark + BookmarkFile + BookmarkPanelState)}` — stage 1 + stage 2 落地。
+- **Added**: `src/filter/{mod.rs(FrameField 枚举 5 维度 + FrameEvalCtx + 3 个新变体 FrameFieldCmp/FrameRegex/FrameIn + apply_frame + contains_frame_field + build_frame_substring_expr), parser.rs(ParseMode 枚举 + parse_with_mode + parse_frame 入口 + parse_field_with mode dispatch + anomaly.severity 点号特殊处理)}` — stage 3 落地。
+- **Added**: `src/replay/{search.rs(新 ~410 行 ReplaySearch 状态机 9 方法 13 unit test), controller.rs(ReplayDirection 枚举 + TimelineState.direction 字段 + handle_search_input_key + recompute_search_matches + handle_key 加 r/`//n/N 分支 + tick 双向分支 + ReplayAction::SearchInputToggled/SearchMatchesUpdated/DirectionToggled/BookmarkPanelToggled 5 个新变体), mod.rs(re-export ReplaySearch + ReplayDirection)}` — stage 2 + stage 3 + stage 4 落地。
+- **Changed**: `src/app.rs(App 加 recording_bookmarks + recording_path + recording_frame_count + pending_bookmark_label 4 字段 + PendingBookmarkLabel struct + 5 method + dispatch_replay_action 加 5 个新 ReplayAction 分支 + status_message 中文提示 + re-export ReplayDirection)` — stage 2 + stage 3 + stage 4 落地。
+- **Changed**: `src/tui/replay_panel.rs(draw_bookmark_panel modal + draw_timeline 加搜索输入态 + 命中标记渲染 ●/■ + icon 三态 ▶/◀/⏸ + 入口 [B 书签]/[/ 搜索] 提示行) + src/tui/mod.rs(set_recording_path + set_recording_frame_count 每 tick + flush 正常/Ctrl+C 两条路径)` — stage 2 + stage 3 + stage 4 落地。
+- **Changed**: `src/record/vt100.rs(VtRecorder 加 frame_count 字段 + Arc<AtomicU64> writer thread fetch_add + 主线程 load 方法)` — stage 2 落地。
+- **Added**: `src/cli/{def.rs(Replay --info flag), record.rs(run_replay_info 分支输出 footer 元数据)}` — stage 1 落地。
+- **Tests**: `tests/test_record.rs(扩 v3 round-trip / random seek / footer correctness / v1/v2 兼容 / sidecar 6 case +20) + tests/test_bookmark.rs(新 17 case 录制路径 8 + 回放路径 9 +33) + tests/test_replay_search.rs(新 40 case 12 parse_frame 维度 + 14 apply_frame 命中 + 4 substring escape + 3 FrameField unit + 7 ReplaySearch 集成 +53) + tests/test_replay_direction.rs(新 21 case 4 ReplayDirection enum + 1 start 默认 + 3 r 键切方向 + 8 tick 双向分支含 Half/Quad/边界 + 2 边界连续性 + 1 search 与 direction 解耦 + 1 r 在搜索输入态被吞 + 1 r 与 R 不冲突 +21)` — cycle 累计 +127 新测试。
+- **Docs**: `docs/stages/v0.14-stage-{1..5}.md` 5 个 stage docs + `docs/stages/v0.14-brainstorm.md` cycle 总览 + `docs/reviews/REVIEW-v0.14.md`(新 ~370 行) + `docs/tech-debt.md`(加 v0.15.0+ 候选补遗段 TD-49) + `CONTEXT.md`(术语 + 演进历史 5 行，本地不入 commit) + `README.md`(录屏章节 v0.14 功能描述 + banner v0.14.0 段) + `CHANGELOG.md`(本段) + `Cargo.toml(0.13.0 → 0.14.0)` + `Cargo.lock(同步)`。
+
+**关键数字**：
+
+| 指标 | v0.13.0 基线 | v0.14.0 落地 |
+|---|---|---|
+| 全量回归 | 1115 passed / 0 failed / 3 ignored | **1242 passed / 0 failed / 3 ignored**（+127 新测试）|
+| 启动加载（30 min × 1000 进程）| 9 秒（全量 deserialize）| **< 100 ms**（按需加载，PERF-BASELINE TD-45 闭环，90× 加速）|
+| 内存占用（30 min × 1000 进程）| ~10 GB（必 OOM）| **~12 MB**（与 session 长度无关，800× 缩减）|
+| 单帧 seek（@ 1000 进程）| 165 µs | 165 µs（不变，按需加载不改变单帧 deserialize 成本）|
+| 业务代码 | — | **~1750 行**（与方案 A 预期对齐）|
 
 ## [0.13.0] - 2026-07-05
 

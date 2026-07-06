@@ -554,6 +554,38 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 ---
 
+## v0.15.0+ 候选补遗（v0.14.0 stage 5 REVIEW-v0.14 归档）
+
+> v0.14.0 cycle stage 5 Review 产出 [`docs/reviews/REVIEW-v0.14.md`](reviews/REVIEW-v0.14.md)，P2 = 1 项归档到此段。
+
+### TD-49（REVIEW-v0.14 P2-1）：VT100 replay 路径无倒放 / 搜索 + 长录屏搜索遍历优化
+
+**位置**：
+- VT100 倒放：`src/tui/mod.rs::run_vt_replay`（VT100 字节流反向解释器需 ~1000+ 行实装）
+- VT100 搜索：同上（VT100 文件无结构化数据，无法 apply FilterExpr）
+- 长录屏搜索遍历优化：`src/record/frame.rs::RecordingFooter`（footer 加索引段让阈值搜索 O(1)）+ `src/replay/search.rs::recompute_matches`（按 footer 索引段短路）
+
+**现状**：
+- VT100 replay 路径不加倒放 / 搜索是 stage 3 / stage 4 doc「不在本 stage 范围」段明确 surgical 跳过的——VT100 文件是字节流（无结构化帧索引），倒放需要把整个字节流倒序解析（每个 VT500 序列需反向应用：clear / cursor move / SGR 等），实现成本远超 stage 4 的 ~250 行预算；VT100 文件无结构化数据（无 UiFrame），无法 apply FilterExpr。
+- 长录屏搜索遍历延迟是 stage 3 doc §「风险 2」明确的已知限制：30 min × 30 FPS × 1000 进程 = 54000 frames × 165 µs = ~9 秒用户可感。当前 `ReplaySearch::recompute_matches` 走同步遍历（input 变化时调一次），未引入异步搜索（保持 surgical 简单）。
+
+**影响**：
+- VT100 replay 用户感知不到差（VT100 replay 是独立 CLI 子命令 `proc replay-vt`，与 UiFrame replay `proc replay` 入口不同，用户使用时已知类型）
+- 长录屏搜索遍历 ~9 秒用户可感但可接受（30 min 录屏是极端场景，常用 5-10 min 录屏 < 1 秒）；遍历期间 TUI 阻塞（同步路径），无异步提示
+
+**修复方案**（v0.15+ cycle 评估）：
+1. **VT100 倒放**（高成本 ~1000+ 行）：实装 VT500 反向解释器（每个 VT500 序列需反向应用：clear / cursor move / SGR 等），或转码 VT100 字节流到 UiFrame 结构（让 VT100 replay 享受 UiFrame replay 全部能力，但转码本身也是 ~1000+ 行）
+2. **VT100 搜索**（同上）：VT100 文件转码到 UiFrame 后自动获得搜索能力
+3. **长录屏搜索遍历优化**（中成本 ~200 行）：`RecordingFooter` 加索引段（如 `max_cpu_frame_idx` / `first_critical_anomaly_idx` / `cpu_threshold_frames: Vec<usize>`），让阈值搜索 O(1)；substring / regex 搜索仍走遍历路径（无自然索引）
+
+**验证**：
+- VT100 倒放：`run_vt_replay` 加 `r` 键分支 + 反向迭代字节流 + VT500 反向解释器单元测试
+- 长录屏搜索优化：`recompute_matches` 按 footer 索引段短路（如 `cpu > 80` 走 `footer.max_cpu_frame_idx` 直接定位）；criterion bench 对比 before/after
+
+**v0.14 stage 5 决策**：归档 v0.15+ cycle 评估。理由：(1) VT100 replay 倒放 / 搜索实现成本高（~1000+ 行），用户痛点弱于书签 / 搜索 / 倒放（VT100 replay 是独立子命令，用户已知类型，UiFrame replay 已有完整能力）；(2) 长录屏搜索遍历是极端场景（30 min × 1000 进程），常用 5-10 min 录屏 < 1 秒用户无感，footer 加索引段需评估 schema 演进（FOOTER_MAGIC 末字节 bump）；(3) v0.14 cycle 已交付完整 UiFrame replay v2 能力（按需加载 + 书签 + 搜索 + 倒放），VT100 replay 是次要路径，留 v0.15+ cycle 评估时基于用户反馈重新决定优先级。
+
+---
+
 ## 历史回顾
 
 - v0.6.0 Review（本文件来源）：`docs/reviews/REVIEW-7.md` 产出 1 P0 + 9 P1 + 14 P2。
