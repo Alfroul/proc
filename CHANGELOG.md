@@ -7,7 +7,39 @@
 
 ## [Unreleased]
 
-**v0.16.0 cycle 进行中**（主题 D 子方向 D2：MCP 全功能暴露 cycle 第二弹 —— 录屏 v2 replay / bookmarks + USB status，~7 tool ~810-910 行）。cycle 4 stage 节奏（与 v0.15 对齐）：stage 1 Spike（handler 子 module 扩 record.rs + 7 tool stub + ADR-0025a/0025b）✅ / stage 2 Slice（replay + USB status 业务逻辑填充 + 18 集成测试）✅ / stage 3 Slice（bookmarks 业务逻辑填充 + 18 集成测试）✅ / stage 4 Review + 收尾（待启动）。
+下次 cycle（v0.17.0+）的候选方向：基于 v0.16 cycle 落地情况 + tech-debt TD-50~54 残留项决定。候选：主题 B 可观测性 cycle（rmcp Resource subscribe / SSE transport / 实时流，与 TD-52 sparkline 历史同款方向）/ 主题 A 性能优化 cycle（TD-54 MCP handler 内 SystemSnapshot/App 复用 + TD-44~47 残留 PERF-BASELINE）/ 主题 F VT100 replay 增强 cycle（TD-49 字节流转码 UiFrame / 反向解释器，让 VT100 录屏也支持 search / 倒放）/ record 暴露评估（spawn `proc record` 子进程 / worker 持续采样 / MCP-level confirm，与本 cycle ADR-0025b 同款推迟理由）/ USB release / docker-rm 写操作 cycle（`proc_usb_release(drive, kill_pids, dry_run=false)` 一次完成 kill + flush + eject / `proc_docker_rm` 系列，与本 cycle brainstorm §决策 9 用户设计偏好同款）。
+
+## [0.16.0] - 2026-07-07
+
+v0.16.0 cycle 是 **MCP 全功能暴露 cycle 第二弹（录屏 v2 + 操作类）**（**主题 D2**：4 stage 中轻 cycle，~810 行业务代码）。cycle 主线：MCP handler 子 module 扩第 5 个文件 `record.rs`（v0.15 4 子 module → 5 子 module，[ADR-0024](docs/adr/0024-mcp-handler-module-split.md) Strategy A 延续——所有 7 个新 `#[tool]` 仍在主 mod.rs impl 块）+ 7 个新录屏 / 书签 / USB status tool 业务逻辑填充（replay 2 + bookmarks 4 + usb_status 1，用户 2026-07-07 追加 USB 解决「kill 进程后不知道是否成功」痛点）+ ADR-0025a（proc_replay_search agent schema 设计）/ ADR-0025b（v0.16 cycle 决策不暴露 `proc_record_start/stop`：TTY 限制 + worker 持续采样成本 + confirm 机制待评估）+ cycle 末段全局 Review + 收尾 tag。
+
+**cycle 4 stage 全交付**（stage 1 Spike / stage 2-3 Slice / stage 4 Review + 收尾）：
+
+### 阶段 4 — Review + 收尾 + tag v0.16.0（本次发布）
+
+> 本次发布 commit：Cargo.toml 0.15.0 → 0.16.0；CHANGELOG / README / brainstorm 同步 v0.16.0；4 个 stage doc 头部加 ✅ 已发布标记（stage 1 补独立 ✅ 行，stage 2/3/4 已有）；REVIEW-v0.16 P0/P1/P2 状态闭环（**P0 0 / P1 1 / P2 0**）；v0.16 cycle 无新 TD-55+ 候选归档（量级偏轻 + brainstorm 决策段已穷尽未来考虑项）。
+
+- Docs: 产出 [`docs/reviews/REVIEW-v0.16.md`](docs/reviews/REVIEW-v0.16.md)（~330 行，6 子项审查 + 1 P1 修复 + 0 P2 归档 + cycle 总结）；CONTEXT.md 演进历史加 v0.16.0 阶段 2/3/4 行 + 术语段 / 演进段「开发中」改「已落地」（与 stage 1 行对齐，本地 .gitignore 不入 commit）；brainstorm.md 阶段总览表 4/4 ✅ + 末尾加 cycle 总结段。
+- P1 修复: stage 1 doc 头部加 `> ✅ **已完成**` 标记独立行（与 v0.14 stage 5 P1-1 / v0.15 stage 4 P1-1 同款问题）。
+- Release: `git tag -a v0.16.0 -m "v0.16.0：MCP 全功能暴露录屏 v2 + 操作类 cycle（32 → 39 tool，~810 行业务代码）"`（等用户确认后 push）。
+
+### 阶段 1-3 — 业务代码落地（cycle 累计 +36 新测试，1281 → 1317）
+
+- **Added**: `src/mcp/handler/record.rs(新 801 行 = 7 个 Args struct + 7 个 helper 业务实装 + 5 私有辅助函数 + 模块 doc comment)` — stage 1 子 module 骨架 + stage 2 替换 3 helper（replay_info / replay_search / eject_status）+ stage 3 替换 4 helper（bookmarks list/add/edit/delete）+ 2 私有辅助函数（collect_matched_processes + highest_anomaly_severity stage 2 / validate_frame_idx_and_timestamp + write_sidecar stage 3）。
+- **Added**: `docs/adr/{0025a-mcp-replay-search-agent-schema.md(新 ~150 行，proc_replay_search agent 视角 schema 设计：limit 默认 100 + truncated + substring/FilterExpr 双入口 + VT100 兜底 + 长录屏性能 ~9s/30min session 可接受), 0025b-mcp-record-not-exposed.md(新 ~130 行，v0.16 cycle 决策不暴露 record 的背景：TTY 限制 + worker 持续采样成本 + confirm 机制待评估)}` — stage 1 落地。
+- **Added**: `tests/test_mcp_v0_16.rs(新 853 行 36 case = stage 2 18 case replay_info 5 + replay_search 7 + eject_status 6 + stage 3 18 case bookmarks list 5 + add 6 + edit 4 + delete 3，复用 stage 2 fixture helper make_frame / write_v3_recording / write_vt100_recording + stage 3 fixture write_sidecar_with_bookmarks)` — stage 2 + stage 3 落地。
+- **Changed**: `src/mcp/handler/mod.rs(v0.15 末 1358 行 → 1455 行，顶部加 pub mod record; + use record::*; + impl 块末尾追加 7 个 #[tool] 方法 ~85 行，32 → 39 tool)` — stage 1 落地（impl 块结构 stage 2/3 不动，surgical 原则）。
+- **Docs**: `docs/stages/v0.16-stage-{1..4}.md` 4 个 stage docs + `docs/stages/v0.16-brainstorm.md` cycle 总览 + `docs/reviews/REVIEW-v0.16.md`(新 ~330 行) + `CONTEXT.md`(术语段加 v0.16.0 段 4 术语 + 演进历史加 v0.16.0 段 stage 1-4 行，本地不入 commit) + `README.md`(banner v0.16.0 段 + MCP 章节扩 39 tool 列表) + `CHANGELOG.md`(本段) + `Cargo.toml(0.15.0 → 0.16.0)` + `Cargo.lock(同步)`。
+
+**关键数字**：
+
+| 指标 | v0.15.0 基线 | v0.16.0 落地 |
+|---|---|---|
+| 全量回归 | 1281 passed / 0 failed / 3 ignored | **1317 passed / 0 failed / 3 ignored**（+36 新测试）|
+| MCP tool 总数 | 32（v0.15 落地）| **39**（32 v0.15 既有 + 7 v0.16 新增，agent 视角录屏 v2 + USB status 缺口补完）|
+| handler 模块结构 | `handler/{mod.rs 1358, cli.rs 568, inspect.rs 360, metrics.rs 400}` 4 子 module | **+ `record.rs` 801 行 = 5 子 module**（含 v0.16 7 新 tool + 5 私有辅助函数）|
+| 业务代码 | — | **~810 行**（与主题 D2 预期 ~810-910 行对齐，v0.15 cycle 1700 行的 48%）|
+| 集成测试 | — | **36 case**（replay_info 5 + replay_search 7 + eject_status 6 + bookmarks list 5 + add 6 + edit 4 + delete 3）|
 
 ### v0.16.0 阶段 3 — bookmarks 业务逻辑填充（已交付）
 
