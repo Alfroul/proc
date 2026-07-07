@@ -7,7 +7,20 @@
 
 ## [Unreleased]
 
-下次 cycle（v0.16.0+）的候选方向：基于 v0.15 cycle 落地情况 + tech-debt TD-50~54 残留项决定。**brainstorm §主题 D 子方向 D2 已锁定**——MCP 操作 + 录屏类 cycle（`proc_record_start/stop` / `proc_replay_info/search` / `proc_bookmarks_*` ~6 tool ~600 行）。其他候选：主题 B 可观测性 cycle（rmcp Resource subscribe / SSE transport，与 TD-52 sparkline 同款方向）/ 主题 A 性能优化 cycle（TD-54 MCP handler 内 SystemSnapshot/App 复用 + TD-44~47 残留）/ 主题 F VT100 replay 增强 cycle（TD-49 字节流转码 UiFrame）。
+**v0.16.0 cycle 进行中**（主题 D 子方向 D2：MCP 全功能暴露 cycle 第二弹 —— 录屏 v2 replay / bookmarks + USB status，~7 tool ~810-910 行）。cycle 4 stage 节奏（与 v0.15 对齐）：stage 1 Spike（handler 子 module 扩 record.rs + 7 tool stub + ADR-0025a/0025b）✅ / stage 2 Slice（replay + USB status 业务逻辑填充 + 18 集成测试）✅ / stage 3 Slice（bookmarks 业务逻辑填充，待启动）/ stage 4 Review + 收尾（待启动）。
+
+### v0.16.0 阶段 2 — replay + USB status 业务逻辑填充（已交付）
+
+- **Added**: `tests/test_mcp_v0_16.rs`（新 ~370 行 18 case = replay_info 5 + replay_search 7 + eject_status 6，验证双路径分发 / FilterExpr + limit 截断 / 4 档 suggestion 决策树 / VT100 拒绝 / drive 字符 normalize）。
+- **Changed**: `src/mcp/handler/record.rs`（替换 3 个 stub helper 为真实业务实现：`make_replay_info_json` 走 `is_vt100_file` 双路径分发 + `has_bookmarks_sidecar` 文件存在性检查 / `make_replay_search_json` 走 `parse_frame` + `build_frame_substring_expr` 双入口 + `apply_frame` 全帧遍历 + limit 默认 100 截断 + matched_processes 集合收集 + anomaly_severity 取最高档 / `make_eject_status_json` 走 `scan_all_devices` + `scan_device_locks` + 4 档 suggestion 决策树 + device 字段裁剪；4 个 bookmarks stub 不动，stage 3 替换）。
+- **Docs**: `docs/stages/v0.16-stage-2.md`（新 ~510 行任务清单 + 验收标准 + stage 3 启动指令包）；`docs/stages/v0.16-brainstorm.md`（决策 3 表格 stage 2 ⬜ → ✅）。
+
+### v0.16.0 阶段 1 — handler 子 module 扩 record.rs + 7 tool stub（已交付）
+
+- **Added**: `src/mcp/handler/record.rs`（新 ~220 行 = 7 个 Args struct + 7 个 stub helper + 模块 doc comment）；`docs/adr/0025a-mcp-replay-search-agent-schema.md`（新 ~150 行，proc_replay_search agent 视角 schema 设计：limit 默认 100 + truncated + substring/FilterExpr 双入口 + VT100 兜底 + 长录屏性能段）；`docs/adr/0025b-mcp-record-not-exposed.md`（新 ~130 行，v0.16 cycle 不暴露 record 的决策背景：TTY 限制 + worker 持续采样成本 + confirm 机制待评估）。
+- **Changed**: `src/mcp/handler/mod.rs`（顶部加 `pub mod record;` + `use record::*;` + impl 块末尾追加 7 个 `#[tool]` stub 方法，32 → 39 tool）；`docs/stages/v0.16-brainstorm.md`（cycle 总览，4 stage 设计）；`docs/stages/v0.16-stage-1.md`（stage 1 任务清单）。
+
+下次 cycle（v0.17.0+）的候选方向：基于 v0.16 cycle 落地情况 + tech-debt TD-50~54 残留项决定。其他候选：主题 B 可观测性 cycle（rmcp Resource subscribe / SSE transport，与 TD-52 sparkline 同款方向）/ 主题 A 性能优化 cycle（TD-54 MCP handler 内 SystemSnapshot/App 复用 + TD-44~47 残留）/ 主题 F VT100 replay 增强 cycle（TD-49 字节流转码 UiFrame）/ v0.16+ 评估 spawn 子进程 / worker 持续采样 / MCP-level confirm 机制（与 `proc_record_start/stop` 同款推迟理由）。
 
 ## [0.15.0] - 2026-07-06
 
