@@ -210,6 +210,12 @@ pub enum Command {
         /// 输出文件路径（默认: ~/.config/proc/recordings/recording_{timestamp}.prec）
         #[arg(short = 'o', long = "output")]
         output: Option<std::path::PathBuf>,
+
+        /// v0.17 stage 6 落地：headless 模式（不 attach TUI），与 MCP
+        /// `proc_record_start` 子进程路径配合。当前 stage 1 Spike 仅注册 flag，
+        /// 传 `--no-tui` 会返 "v0.17-stage-6 未实装" 错误。
+        #[arg(long = "no-tui")]
+        no_tui: bool,
     },
 
     /// 回放录制文件

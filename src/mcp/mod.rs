@@ -4,10 +4,19 @@
 //! 暴露为 MCP tools 供 Claude Code / Cursor 等 LLM agent 调用。
 //! 详见 ADR-0009 与 `docs/stages/v0.7-stage-2.md`。
 //!
+//! **v0.17 cycle 主题 B 可观测性**（stage 1 Spike 落地骨架，stage 4 Slice 填业务）：
+//! - [`transport`]：SSE transport 容器（`proc mcp serve --transport sse --port 8080`）
+//! - [`resources`]：rmcp 0.11 Resource subscribe 路由（`proc://metrics/system` 等 URI）
+//!
 //! - 入口：[`run_mcp_serve`]（main.rs 调）
 //! - 实现：[`handler::ProcMcpHandler`]（`#[tool_router(server_handler)]` 自动生成 ServerHandler impl）
 
 pub mod handler;
+pub mod resources;
+pub mod transport;
+
+pub use resources::{PROC_RESOURCE_URIS, ResourceRoute};
+pub use transport::{SseTransportConfig, serve_sse};
 
 use std::io::{self, IsTerminal};
 

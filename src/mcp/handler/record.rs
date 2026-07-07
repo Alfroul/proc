@@ -5,6 +5,17 @@
 //! 填 replay + eject_status 业务逻辑，stage 3 Slice 填 bookmarks 业务逻辑。
 //! 详见 [`super`] 模块文档与 `docs/stages/v0.16-stage-{1,2,3}.md`。
 //!
+//! **v0.17 cycle 扩 6 个新 tool stub**（stage 1 Spike 落地，stage 6 Slice 填业务逻辑）：
+//! - record 暴露类别（2 tool）：`proc_record_start` / `proc_record_stop`
+//!   （spawn `proc record --no-tui` 子进程路径，ADR-0029 决策 4 拍板）
+//! - USB release 类别（1 tool）：`proc_usb_release`（kill + flush + eject 三步链路）
+//! - docker-rm 类别（3 tool）：`proc_docker_rm` / `proc_docker_image_rm` /
+//!   `proc_docker_volume_rm`（bollard API 删容器 / 镜像 / 卷）
+//!
+//! 上述 5 个 tool 都 `confirm: bool` 必传（ADR-0029 决策 5 拍板）——confirm 与既有
+//! `dry_run: bool` 默认 false 契约互补：dry_run 表示「不真正执行」，confirm 表示
+//! 「确认风险后再执行」。
+//!
 //! 边界：录屏 v2 相关 tool（replay + bookmarks）+ USB status tool 统一放本文件
 //! （brainstorm §MCP handler 子 module 扩展 决策——v0.16 cycle 7 tool 量级不需
 //! 再拆 usb.rs）。`#[tool]` 方法本身在 [`super::mod_rs`] 的 `#[tool_router] impl`
@@ -798,4 +809,246 @@ fn write_sidecar(
             )),
         ),
     }
+}
+
+// ===========================================================================
+// v0.17 stage 1 Spike 新增 — 6 个 Args struct + 6 个 stub helper
+//
+// 范围（与 brainstorm §v0.17 cycle 实际范围表对齐，决策 2 / 决策 3 stub 返回格式）：
+// - record 暴露类别（2 tool）：proc_record_start / proc_record_stop
+//   spawn `proc record --no-tui --output <path>` 子进程路径（ADR-0029 决策 4 拍板）
+// - USB release 类别（1 tool）：proc_usb_release
+//   kill_locks → flush_write_cache → eject_device 三步链路
+// - docker-rm 类别（3 tool）：proc_docker_rm / proc_docker_image_rm / proc_docker_volume_rm
+//   bollard API remove_container / remove_image / remove_volume
+//
+// 5 个 tool 都 `confirm: bool` 必传（ADR-0029 决策 5 拍板——confirm 与既有
+// `dry_run: bool` 默认 false 契约互补：dry_run 是「不真正执行」/ confirm 是
+// 「确认风险后再执行」）。stage 1 Spike 仅注册 schema，stage 6 Slice 替换
+// stub helper 为真实业务实现。
+// ===========================================================================
+
+/// `proc_record_start` tool 入参（stage 6 实装 spawn 子进程）。
+///
+/// 启动录屏子进程（headless，不 attach TUI）。confirm 必传 true 让 agent
+/// 显式确认录屏会捕获屏幕所有内容含 DNS 域名 / 进程 cmd（与 v0.6 落地的
+/// `pending_record_confirm` TUI 路径同款契约）。
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RecordStartArgs {
+    /// 必须传 true 以确认录屏风险（捕获屏幕所有内容含 DNS 域名 / 进程 cmd）。
+    /// confirm=false → ok=false + error "confirm=true 必传以确认录屏风险"。
+    pub confirm: bool,
+    /// 输出 .prec 文件路径（如 "~/.config/proc/recordings/session_1.prec"）。
+    pub file_path: String,
+    /// 可选自动停止时长（秒）。None → 手动调 proc_record_stop 停止。
+    #[serde(default)]
+    pub duration_secs: Option<u64>,
+}
+
+/// `proc_record_stop` tool 入参（stage 6 实装 kill child + 等 flush）。
+///
+/// 停止录屏子进程并等待 .prec 文件 flush。file_path 必须与
+/// `proc_record_start` 的 file_path 匹配（stage 6 实装 handler 持
+/// `record_handle: Arc<Mutex<Option<Child>>>` 字段跨 tool call 保活）。
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RecordStopArgs {
+    /// 录屏文件路径（必须匹配 proc_record_start 的 file_path）。
+    pub file_path: String,
+}
+
+/// `proc_usb_release` tool 入参（stage 6 实装 kill + flush + eject 三步链路）。
+///
+/// 一次完成 kill_locks + flush_write_cache + eject_device。confirm 必传 true
+/// 让 agent 显式确认三步破坏性操作。dry_run 默认 false（与 v0.7 proc_kill /
+/// v0.15 proc_monitor_add 同款契约），dry_run=true 时仅预演不真正执行。
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct UsbReleaseArgs {
+    /// 必须传 true 以确认破坏性操作（kill 进程 + flush 缓存 + eject 设备）。
+    pub confirm: bool,
+    /// 驱动器号（如 "E" / "E:" / "E:\\"，与 proc_eject / proc_eject_status 同款 normalize）。
+    pub drive: String,
+    /// 要 kill 的进程 PID 列表（agent 通常先调 proc_eject_status 拿 locks[].pid）。
+    pub kill_pids: Vec<u32>,
+    /// Dry-run 预演（默认 false = 真正执行 kill + flush + eject；true = 仅预演）。
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+}
+
+/// `proc_docker_rm` tool 入参（stage 6 实装 bollard remove_container）。
+///
+/// 删除 Docker 容器。confirm 必传 true 让 agent 显式确认删除操作（不可逆）。
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DockerRmArgs {
+    /// 必须传 true 以确认删除容器（不可逆）。
+    pub confirm: bool,
+    /// 容器 ID 或短 ID / 名称。
+    pub container_id: String,
+    /// 强制删除（即便容器在运行）。默认 false。
+    #[serde(default)]
+    pub force: Option<bool>,
+    /// 同时删除关联的匿名 volume。默认 false。
+    #[serde(default)]
+    pub volumes: Option<bool>,
+}
+
+/// `proc_docker_image_rm` tool 入参（stage 6 实装 bollard remove_image）。
+///
+/// 删除 Docker 镜像。confirm 必传 true 让 agent 显式确认删除操作（不可逆）。
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DockerImageRmArgs {
+    /// 必须传 true 以确认删除镜像（不可逆）。
+    pub confirm: bool,
+    /// 镜像 ID 或 tag。
+    pub image_id: String,
+    /// 强制删除（即便有容器依赖）。默认 false。
+    #[serde(default)]
+    pub force: Option<bool>,
+    /// 同时删除子镜像。默认 false。
+    #[serde(default)]
+    pub prune_children: Option<bool>,
+}
+
+/// `proc_docker_volume_rm` tool 入参（stage 6 实装 bollard remove_volume）。
+///
+/// 删除 Docker volume。confirm 必传 true 让 agent 显式确认删除操作（不可逆，
+/// volume 数据将永久丢失）。
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DockerVolumeRmArgs {
+    /// 必须传 true 以确认删除 volume（数据永久丢失，不可逆）。
+    pub confirm: bool,
+    /// volume 名称。
+    pub volume_name: String,
+    /// 强制删除（即便有容器挂载）。默认 false。
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+// ===========================================================================
+// v0.17 stage 1 stub helpers — stage 6 Slice 替换为真实业务实现
+//
+// stub 返 `{ ok: true, stub: true, stage: "v0.17-stage-6", message, received_* }`
+// placeholder JSON（与 v0.16 stage 1 决策 3 同款规则）：
+// - ok: true 让 client（mcp-inspector）调用时不报错，能验证 schema 正确生成
+// - stub: true 让 LLM / client 能识别「这是占位返回」避免误用
+// - stage 字段让 stage 6 完工时容易 grep 验证替换
+// - received_* 字段保留参数 echo，方便 stage 6 调试 schema 反序列化
+// ===========================================================================
+
+/// `proc_record_start` — stub helper（stage 6 替换为真实业务实现）。
+///
+/// stage 6 实装时走 spawn `proc record --no-tui --output <path>` 子进程路径
+/// （ADR-0029 决策 4 拍板），handler 持 `record_handle: Arc<Mutex<Option<Child>>>`
+/// 字段跨 tool call 保活。
+pub fn make_record_start_json(
+    _confirm: bool,
+    _file_path: &str,
+    _duration_secs: Option<u64>,
+) -> Value {
+    json!({
+        "ok": true,
+        "stub": true,
+        "stage": "v0.17-stage-6",
+        "message": "proc_record_start tool schema is registered; business logic lands in stage 6",
+        "received_confirm": _confirm,
+        "received_file_path": _file_path,
+        "received_duration_secs": _duration_secs,
+    })
+}
+
+/// `proc_record_stop` — stub helper（stage 6 替换为真实业务实现）。
+///
+/// stage 6 实装时走 kill child + 等待 `.prec` 文件 flush + 读 footer metadata
+/// 返 `{ ok, file_path, size_bytes, duration_secs, frame_count }`。
+pub fn make_record_stop_json(_file_path: &str) -> Value {
+    json!({
+        "ok": true,
+        "stub": true,
+        "stage": "v0.17-stage-6",
+        "message": "proc_record_stop tool schema is registered; business logic lands in stage 6",
+        "received_file_path": _file_path,
+    })
+}
+
+/// `proc_usb_release` — stub helper（stage 6 替换为真实业务实现）。
+///
+/// stage 6 实装时走 `kill_locks → flush_write_cache (PowerShell 阻塞 3s+) →
+/// eject_device` 三步链路，返
+/// `{ ok, dry_run, action: "release", drive, killed_pids: [...], flushed: bool, ejected: bool }`。
+pub fn make_usb_release_json(
+    _confirm: bool,
+    _drive: &str,
+    _kill_pids: &[u32],
+    _dry_run: Option<bool>,
+) -> Value {
+    json!({
+        "ok": true,
+        "stub": true,
+        "stage": "v0.17-stage-6",
+        "message": "proc_usb_release tool schema is registered; business logic lands in stage 6",
+        "received_confirm": _confirm,
+        "received_drive": _drive,
+        "received_kill_pids": _kill_pids,
+        "received_dry_run": _dry_run,
+    })
+}
+
+/// `proc_docker_rm` — stub helper（stage 6 替换为真实业务实现）。
+///
+/// stage 6 实装时走 bollard API `remove_container`，返 `{ ok, container_id, removed: bool }`。
+pub fn make_docker_rm_json(
+    _confirm: bool,
+    _container_id: &str,
+    _force: Option<bool>,
+    _volumes: Option<bool>,
+) -> Value {
+    json!({
+        "ok": true,
+        "stub": true,
+        "stage": "v0.17-stage-6",
+        "message": "proc_docker_rm tool schema is registered; business logic lands in stage 6",
+        "received_confirm": _confirm,
+        "received_container_id": _container_id,
+        "received_force": _force,
+        "received_volumes": _volumes,
+    })
+}
+
+/// `proc_docker_image_rm` — stub helper（stage 6 替换为真实业务实现）。
+///
+/// stage 6 实装时走 bollard API `remove_image`，返 `{ ok, image_id, removed: bool }`。
+pub fn make_docker_image_rm_json(
+    _confirm: bool,
+    _image_id: &str,
+    _force: Option<bool>,
+    _prune_children: Option<bool>,
+) -> Value {
+    json!({
+        "ok": true,
+        "stub": true,
+        "stage": "v0.17-stage-6",
+        "message": "proc_docker_image_rm tool schema is registered; business logic lands in stage 6",
+        "received_confirm": _confirm,
+        "received_image_id": _image_id,
+        "received_force": _force,
+        "received_prune_children": _prune_children,
+    })
+}
+
+/// `proc_docker_volume_rm` — stub helper（stage 6 替换为真实业务实现）。
+///
+/// stage 6 实装时走 bollard API `remove_volume`，返 `{ ok, volume_name, removed: bool }`。
+pub fn make_docker_volume_rm_json(
+    _confirm: bool,
+    _volume_name: &str,
+    _force: Option<bool>,
+) -> Value {
+    json!({
+        "ok": true,
+        "stub": true,
+        "stage": "v0.17-stage-6",
+        "message": "proc_docker_volume_rm tool schema is registered; business logic lands in stage 6",
+        "received_confirm": _confirm,
+        "received_volume_name": _volume_name,
+        "received_force": _force,
+    })
 }

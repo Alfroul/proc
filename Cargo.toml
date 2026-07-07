@@ -104,8 +104,12 @@ version = "0.12"
 optional = true
 
 [features]
-default = ["nvidia"]
+default = ["nvidia", "mcp-persistent-state"]
 nvidia = ["nvml-wrapper"]
+# v0.17 stage 1（ADR-0026）：ProcMcpHandler 持久字段 cfg-gate。
+# 默认开启让生产路径有 snapshot / system_history / record_handle 字段；
+# --no-default-features 时 cfg-gate 掉，struct 不含这 3 个字段（最小化 build）。
+mcp-persistent-state = []
 
 # v0.12.0 阶段 1（ADR-0022）：proc 转为 Windows-only。
 # v0.12.0 阶段 2：移除 nvtop / nethogs / ebpf 空 feature stub

@@ -11,7 +11,18 @@ use crate::app;
 use crate::record::vt100::{VtPlayer, is_vt100_file};
 use crate::tui;
 
-pub fn run_record(_output: &Option<std::path::PathBuf>) {
+pub fn run_record(_output: &Option<std::path::PathBuf>, no_tui: bool) {
+    // v0.17 stage 1 Spike：--no-tui flag 已注册但 headless 路径尚未落地。
+    // stage 6 Slice 实装 spawn 子进程 + recorder + bookmark + anomaly detection
+    // 复用 v0.6 落地的 R 键 TUI 路径业务逻辑（绕过 TUI attach）。
+    if no_tui {
+        eprintln!(
+            "{} v0.17-stage-6 未实装：--no-tui flag 已注册但 headless 路径尚未落地",
+            "错误:".red()
+        );
+        std::process::exit(1);
+    }
+
     let mut app = match app::App::new() {
         Ok(a) => a,
         Err(e) => {

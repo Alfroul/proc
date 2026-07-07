@@ -25,9 +25,13 @@
 pub mod cli;
 pub mod inspect;
 pub mod metrics;
+pub mod observable;
 pub mod record;
 
 use std::sync::{Arc, Mutex};
+
+#[cfg(feature = "mcp-persistent-state")]
+use std::collections::VecDeque;
 
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -38,6 +42,8 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+#[cfg(feature = "mcp-persistent-state")]
+use crate::collect::SystemSnapshot;
 use crate::collect::{self, SortField};
 use crate::dns_log::DnsLogCollector;
 
@@ -47,6 +53,7 @@ use crate::dns_log::DnsLogCollector;
 use cli::*;
 use inspect::*;
 use metrics::*;
+use observable::*;
 use record::*;
 
 /// MCP server 主入口（runtime 已在 [`super::run_mcp_serve`] 起好）。
@@ -94,12 +101,39 @@ pub struct ProcMcpHandler {
     /// [`Default`]（测试路径）保持 `None`。`pub` 让集成测试能访问（验证 Arc 共享
     /// 语义）；生产代码不应直接修改。
     pub dns_collector: Arc<Mutex<Option<Box<dyn DnsLogCollector>>>>,
+
+    /// v0.17 stage 3 TD-54 落地：MCP handler 持久 SystemSnapshot，1s tick refresh。
+    /// stage 1 Spike 仅声明字段 + Default 返 None；stage 3 实装 worker spawn +
+    /// refresh 逻辑，让 metrics_* / proc_flows / proc_export 复用同一 snapshot
+    /// （ADR-0026）。
+    #[cfg(feature = "mcp-persistent-state")]
+    pub snapshot: Arc<Mutex<Option<SystemSnapshot>>>,
+
+    /// v0.17 stage 4 TD-52 落地：sparkline 30s 历史，1s tick push。
+    /// stage 1 Spike 仅声明字段 + Default 返空 VecDeque；stage 4 实装 worker
+    /// push 逻辑，让 `proc_metrics_history` tool drain 此字段返 sparkline
+    /// 数据点（ADR-0026 / ADR-0027）。
+    #[cfg(feature = "mcp-persistent-state")]
+    pub system_history: Arc<Mutex<VecDeque<SystemSnapshot>>>,
+
+    /// v0.17 stage 6 record 暴露落地：spawn `proc record` 子进程 handle。
+    /// stage 1 Spike 仅声明字段 + Default 返 None；stage 6 实装 spawn +
+    /// lifecycle 管理，让 `proc_record_start` / `proc_record_stop` 跨 tool
+    /// call 保活 child handle（ADR-0026 / ADR-0029）。
+    #[cfg(feature = "mcp-persistent-state")]
+    pub record_handle: Arc<Mutex<Option<std::process::Child>>>,
 }
 
 impl Clone for ProcMcpHandler {
     fn clone(&self) -> Self {
         Self {
             dns_collector: Arc::clone(&self.dns_collector),
+            #[cfg(feature = "mcp-persistent-state")]
+            snapshot: Arc::clone(&self.snapshot),
+            #[cfg(feature = "mcp-persistent-state")]
+            system_history: Arc::clone(&self.system_history),
+            #[cfg(feature = "mcp-persistent-state")]
+            record_handle: Arc::clone(&self.record_handle),
         }
     }
 }
@@ -108,8 +142,17 @@ impl Default for ProcMcpHandler {
     fn default() -> Self {
         // 测试 / 未启用 DNS 路径用：不 spawn collector，proc_dns 调用走「无 collector」
         // 错误返回。生产路径必须用 [`Self::new`]。
+        // v0.17 持久字段（snapshot / system_history / record_handle）Default 也
+        // 返 None / 空 VecDeque——stage 3/4/6 各 Slice 实装 worker spawn 逻辑后
+        // 才在 [`ProcMcpHandler::new`] 生产路径填充。
         Self {
             dns_collector: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "mcp-persistent-state")]
+            snapshot: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "mcp-persistent-state")]
+            system_history: Arc::new(Mutex::new(VecDeque::new())),
+            #[cfg(feature = "mcp-persistent-state")]
+            record_handle: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -118,11 +161,21 @@ impl ProcMcpHandler {
     /// 生产入口：spawn 持久 DNS collector（Windows admin → ETW；Windows 非 admin
     /// → PowerShell fallback；其它平台 → None）。collector 与 handler 同生命周期，
     /// `proc_dns` tool call 通过 `Arc::clone` 共享同一实例。
+    ///
+    /// v0.17 stage 1 Spike：持久字段（snapshot / system_history / record_handle）
+    /// 与 Default 同款返 None / 空 VecDeque——stage 3/4/6 各 Slice 实装 worker
+    /// spawn 逻辑后才在此填充（ADR-0026）。
     #[must_use]
     pub fn new() -> Self {
         let (collector, _kind) = crate::dns_log::detect_collector();
         Self {
             dns_collector: Arc::new(Mutex::new(collector)),
+            #[cfg(feature = "mcp-persistent-state")]
+            snapshot: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "mcp-persistent-state")]
+            system_history: Arc::new(Mutex::new(VecDeque::new())),
+            #[cfg(feature = "mcp-persistent-state")]
+            record_handle: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -687,6 +740,122 @@ impl ProcMcpHandler {
         Parameters(args): Parameters<EjectStatusArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_result(record::make_eject_status_json(&args.drive))
+    }
+
+    // ====================================================================
+    // v0.17 阶段 1 stub 方法 — schema 注册占位，业务逻辑在 stage 4 / stage 6
+    // 各 Slice 填（详见 docs/stages/v0.17-stage-1.md）。stub 返
+    // `{ ok: true, stub: true, stage: "v0.17-stage-{4,6}", ... }` placeholder 让
+    // client（mcp-inspector）验证 schema 但不误用业务数据。
+    //
+    // 7 个新 tool（brainstorm §v0.17 cycle 实际范围表对齐）：
+    // - record 暴露类别（2 tool，stage 6 实装）：proc_record_start / proc_record_stop
+    // - USB release 类别（1 tool，stage 6 实装）：proc_usb_release
+    // - docker-rm 类别（3 tool，stage 6 实装）：proc_docker_rm / image_rm / volume_rm
+    // - 可观测性类别（1 tool，stage 4 实装）：proc_metrics_history
+    // ====================================================================
+
+    #[tool(
+        name = "proc_record_start",
+        description = "Start a recording subprocess (headless, no TUI). Args: confirm (must be true to acknowledge recording captures screen content including DNS names / process cmd), file_path (output .prec file path), duration_secs (optional, auto-stop after N seconds). Returns { ok, file_path, started_at, expected_duration_secs }. confirm=false → ok=false + error. Stage 6 business logic: spawn `proc record --no-tui --output <path>` subprocess, handler holds record_handle across tool calls (ADR-0029)."
+    )]
+    fn proc_record_start(
+        &self,
+        Parameters(args): Parameters<RecordStartArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_record_start_json(
+            args.confirm,
+            &args.file_path,
+            args.duration_secs,
+        ))
+    }
+
+    #[tool(
+        name = "proc_record_stop",
+        description = "Stop a recording subprocess and wait for .prec file flush. Args: file_path (must match proc_record_start file_path). Returns { ok, file_path, size_bytes, duration_secs, frame_count }. Stage 6 business logic: kill child + wait flush + read footer metadata (ADR-0029)."
+    )]
+    fn proc_record_stop(
+        &self,
+        Parameters(args): Parameters<RecordStopArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_record_stop_json(&args.file_path))
+    }
+
+    #[tool(
+        name = "proc_usb_release",
+        description = "Kill locks + flush cache + eject device in one call (destructive, confirm required). Args: confirm (must be true), drive (e.g. \"E\" / \"E:\" / \"E:\\\\\"), kill_pids (process ids to kill, agent typically gets them from proc_eject_status locks[].pid), dry_run (optional, default false). Returns { ok, dry_run, action: \"release\", drive, killed_pids: [...], flushed: bool, ejected: bool }. confirm=false → ok=false + error. Stage 6 business logic: kill_locks → flush_write_cache (PowerShell blocking 3s+) → eject_device (ADR-0029)."
+    )]
+    fn proc_usb_release(
+        &self,
+        Parameters(args): Parameters<UsbReleaseArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_usb_release_json(
+            args.confirm,
+            &args.drive,
+            &args.kill_pids,
+            args.dry_run,
+        ))
+    }
+
+    #[tool(
+        name = "proc_docker_rm",
+        description = "Remove a Docker container (destructive, confirm required). Args: confirm (must be true), container_id, force (optional, default false), volumes (optional, default false — also remove anonymous volumes). Returns { ok, container_id, removed: bool }. Stage 6 business logic: bollard API remove_container (ADR-0029)."
+    )]
+    fn proc_docker_rm(
+        &self,
+        Parameters(args): Parameters<DockerRmArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_docker_rm_json(
+            args.confirm,
+            &args.container_id,
+            args.force,
+            args.volumes,
+        ))
+    }
+
+    #[tool(
+        name = "proc_docker_image_rm",
+        description = "Remove a Docker image (destructive, confirm required). Args: confirm (must be true), image_id, force (optional, default false), prune_children (optional, default false). Returns { ok, image_id, removed: bool }. Stage 6 business logic: bollard API remove_image (ADR-0029)."
+    )]
+    fn proc_docker_image_rm(
+        &self,
+        Parameters(args): Parameters<DockerImageRmArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_docker_image_rm_json(
+            args.confirm,
+            &args.image_id,
+            args.force,
+            args.prune_children,
+        ))
+    }
+
+    #[tool(
+        name = "proc_docker_volume_rm",
+        description = "Remove a Docker volume (destructive, confirm required — data is permanently lost). Args: confirm (must be true), volume_name, force (optional, default false). Returns { ok, volume_name, removed: bool }. Stage 6 business logic: bollard API remove_volume (ADR-0029)."
+    )]
+    fn proc_docker_volume_rm(
+        &self,
+        Parameters(args): Parameters<DockerVolumeRmArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_docker_volume_rm_json(
+            args.confirm,
+            &args.volume_name,
+            args.force,
+        ))
+    }
+
+    #[tool(
+        name = "proc_metrics_history",
+        description = "Query sparkline history (last N seconds, default 30s, max 30s). Args: metric (\"cpu\" / \"memory\" / \"swap\"), seconds (optional, default 30, max 30 because system_history field is 30s cap). Returns { ok, metric, samples: [{ ts, value }] }. Stage 4 business logic: drain ProcMcpHandler.system_history VecDeque (1s tick push, 30s cap) + extract metric data points (ADR-0026 / ADR-0027 / TD-52)."
+    )]
+    fn proc_metrics_history(
+        &self,
+        Parameters(args): Parameters<MetricsHistoryArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(observable::make_metrics_history_json(
+            &args.metric,
+            args.seconds,
+        ))
     }
 }
 

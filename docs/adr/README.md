@@ -19,6 +19,10 @@
 | [0006](./0006-dns-subprocess-not-etw-dbus.md) | DNS 查询日志走 PowerShell 子进程而非 ETW / DBus | Accepted | v0.5.0 阶段 8 |
 | [0007](./0007-container-exec-pty-bridge.md) | 容器 exec 走 spawn docker exec -it + portable-pty | Accepted | v0.5.0 阶段 9 |
 | [0008](./0008-self-mitigation-policy.md) | 进程自我加固策略（DEP+ASLR+DynamicCode+ExtPoint，不开 Signature） | Accepted | v0.6.0 阶段 2 |
+| [0026](./0026-mcp-handler-persistent-fields.md) | MCP handler 持久字段策略（TD-54 + TD-52 + record 暴露前置） | Accepted | v0.17.0 阶段 1 |
+| [0027](./0027-rmcp-resource-subscribe-sse-transport.md) | rmcp 0.11 Resource subscribe + SSE transport 设计 | Accepted | v0.17.0 阶段 1 |
+| [0028](./0028-vt100-to-uiframe-converter.md) | VT100 字节流转码 UiFrame 路径（临时转码） | Accepted | v0.17.0 阶段 1 |
+| [0029](./0029-record-exposure-and-confirm-mechanism.md) | record 暴露 + 写操作 confirm 机制 | Accepted | v0.17.0 阶段 1 |
 
 ## ADR 模板
 
