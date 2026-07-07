@@ -7,7 +7,13 @@
 
 ## [Unreleased]
 
-**v0.16.0 cycle 进行中**（主题 D 子方向 D2：MCP 全功能暴露 cycle 第二弹 —— 录屏 v2 replay / bookmarks + USB status，~7 tool ~810-910 行）。cycle 4 stage 节奏（与 v0.15 对齐）：stage 1 Spike（handler 子 module 扩 record.rs + 7 tool stub + ADR-0025a/0025b）✅ / stage 2 Slice（replay + USB status 业务逻辑填充 + 18 集成测试）✅ / stage 3 Slice（bookmarks 业务逻辑填充，待启动）/ stage 4 Review + 收尾（待启动）。
+**v0.16.0 cycle 进行中**（主题 D 子方向 D2：MCP 全功能暴露 cycle 第二弹 —— 录屏 v2 replay / bookmarks + USB status，~7 tool ~810-910 行）。cycle 4 stage 节奏（与 v0.15 对齐）：stage 1 Spike（handler 子 module 扩 record.rs + 7 tool stub + ADR-0025a/0025b）✅ / stage 2 Slice（replay + USB status 业务逻辑填充 + 18 集成测试）✅ / stage 3 Slice（bookmarks 业务逻辑填充 + 18 集成测试）✅ / stage 4 Review + 收尾（待启动）。
+
+### v0.16.0 阶段 3 — bookmarks 业务逻辑填充（已交付）
+
+- **Changed**: `src/mcp/handler/record.rs`（替换 4 个 bookmarks stub helper 为真实业务实现：`make_bookmarks_list_json` 走 `BookmarkFile::try_load` + sidecar_present/source_healthy 双字段三态区分（无 sidecar / fresh / stale）+ bookmarks[] 字段裁剪 / `make_bookmarks_add_json` 走双路径 frame_idx 校验（v3 用 `Player` / VT100 用 `VtPlayer`，VT100 timestamp 走 `time_range_ms` 内插）+ label 默认「书签 #N」+ dry_run 路径 + sidecar_written 字段 / `make_bookmarks_edit_json` 走 id 查找 + edit_label + write，保留 old_label 让 agent 看 diff / `make_bookmarks_delete_json` 走 id 查找 + remove + write，保留 frame_idx + label 让 agent 知道删了什么；加 2 个私有辅助函数 `validate_frame_idx_and_timestamp` 双路径校验 + timestamp 提取 + `write_sidecar` 替代 `BookmarkFile::write` 静默失败，失败返 false 让 handler 透出 warning；同步清理 stage 1 残留的 `stub: true` doc comment 引用）。
+- **Added**: `tests/test_mcp_v0_16.rs` 扩 ~370 行 18 case bookmarks 测试（list 5 = 无 sidecar / fresh sidecar / stale sidecar / 录屏不存在 / VT100 录屏；add 6 = 默认 label / 空 label / 显式 label / dry_run 不写盘 / 真实写盘 / frame_idx 越界；edit 4 = existing id / non-existing id / dry_run 不改盘 / 录屏不存在；delete 3 = existing id / non-existing id / dry_run 保留；含 `write_sidecar_with_bookmarks` fixture helper 复用 BookmarkFile 业务 API 写真实 sidecar）。
+- **Docs**: `docs/stages/v0.16-stage-3.md`（新 ~470 行任务清单 + 6 决策 + 18 case 测试矩阵 + 5 已知风险 + stage 4 启动指令包）；`docs/stages/v0.16-brainstorm.md`（决策 3 表格 stage 3 ⬜ → ✅）。
 
 ### v0.16.0 阶段 2 — replay + USB status 业务逻辑填充（已交付）
 

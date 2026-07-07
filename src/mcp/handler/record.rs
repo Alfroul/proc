@@ -103,17 +103,16 @@ pub struct EjectStatusArgs {
 }
 
 // ===========================================================================
-// Helpers — stage 1 stub（返 placeholder JSON）
+// Helpers — stage 2/3 业务逻辑全部落地
 //
-// stage 2 Slice 替换 replay + eject_status 三个 stub 为真实业务实现
-// （走 crate::record::Player / crate::replay::ReplaySearch /
-// crate::eject::scan_device_locks）；stage 3 Slice 替换 bookmarks 四个 stub。
+// stage 1 Spike 落地 7 个 stub（schema 占位），stage 2 Slice 替换 replay +
+// eject_status 3 个 stub 为真实业务实现（走 crate::record::Player /
+// crate::replay::ReplaySearch / crate::eject::scan_device_locks），stage 3 Slice
+// 替换 bookmarks 4 个 stub（走 crate::record::BookmarkFile + 私有辅助函数
+// validate_frame_idx_and_timestamp / write_sidecar）。
 //
-// stub 返回格式（与 v0.15 stage 1 决策 4 同款）：
-// - `ok: true` 让 client（mcp-inspector）调用不报错，能验证 schema 正确生成
-// - `stub: true` 让 LLM / client 识别「这是占位返回」避免误用
-// - `stage` 字段版本标记让 stage 2/3 完工时容易 grep 验证替换
-// - `received_*` 字段保留参数 echo，方便 stage 2/3 调试 schema 反序列化
+// 失败路径（文件不存在 / IO 错误 / deserialization 失败 / frame_idx 越界 / id 不存在）
+// 统一走 `super::err(msg)` 返 `{ ok: false, error: <msg> }`。
 // ===========================================================================
 
 /// `proc_replay_info` — 读取录屏元数据（双路径：v3 UiFrame footer / VT100 header）。
@@ -278,70 +277,240 @@ pub fn make_replay_search_json(file_path: &str, query: &str, limit: Option<usize
     })
 }
 
-/// `proc_bookmarks_list` stub — stage 3 Slice 填 BookmarkFile::load_or_empty +
-/// source_healthy 校验业务实现。
+/// `proc_bookmarks_list` — 列出录屏的所有书签（含 sidecar 状态校验）。
+///
+/// 走 [`crate::record::BookmarkFile::try_load`] 区分 fresh vs stale sidecar，返
+/// `sidecar_present` + `source_healthy` 双字段让 agent 区分三态：
+/// - **无 sidecar**：sidecar_present=false / source_healthy=true / bookmarks=[]
+/// - **fresh sidecar**：sidecar_present=true / source_healthy=true / bookmarks=loaded
+/// - **stale sidecar**（size/mtime 不匹配 / 损坏 / magic 错）：sidecar_present=true
+///   / source_healthy=false / bookmarks=[]
+///
+/// 录屏文件不存在 → `{ ok: false, error: "录屏文件不存在" }`（brainstorm §决策 6
+/// 路径安全：不返空列表避免 agent 误以为新建了空录屏）。
 pub fn make_bookmarks_list_json(file_path: &str) -> Value {
+    let path = std::path::Path::new(file_path);
+
+    if !path.exists() {
+        return super::err(format!("录屏文件不存在: {file_path}"));
+    }
+
+    let sidecar_path = crate::record::BookmarkFile::sidecar_path(path);
+    let sidecar_present = sidecar_path.exists();
+
+    // try_load 区分 fresh vs stale（None 时可能是「文件不存在」或「size/mtime/magic 校验失败」）
+    let (source_healthy, bookmarks) = match crate::record::BookmarkFile::try_load(path) {
+        Some(f) => (true, f.bookmarks),
+        None => (!sidecar_present, Vec::new()),
+    };
+
+    let bookmarks_json: Vec<Value> = bookmarks
+        .iter()
+        .map(|b| {
+            json!({
+                "id": b.id,
+                "frame_idx": b.frame_idx,
+                "timestamp_secs": b.timestamp_secs,
+                "label": b.label,
+                "created_at": b.created_at,
+            })
+        })
+        .collect();
+
     json!({
         "ok": true,
-        "stub": true,
-        "stage": "v0.16-stage-3",
-        "message": "proc_bookmarks_list tool schema is registered; business logic lands in stage 3",
-        "received_file_path": file_path,
+        "count": bookmarks_json.len(),
+        "sidecar_present": sidecar_present,
+        "source_healthy": source_healthy,
+        "bookmarks": bookmarks_json,
     })
 }
 
-/// `proc_bookmarks_add` stub — stage 3 Slice 填 BookmarkFile::add + write
-/// 业务实现（含 frame_idx 校验 + dry_run 路径）。
+/// `proc_bookmarks_add` — 给录屏加书签（双路径 frame_idx 校验 + sidecar 写盘）。
+///
+/// 流程：录屏存在校验 → frame_idx 校验（v3 用 [`Player`] / VT100 用 [`VtPlayer`]，
+/// VT100 timestamp 走 `time_range_ms` 内插）→ `BookmarkFile::load_or_empty + add +
+/// write`。label=None/空 → 默认「书签 #N」。
+///
+/// `dry_run=true` → 仍调 add（计算真实 id）但不写 sidecar。`dry_run=false` → 写盘，
+/// 失败时返 `sidecar_written: false + warning`（决策 3，替代 [`crate::record::BookmarkFile::write`]
+/// 静默失败）。
 pub fn make_bookmarks_add_json(
     file_path: &str,
     frame_idx: usize,
     label: Option<&str>,
     dry_run: Option<bool>,
 ) -> Value {
-    json!({
+    let path = std::path::Path::new(file_path);
+    let dry_run = dry_run.unwrap_or(false);
+
+    if !path.exists() {
+        return super::err(format!("录屏文件不存在: {file_path}"));
+    }
+
+    let (_total_frames, timestamp_secs) = match validate_frame_idx_and_timestamp(path, frame_idx) {
+        Ok(v) => v,
+        Err(e) => return super::err(e),
+    };
+
+    let mut file = crate::record::BookmarkFile::load_or_empty(path);
+
+    // label 默认值（None / 空字符串 → "书签 #N"，与 bookmarks.len()+1 对齐 stage 2 id 算法）
+    let label_str = match label {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => format!("书签 #{}", file.bookmarks.len() + 1),
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let bookmark = file.add(frame_idx, timestamp_secs, label_str.clone(), now);
+    let id = bookmark.id;
+
+    if dry_run {
+        return json!({
+            "ok": true,
+            "dry_run": true,
+            "action": "add",
+            "id": id,
+            "frame_idx": frame_idx,
+            "label": label_str,
+            "timestamp_secs": timestamp_secs,
+            "sidecar_written": false,
+        });
+    }
+
+    let (sidecar_written, warning) = write_sidecar(&file, path);
+    let mut v = json!({
         "ok": true,
-        "stub": true,
-        "stage": "v0.16-stage-3",
-        "message": "proc_bookmarks_add tool schema is registered; business logic lands in stage 3",
-        "received_file_path": file_path,
-        "received_frame_idx": frame_idx,
-        "received_label": label,
-        "received_dry_run": dry_run,
-    })
+        "dry_run": false,
+        "action": "add",
+        "id": id,
+        "frame_idx": frame_idx,
+        "label": label_str,
+        "timestamp_secs": timestamp_secs,
+        "sidecar_written": sidecar_written,
+    });
+    if let Some(w) = warning {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("warning".to_string(), Value::String(w));
+        }
+    }
+    v
 }
 
-/// `proc_bookmarks_edit` stub — stage 3 Slice 填 BookmarkFile::edit_label +
-/// write 业务实现。
+/// `proc_bookmarks_edit` — 编辑书签 label（id 查找 + edit_label + write）。
+///
+/// 先查 bookmark 拿 `old_label`（让 agent 看到 diff），再调
+/// [`crate::record::BookmarkFile::edit_label`] 修改 + write。id 不存在 →
+/// `{ ok: false, error: "书签 id=<N> 不存在" }`。
 pub fn make_bookmarks_edit_json(
     file_path: &str,
     id: u64,
     label: &str,
     dry_run: Option<bool>,
 ) -> Value {
-    json!({
+    let path = std::path::Path::new(file_path);
+    let dry_run = dry_run.unwrap_or(false);
+
+    if !path.exists() {
+        return super::err(format!("录屏文件不存在: {file_path}"));
+    }
+
+    let mut file = crate::record::BookmarkFile::load_or_empty(path);
+
+    let old_label = match file.bookmarks.iter().find(|b| b.id == id) {
+        Some(b) => b.label.clone(),
+        None => return super::err(format!("书签 id={id} 不存在")),
+    };
+    let new_label = label.to_string();
+
+    if dry_run {
+        return json!({
+            "ok": true,
+            "dry_run": true,
+            "action": "edit",
+            "id": id,
+            "old_label": old_label,
+            "new_label": new_label,
+            "sidecar_written": false,
+        });
+    }
+
+    let edited = file.edit_label(id, new_label.clone());
+    debug_assert!(edited, "edit_label 失败但 step 1 已确认 id 存在");
+
+    let (sidecar_written, warning) = write_sidecar(&file, path);
+    let mut v = json!({
         "ok": true,
-        "stub": true,
-        "stage": "v0.16-stage-3",
-        "message": "proc_bookmarks_edit tool schema is registered; business logic lands in stage 3",
-        "received_file_path": file_path,
-        "received_id": id,
-        "received_label": label,
-        "received_dry_run": dry_run,
-    })
+        "dry_run": false,
+        "action": "edit",
+        "id": id,
+        "old_label": old_label,
+        "new_label": new_label,
+        "sidecar_written": sidecar_written,
+    });
+    if let Some(w) = warning {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("warning".to_string(), Value::String(w));
+        }
+    }
+    v
 }
 
-/// `proc_bookmarks_delete` stub — stage 3 Slice 填 BookmarkFile::remove +
-/// write 业务实现。
+/// `proc_bookmarks_delete` — 删除书签（id 查找 + remove + write）。
+///
+/// 先查 bookmark 拿 `frame_idx + label`（让 agent 知道删了什么），再调
+/// [`crate::record::BookmarkFile::remove`] 删除 + write。id 不存在 →
+/// `{ ok: false, error: "书签 id=<N> 不存在" }`。
 pub fn make_bookmarks_delete_json(file_path: &str, id: u64, dry_run: Option<bool>) -> Value {
-    json!({
+    let path = std::path::Path::new(file_path);
+    let dry_run = dry_run.unwrap_or(false);
+
+    if !path.exists() {
+        return super::err(format!("录屏文件不存在: {file_path}"));
+    }
+
+    let mut file = crate::record::BookmarkFile::load_or_empty(path);
+
+    let (frame_idx, label) = match file.bookmarks.iter().find(|b| b.id == id) {
+        Some(b) => (b.frame_idx, b.label.clone()),
+        None => return super::err(format!("书签 id={id} 不存在")),
+    };
+
+    if dry_run {
+        return json!({
+            "ok": true,
+            "dry_run": true,
+            "action": "delete",
+            "id": id,
+            "frame_idx": frame_idx,
+            "label": label,
+            "sidecar_written": false,
+        });
+    }
+
+    let removed = file.remove(id);
+    debug_assert!(removed, "remove 失败但 step 1 已确认 id 存在");
+
+    let (sidecar_written, warning) = write_sidecar(&file, path);
+    let mut v = json!({
         "ok": true,
-        "stub": true,
-        "stage": "v0.16-stage-3",
-        "message": "proc_bookmarks_delete tool schema is registered; business logic lands in stage 3",
-        "received_file_path": file_path,
-        "received_id": id,
-        "received_dry_run": dry_run,
-    })
+        "dry_run": false,
+        "action": "delete",
+        "id": id,
+        "frame_idx": frame_idx,
+        "label": label,
+        "sidecar_written": sidecar_written,
+    });
+    if let Some(w) = warning {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("warning".to_string(), Value::String(w));
+        }
+    }
+    v
 }
 
 /// `proc_eject_status` — USB / removable device eject status（只读，不 kill / 不 flush）。
@@ -548,4 +717,85 @@ fn highest_anomaly_severity(frame: &crate::record::UiFrame) -> Option<String> {
         }
     }
     max_severity
+}
+
+// ===========================================================================
+// 私有辅助函数 — stage 3 helpers（bookmarks frame_idx 校验 + sidecar 写盘兜底）
+//
+// `validate_frame_idx_and_timestamp` 双路径校验 frame_idx 范围并提取该帧的 unix
+// timestamp（v3 直接取 `UiFrame.timestamp` / VT100 走 `time_range_ms` 内插），让
+// `make_bookmarks_add_json` 不重复写双路径逻辑。
+//
+// `write_sidecar` 替代 `BookmarkFile::write` 的静默失败路径——序列化失败 / IO 失败
+// 时返 `false + Some(warning)`，让 handler 在 JSON 顶层加 `warning` 字段透出错误
+// （brainstorm §决策 7）。
+// ===========================================================================
+
+/// 校验 frame_idx 在录屏帧范围内，返回 `(total_frames, timestamp_secs)`。
+///
+/// 双路径（brainstorm §Q2 + §Q4）：
+/// - VT100 路径：`is_vt100_file` 真 → `VtPlayer::open + total_frames + time_range_ms 内插`
+/// - v3 路径：`Player::open + total_frames + frame_at(frame_idx).timestamp`
+///
+/// 校验失败 / 打开失败返 `Err(message)`，调用方走 `super::err`。
+fn validate_frame_idx_and_timestamp(
+    path: &std::path::Path,
+    frame_idx: usize,
+) -> Result<(usize, u64), String> {
+    if is_vt100_file(path) {
+        let player =
+            VtPlayer::open(path.to_path_buf()).map_err(|e| format!("VT100 录屏打开失败: {e}"))?;
+        let total = player.total_frames();
+        if frame_idx >= total {
+            return Err(format!("frame_idx={frame_idx} 超出范围（总帧数={total}）"));
+        }
+        // VT100 内插：start_ms + (end_ms - start_ms) * frame_idx / (total - 1)
+        // total=1 时退化为 start_ms / 1000（单帧 edge case，避免除零）
+        let (start_ms, end_ms) = player.time_range_ms();
+        let ts_secs = if total > 1 {
+            let span = end_ms.saturating_sub(start_ms);
+            let ts_ms = start_ms + span * (frame_idx as u64) / (total as u64 - 1);
+            ts_ms / 1000
+        } else {
+            start_ms / 1000
+        };
+        Ok((total, ts_secs))
+    } else {
+        let player =
+            Player::open(path.to_path_buf()).map_err(|e| format!("录屏文件打开失败: {e}"))?;
+        let total = player.total_frames();
+        if frame_idx >= total {
+            return Err(format!("frame_idx={frame_idx} 超出范围（总帧数={total}）"));
+        }
+        let frame = player
+            .frame_at(frame_idx)
+            .ok_or_else(|| format!("frame_idx={frame_idx} 无法读取"))?;
+        Ok((total, frame.timestamp))
+    }
+}
+
+/// 写 sidecar 文件，返 `(sidecar_written, warning)`。
+///
+/// 替代 [`crate::record::BookmarkFile::write`] 的静默失败路径（brainstorm §决策 7）。
+/// 序列化失败 / IO 失败时返 `(false, Some(warning))`，调用方在 JSON 顶层加 `warning`
+/// 字段透出错误，让 agent 决定是否重试或上报。
+fn write_sidecar(
+    file: &crate::record::BookmarkFile,
+    prec_path: &std::path::Path,
+) -> (bool, Option<String>) {
+    let text = match serde_json::to_string_pretty(file) {
+        Ok(s) => s,
+        Err(e) => return (false, Some(format!("sidecar 序列化失败: {e}"))),
+    };
+    let sidecar_path = crate::record::BookmarkFile::sidecar_path(prec_path);
+    match std::fs::write(&sidecar_path, &text) {
+        Ok(()) => (true, None),
+        Err(e) => (
+            false,
+            Some(format!(
+                "sidecar 写盘失败 ({}): {e}",
+                sidecar_path.display()
+            )),
+        ),
+    }
 }

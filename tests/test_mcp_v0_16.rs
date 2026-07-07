@@ -491,3 +491,363 @@ fn test_eject_status_suggestion_is_one_of_four_values() {
         );
     }
 }
+
+// ===========================================================================
+// bookmarks 测试（stage 3，18 case）
+//
+// 风格与 stage 2 同款——复用 make_frame / write_v3_recording / write_vt100_recording
+// fixture helper。sidecar 操作走 BookmarkFile 业务 API 写真实 sidecar 文件。
+// ===========================================================================
+
+/// 写真实 sidecar（用 BookmarkFile::write 业务 API），含若干 bookmark。
+fn write_sidecar_with_bookmarks(prec_path: &std::path::Path, bookmarks: &[(usize, &str)]) {
+    use proc::record::BookmarkFile;
+    let mut file = BookmarkFile::empty_for(prec_path);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    for &(frame_idx, label) in bookmarks {
+        file.add(frame_idx, 1000 + frame_idx as u64, label.to_string(), now);
+    }
+    file.write(prec_path);
+}
+
+// ---------- bookmarks_list（5 case）----------
+
+#[test]
+fn test_bookmarks_list_no_sidecar_returns_empty_with_healthy_true() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("no_sidecar.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+
+    let out = record::make_bookmarks_list_json(path.to_str().unwrap());
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["count"], serde_json::json!(0));
+    assert_eq!(out["sidecar_present"], serde_json::json!(false));
+    assert_eq!(out["source_healthy"], serde_json::json!(true));
+    assert_eq!(out["bookmarks"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn test_bookmarks_list_with_fresh_sidecar_returns_bookmarks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fresh.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+    write_sidecar_with_bookmarks(&path, &[(0, "first"), (1, "second")]);
+
+    let out = record::make_bookmarks_list_json(path.to_str().unwrap());
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["count"], serde_json::json!(2));
+    assert_eq!(out["sidecar_present"], serde_json::json!(true));
+    assert_eq!(out["source_healthy"], serde_json::json!(true));
+    let bookmarks = out["bookmarks"].as_array().expect("bookmarks");
+    assert_eq!(bookmarks.len(), 2);
+    assert_eq!(bookmarks[0]["label"], serde_json::json!("first"));
+    assert_eq!(bookmarks[1]["label"], serde_json::json!("second"));
+    // 字段集
+    for key in &["id", "frame_idx", "timestamp_secs", "label", "created_at"] {
+        assert!(
+            bookmarks[0].get(*key).is_some(),
+            "bookmark missing field '{key}': {bookmarks:?}"
+        );
+    }
+}
+
+#[test]
+fn test_bookmarks_list_with_stale_sidecar_returns_unhealthy_with_empty_bookmarks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stale.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+    write_sidecar_with_bookmarks(&path, &[(0, "first")]);
+
+    // 改源文件大小让其 stale（try_load size 校验失败）
+    let mut content = std::fs::read(&path).unwrap();
+    content.extend_from_slice(b" extra bytes to change size");
+    std::fs::write(&path, &content).unwrap();
+
+    let out = record::make_bookmarks_list_json(path.to_str().unwrap());
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["sidecar_present"], serde_json::json!(true));
+    assert_eq!(out["source_healthy"], serde_json::json!(false));
+    assert_eq!(out["count"], serde_json::json!(0));
+    assert_eq!(out["bookmarks"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn test_bookmarks_list_missing_recording_returns_ok_false() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing.prec");
+
+    let out = record::make_bookmarks_list_json(path.to_str().unwrap());
+    assert_eq!(out["ok"], serde_json::json!(false), "out: {out}");
+    let error = out["error"].as_str().expect("error");
+    assert!(
+        error.contains("不存在") || error.contains("No such file"),
+        "error should mention missing: {error}"
+    );
+}
+
+#[test]
+fn test_bookmarks_list_vt100_recording_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vt100.prec");
+    write_vt100_recording(&path, 5, 200, 50);
+
+    let out = record::make_bookmarks_list_json(path.to_str().unwrap());
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    // VT100 录屏无 sidecar → sidecar_present=false, source_healthy=true, bookmarks=[]
+    assert_eq!(out["sidecar_present"], serde_json::json!(false));
+    assert_eq!(out["source_healthy"], serde_json::json!(true));
+    assert_eq!(out["count"], serde_json::json!(0));
+}
+
+// ---------- bookmarks_add（6 case）----------
+
+#[test]
+fn test_bookmarks_add_default_label_when_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("default_label.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+
+    let out = record::make_bookmarks_add_json(path.to_str().unwrap(), 0, None, None);
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["label"], serde_json::json!("书签 #1"));
+    assert_eq!(out["id"], serde_json::json!(1));
+    assert_eq!(out["frame_idx"], serde_json::json!(0));
+    assert_eq!(out["action"], serde_json::json!("add"));
+    assert_eq!(out["dry_run"], serde_json::json!(false));
+    assert_eq!(out["sidecar_written"], serde_json::json!(true));
+    assert_eq!(out["timestamp_secs"], serde_json::json!(1_000));
+}
+
+#[test]
+fn test_bookmarks_add_empty_label_uses_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty_label.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+
+    let out = record::make_bookmarks_add_json(path.to_str().unwrap(), 0, Some(""), None);
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["label"], serde_json::json!("书签 #1"));
+}
+
+#[test]
+fn test_bookmarks_add_explicit_label_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("explicit_label.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+
+    let out = record::make_bookmarks_add_json(path.to_str().unwrap(), 0, Some("异常点"), None);
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["label"], serde_json::json!("异常点"));
+}
+
+#[test]
+fn test_bookmarks_add_dry_run_does_not_write_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("add_dry_run.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+
+    let out = record::make_bookmarks_add_json(path.to_str().unwrap(), 0, Some("test"), Some(true));
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["dry_run"], serde_json::json!(true));
+    assert_eq!(out["sidecar_written"], serde_json::json!(false));
+    assert_eq!(out["id"], serde_json::json!(1));
+
+    // sidecar 文件不应存在
+    let sidecar_path = format!("{}.bookmarks.json", path.display());
+    assert!(
+        !std::path::Path::new(&sidecar_path).exists(),
+        "dry_run should not create sidecar: {sidecar_path}"
+    );
+
+    // list 也应返空（无 sidecar）
+    let list_out = record::make_bookmarks_list_json(path.to_str().unwrap());
+    assert_eq!(list_out["count"], serde_json::json!(0));
+}
+
+#[test]
+fn test_bookmarks_add_real_write_creates_sidecar_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("add_real_write.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+
+    let out = record::make_bookmarks_add_json(path.to_str().unwrap(), 0, Some("real"), None);
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["sidecar_written"], serde_json::json!(true));
+
+    // sidecar 文件应确实创建
+    let sidecar_path = format!("{}.bookmarks.json", path.display());
+    assert!(
+        std::path::Path::new(&sidecar_path).exists(),
+        "sidecar should exist: {sidecar_path}"
+    );
+
+    // list 应返刚加的 bookmark
+    let list_out = record::make_bookmarks_list_json(path.to_str().unwrap());
+    assert_eq!(list_out["count"], serde_json::json!(1));
+    assert_eq!(list_out["sidecar_present"], serde_json::json!(true));
+    assert_eq!(list_out["source_healthy"], serde_json::json!(true));
+}
+
+#[test]
+fn test_bookmarks_add_invalid_frame_idx_returns_ok_false() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid_idx.prec");
+    write_v3_recording(
+        &path,
+        vec![
+            make_frame(1_000, 10.0, 100, &["a"], ""),
+            make_frame(1_001, 20.0, 200, &["b"], ""),
+        ],
+    );
+
+    // 3 帧录屏（idx 0/1/2），frame_idx=999 应越界
+    let out = record::make_bookmarks_add_json(path.to_str().unwrap(), 999, None, None);
+    assert_eq!(out["ok"], serde_json::json!(false), "out: {out}");
+    let error = out["error"].as_str().expect("error");
+    assert!(
+        error.contains("超出范围") || error.contains("frame_idx"),
+        "error should mention out-of-range: {error}"
+    );
+}
+
+// ---------- bookmarks_edit（4 case）----------
+
+#[test]
+fn test_bookmarks_edit_existing_id_changes_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("edit_existing.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+    write_sidecar_with_bookmarks(&path, &[(0, "old")]);
+
+    let out = record::make_bookmarks_edit_json(path.to_str().unwrap(), 1, "new label", None);
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["action"], serde_json::json!("edit"));
+    assert_eq!(out["dry_run"], serde_json::json!(false));
+    assert_eq!(out["id"], serde_json::json!(1));
+    assert_eq!(out["old_label"], serde_json::json!("old"));
+    assert_eq!(out["new_label"], serde_json::json!("new label"));
+    assert_eq!(out["sidecar_written"], serde_json::json!(true));
+
+    // 验证写入生效：list 应返新 label
+    let list_out = record::make_bookmarks_list_json(path.to_str().unwrap());
+    let bookmarks = list_out["bookmarks"].as_array().expect("bookmarks");
+    assert_eq!(bookmarks[0]["label"], serde_json::json!("new label"));
+}
+
+#[test]
+fn test_bookmarks_edit_non_existing_id_returns_ok_false() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("edit_missing.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+    write_sidecar_with_bookmarks(&path, &[(0, "first")]);
+
+    let out = record::make_bookmarks_edit_json(path.to_str().unwrap(), 999, "x", None);
+    assert_eq!(out["ok"], serde_json::json!(false), "out: {out}");
+    let error = out["error"].as_str().expect("error");
+    assert!(
+        error.contains("不存在") || error.contains("999"),
+        "error should mention missing id: {error}"
+    );
+}
+
+#[test]
+fn test_bookmarks_edit_dry_run_does_not_modify_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("edit_dry_run.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+    write_sidecar_with_bookmarks(&path, &[(0, "original")]);
+
+    let out = record::make_bookmarks_edit_json(
+        path.to_str().unwrap(),
+        1,
+        "should_not_persist",
+        Some(true),
+    );
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["dry_run"], serde_json::json!(true));
+    assert_eq!(out["sidecar_written"], serde_json::json!(false));
+    assert_eq!(out["old_label"], serde_json::json!("original"));
+    assert_eq!(out["new_label"], serde_json::json!("should_not_persist"));
+
+    // 验证 sidecar 内容不变（label 仍是 original）
+    let list_out = record::make_bookmarks_list_json(path.to_str().unwrap());
+    let bookmarks = list_out["bookmarks"].as_array().expect("bookmarks");
+    assert_eq!(bookmarks[0]["label"], serde_json::json!("original"));
+}
+
+#[test]
+fn test_bookmarks_edit_missing_recording_returns_ok_false() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("edit_missing_rec.prec");
+
+    let out = record::make_bookmarks_edit_json(path.to_str().unwrap(), 1, "x", None);
+    assert_eq!(out["ok"], serde_json::json!(false), "out: {out}");
+    let error = out["error"].as_str().expect("error");
+    assert!(
+        error.contains("不存在") || error.contains("No such file"),
+        "error should mention missing recording: {error}"
+    );
+}
+
+// ---------- bookmarks_delete（3 case）----------
+
+#[test]
+fn test_bookmarks_delete_existing_id_removes_bookmark() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("delete_existing.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+    write_sidecar_with_bookmarks(&path, &[(0, "first"), (1, "second")]);
+
+    let out = record::make_bookmarks_delete_json(path.to_str().unwrap(), 1, None);
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["action"], serde_json::json!("delete"));
+    assert_eq!(out["id"], serde_json::json!(1));
+    assert_eq!(out["frame_idx"], serde_json::json!(0));
+    assert_eq!(out["label"], serde_json::json!("first"));
+    assert_eq!(out["sidecar_written"], serde_json::json!(true));
+
+    // 验证删除生效：list 应只剩 id=2
+    let list_out = record::make_bookmarks_list_json(path.to_str().unwrap());
+    assert_eq!(list_out["count"], serde_json::json!(1));
+    let bookmarks = list_out["bookmarks"].as_array().expect("bookmarks");
+    assert_eq!(bookmarks[0]["id"], serde_json::json!(2));
+    assert_eq!(bookmarks[0]["label"], serde_json::json!("second"));
+}
+
+#[test]
+fn test_bookmarks_delete_non_existing_id_returns_ok_false() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("delete_missing.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+    write_sidecar_with_bookmarks(&path, &[(0, "first")]);
+
+    let out = record::make_bookmarks_delete_json(path.to_str().unwrap(), 999, None);
+    assert_eq!(out["ok"], serde_json::json!(false), "out: {out}");
+    let error = out["error"].as_str().expect("error");
+    assert!(
+        error.contains("不存在") || error.contains("999"),
+        "error should mention missing id: {error}"
+    );
+}
+
+#[test]
+fn test_bookmarks_delete_dry_run_keeps_bookmark() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("delete_dry_run.prec");
+    write_v3_recording(&path, vec![make_frame(1_000, 10.0, 100, &["a"], "")]);
+    write_sidecar_with_bookmarks(&path, &[(0, "first")]);
+
+    let out = record::make_bookmarks_delete_json(path.to_str().unwrap(), 1, Some(true));
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["dry_run"], serde_json::json!(true));
+    assert_eq!(out["sidecar_written"], serde_json::json!(false));
+
+    // 验证 bookmark 仍在
+    let list_out = record::make_bookmarks_list_json(path.to_str().unwrap());
+    assert_eq!(list_out["count"], serde_json::json!(1));
+    let bookmarks = list_out["bookmarks"].as_array().expect("bookmarks");
+    assert_eq!(bookmarks[0]["id"], serde_json::json!(1));
+}
