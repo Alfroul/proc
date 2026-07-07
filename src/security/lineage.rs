@@ -61,7 +61,7 @@ impl SuspiciousPattern {
     }
 
     /// RiskFactor.description 字段值（含 chain 摘要便于用户排查）。
-    fn description(&self, current_name: &str, chain: &[(u32, String)]) -> String {
+    fn description(&self, current_name: &str, chain: &[(u32, std::sync::Arc<str>)]) -> String {
         let chain_text = chain_summary(chain);
         match self {
             Self::OfficeToShell => {
@@ -80,10 +80,10 @@ impl SuspiciousPattern {
     }
 }
 
-fn chain_summary(chain: &[(u32, String)]) -> String {
+fn chain_summary(chain: &[(u32, std::sync::Arc<str>)]) -> String {
     chain
         .iter()
-        .map(|(_, n)| n.as_str())
+        .map(|(_, n)| n.as_ref())
         .collect::<Vec<_>>()
         .join(" → ")
 }
@@ -145,8 +145,16 @@ fn name_in_list(list: &[&str], name: &str) -> bool {
 ///
 /// 防循环：`visited` HashSet 检测重复 PID 立即终止（应对 PID 复用导致的环
 /// A → B → A）。stage-5.md 任务 1 要求。
+///
+/// v0.17.0 stage 2 TD-47：返回类型改 `Vec<(u32, Arc<str>)>`，body 用
+/// `Arc::clone(&parent_proc.name)` 替换 `parent_proc.name.to_string()` —— Arc refcount
+/// 是原子计数 inc，无 heap alloc；旧路径每元素 String::from 分配 + 拷贝。1000 进程 ×
+/// 32 深度链单轮从 ~32000 heap alloc 降到 0（仅 Vec 自身 ~1000 alloc）。
 #[must_use]
-pub fn build_parent_chain(pid: u32, processes: &HashMap<u32, ProcessInfo>) -> Vec<(u32, String)> {
+pub fn build_parent_chain(
+    pid: u32,
+    processes: &HashMap<u32, ProcessInfo>,
+) -> Vec<(u32, std::sync::Arc<str>)> {
     let mut chain = Vec::new();
     let mut visited: HashSet<u32> = HashSet::new();
     // 防自身引用：parent_pid == pid 时 break；先把自己加入 visited。
@@ -169,7 +177,7 @@ pub fn build_parent_chain(pid: u32, processes: &HashMap<u32, ProcessInfo>) -> Ve
         let Some(parent_proc) = processes.get(&parent_pid) else {
             break;
         };
-        chain.push((parent_pid, parent_proc.name.to_string()));
+        chain.push((parent_pid, std::sync::Arc::clone(&parent_proc.name)));
         current = parent_pid;
     }
     chain
@@ -189,7 +197,7 @@ pub fn build_parent_chain(pid: u32, processes: &HashMap<u32, ProcessInfo>) -> Ve
 /// Custom 规则仍照常评估（不在 ScriptInterpreter 早返回路径里）。
 #[must_use]
 pub fn detect_suspicious_chain(
-    chain: &[(u32, String)],
+    chain: &[(u32, std::sync::Arc<str>)],
     current_name: &str,
     custom_rules: &[LineageRule],
 ) -> Option<SuspiciousPattern> {
@@ -197,7 +205,7 @@ pub fn detect_suspicious_chain(
     // TD-32：但若直接父是系统启动入口（services/wininit/svchost），视为合法系统
     // 登录脚本，跳过 ScriptInterpreter 扣分（仍可被 Custom 规则评估）。
     if name_in_list(SCRIPT_INTERPRETERS, current_name) {
-        let direct_parent_name = chain.first().map(|(_, n)| n.as_str()).unwrap_or("");
+        let direct_parent_name = chain.first().map(|(_, n)| n.as_ref()).unwrap_or("");
         if !name_in_list(SYSTEM_BOOT_ENTRIES, direct_parent_name) {
             return Some(SuspiciousPattern::ScriptInterpreter);
         }
@@ -206,7 +214,7 @@ pub fn detect_suspicious_chain(
     // Office/Browser → Shell：当前进程必须是 shell 才能命中。
     if name_in_list(SHELL_PROCESSES, current_name) {
         // 直接父进程（chain[0]）。
-        let direct_parent_name = chain.first().map(|(_, n)| n.as_str()).unwrap_or("");
+        let direct_parent_name = chain.first().map(|(_, n)| n.as_ref()).unwrap_or("");
         if name_in_list(OFFICE_APPS, direct_parent_name) {
             return Some(SuspiciousPattern::OfficeToShell);
         }
@@ -220,7 +228,7 @@ pub fn detect_suspicious_chain(
 }
 
 fn match_custom_rule(
-    chain: &[(u32, String)],
+    chain: &[(u32, std::sync::Arc<str>)],
     current_name: &str,
     custom_rules: &[LineageRule],
 ) -> Option<SuspiciousPattern> {
@@ -391,8 +399,8 @@ mod tests {
         let map = build_map(&procs);
         let chain = build_parent_chain(200, &map);
         assert_eq!(chain.len(), 2);
-        assert_eq!(chain[0], (100, "explorer.exe".to_string()));
-        assert_eq!(chain[1], (4, "System".to_string()));
+        assert_eq!(chain[0], (100, std::sync::Arc::<str>::from("explorer.exe")));
+        assert_eq!(chain[1], (4, std::sync::Arc::<str>::from("System")));
     }
 
     #[test]
@@ -446,7 +454,7 @@ mod tests {
 
     #[test]
     fn detect_office_to_shell() {
-        let chain = vec![(100, "WINWORD.EXE".to_string())];
+        let chain = vec![(100, std::sync::Arc::<str>::from("WINWORD.EXE"))];
         let pat = detect_suspicious_chain(&chain, "powershell.exe", &[]);
         assert_eq!(pat, Some(SuspiciousPattern::OfficeToShell));
         assert_eq!(pat.unwrap().default_weight(), 35);
@@ -454,7 +462,7 @@ mod tests {
 
     #[test]
     fn detect_browser_to_shell() {
-        let chain = vec![(100, "chrome.exe".to_string())];
+        let chain = vec![(100, std::sync::Arc::<str>::from("chrome.exe"))];
         let pat = detect_suspicious_chain(&chain, "cmd.exe", &[]);
         assert_eq!(pat, Some(SuspiciousPattern::BrowserToShell));
         assert_eq!(pat.unwrap().default_weight(), 25);
@@ -472,7 +480,7 @@ mod tests {
     #[test]
     fn td32_script_interpreter_whitelisted_when_parent_is_services() {
         // services.exe → wscript.exe（典型 SCM 登录脚本路径）→ 不扣分。
-        let chain = vec![(100, "services.exe".to_string())];
+        let chain = vec![(100, std::sync::Arc::<str>::from("services.exe"))];
         let pat = detect_suspicious_chain(&chain, "wscript.exe", &[]);
         assert!(
             pat.is_none(),
@@ -482,14 +490,14 @@ mod tests {
 
     #[test]
     fn td32_script_interpreter_whitelisted_when_parent_is_wininit() {
-        let chain = vec![(100, "wininit.exe".to_string())];
+        let chain = vec![(100, std::sync::Arc::<str>::from("wininit.exe"))];
         let pat = detect_suspicious_chain(&chain, "cscript.exe", &[]);
         assert!(pat.is_none(), "wininit.exe → cscript.exe 应被白名单豁免");
     }
 
     #[test]
     fn td32_script_interpreter_whitelisted_when_parent_is_svchost() {
-        let chain = vec![(100, "svchost.exe".to_string())];
+        let chain = vec![(100, std::sync::Arc::<str>::from("svchost.exe"))];
         let pat = detect_suspicious_chain(&chain, "mshta.exe", &[]);
         assert!(pat.is_none(), "svchost.exe → mshta.exe 应被白名单豁免");
     }
@@ -497,7 +505,7 @@ mod tests {
     #[test]
     fn td32_script_interpreter_whitelist_is_case_insensitive() {
         // Windows 进程名大小写不固定（services.exe 也可能写作 SERVICES.EXE）。
-        let chain = vec![(100, "SERVICES.EXE".to_string())];
+        let chain = vec![(100, std::sync::Arc::<str>::from("SERVICES.EXE"))];
         let pat = detect_suspicious_chain(&chain, "WScript.exe", &[]);
         assert!(
             pat.is_none(),
@@ -511,8 +519,8 @@ mod tests {
         // 例如 evil.exe ← services.exe ← wscript.exe：典型恶意 macro attack
         // 把 services.exe 伪造为祖先（PID 复用 / 用户态混淆）。
         let chain = vec![
-            (100, "evil.exe".to_string()),
-            (50, "services.exe".to_string()),
+            (100, std::sync::Arc::<str>::from("evil.exe")),
+            (50, std::sync::Arc::<str>::from("services.exe")),
         ];
         let pat = detect_suspicious_chain(&chain, "wscript.exe", &[]);
         assert_eq!(
@@ -525,7 +533,7 @@ mod tests {
     #[test]
     fn td32_whitelist_does_not_affect_custom_rule_evaluation() {
         // 即使 ScriptInterpreter 被白名单豁免，Custom 规则仍照常评估。
-        let chain = vec![(100, "services.exe".to_string())];
+        let chain = vec![(100, std::sync::Arc::<str>::from("services.exe"))];
         let rule = LineageRule {
             name: "test".to_string(),
             parent_regex: regex::Regex::new("(?i)services").unwrap(),
@@ -544,7 +552,7 @@ mod tests {
 
     #[test]
     fn detect_no_match_for_normal_proc() {
-        let chain = vec![(100, "explorer.exe".to_string())];
+        let chain = vec![(100, std::sync::Arc::<str>::from("explorer.exe"))];
         let pat = detect_suspicious_chain(&chain, "notepad.exe", &[]);
         assert!(pat.is_none());
     }
@@ -552,7 +560,7 @@ mod tests {
     #[test]
     fn detect_no_match_when_shell_parent_is_explorer() {
         // cmd ← explorer 是正常情况，不应命中 OfficeToShell/BrowserToShell
-        let chain = vec![(100, "explorer.exe".to_string())];
+        let chain = vec![(100, std::sync::Arc::<str>::from("explorer.exe"))];
         let pat = detect_suspicious_chain(&chain, "cmd.exe", &[]);
         assert!(pat.is_none());
     }
@@ -561,8 +569,8 @@ mod tests {
     fn detect_indirect_office_parent_does_not_match() {
         // cmd ← explorer ← winword（间接父是 Office）—— 只看直接父，不应命中
         let chain = vec![
-            (100, "explorer.exe".to_string()),
-            (50, "winword.exe".to_string()),
+            (100, std::sync::Arc::<str>::from("explorer.exe")),
+            (50, std::sync::Arc::<str>::from("winword.exe")),
         ];
         let pat = detect_suspicious_chain(&chain, "cmd.exe", &[]);
         assert!(pat.is_none());
@@ -571,7 +579,7 @@ mod tests {
     #[test]
     fn check_lineage_risk_returns_factor_for_office_shell() {
         let mut cmd = make_proc(200, "powershell.exe", Some(100));
-        cmd.parent_chain = vec![(100, "WINWORD.EXE".to_string())];
+        cmd.parent_chain = vec![(100, std::sync::Arc::<str>::from("WINWORD.EXE"))];
         let procs = vec![cmd];
         let factors = check_lineage_risk(&procs, &[]);
         assert_eq!(factors.len(), 1);
@@ -639,7 +647,7 @@ weight = 10
             child_regex: regex::Regex::new("(?i)cmd").unwrap(),
             weight: 30,
         };
-        let chain = vec![(100, "my_editor.exe".to_string())];
+        let chain = vec![(100, std::sync::Arc::<str>::from("my_editor.exe"))];
         let pat = detect_suspicious_chain(&chain, "cmd.exe", &[rule]);
         match pat {
             Some(SuspiciousPattern::Custom { name, weight }) => {

@@ -52,7 +52,10 @@ pub fn make_processes(n: usize) -> Vec<ProcessInfo> {
         let cpu = (pid % 30) as f32;
         let memory = (pid as u64) * 8 * 1024 * 1024; // 8MB / pid
         let parent_chain = if i > 1 {
-            vec![(pid - 1, vendors[(i - 1) % vendors.len()].to_string())]
+            vec![(
+                pid - 1,
+                std::sync::Arc::<str>::from(vendors[(i - 1) % vendors.len()]),
+            )]
         } else {
             Vec::new()
         };

@@ -584,8 +584,13 @@ pub struct ProcessInfo {
     /// v0.11.0 阶段 1：父子链骨架。元组 `(pid, name)`，从该进程向上追溯到
     /// 根进程的完整链路。默认空 Vec，阶段 5 由 collect 时填实。
     /// `#[serde(default)]` 让旧录屏文件能反序列化（缺字段 → 空 Vec）。
+    ///
+    /// v0.17.0 stage 2 TD-47：元组类型从 `(u32, String)` 改 `(u32, Arc<str>)`，
+    /// `build_parent_chain` body 用 `Arc::clone` 替换 `String::to_string`，零 heap
+    /// alloc（仅 Vec header 分配，元素 name 走 Arc refcount 共享）。serde 透明转发
+    /// 让旧 `.prec` 文件（String 序列化）能被新代码读，反之亦然。
     #[serde(default)]
-    pub parent_chain: Vec<(u32, String)>,
+    pub parent_chain: Vec<(u32, std::sync::Arc<str>)>,
 }
 
 impl Default for ProcessInfo {
@@ -950,7 +955,7 @@ impl HeavyWorker {
                     // 先 collect 所有 chain 到独立 HashMap（不可变借用结束后再
                     // iter_mut 写入，绕开 Rust 借用规则）。防循环 + 32 层上限
                     // 由 `build_parent_chain` 内部保证。
-                    let pid_to_chain: HashMap<u32, Vec<(u32, String)>> = processes
+                    let pid_to_chain: HashMap<u32, Vec<(u32, std::sync::Arc<str>)>> = processes
                         .keys()
                         .map(|&pid| {
                             (

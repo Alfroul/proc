@@ -370,7 +370,7 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
             let chain_text: String = proc
                 .parent_chain
                 .iter()
-                .map(|(_, n)| n.as_str())
+                .map(|(_, n)| n.as_ref())
                 .chain(std::iter::once(proc.name.as_ref()))
                 .collect::<Vec<_>>()
                 .join(" → ");
@@ -408,7 +408,7 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, proc: &crate::collect::Pro
         let parent_label = format!("{} ({})", parent_entry.1, parent_entry.0);
         let chain_label = proc.parent_chain[1..]
             .iter()
-            .map(|(_, n)| n.as_str())
+            .map(|(_, n)| n.as_ref())
             .collect::<Vec<_>>()
             .join(" → ");
         (parent_label, chain_label)

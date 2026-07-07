@@ -9,6 +9,10 @@
 //! - 每周期堆分配次数（parent_chain Vec clone 是已知疑点 5）
 //! - 批量 build_parent_chain 性能（v0.11 阶段 5 落地）
 //!
+//! v0.17 stage 2 TD-47：parent_chain 改 `Vec<(u32, Arc<str>)>` 后，
+//! build_parent_chain body 用 `Arc::clone` 替换 `String::to_string`，预期
+//! alloc 数字下降 ~3x（仅 Vec 自身分配，元素字符串走 Arc refcount 共享）。
+//!
 //! 3 档 fixture：100 / 500 / 1000 进程。
 
 mod common;
@@ -27,8 +31,8 @@ use common::make_processes_map;
 /// （绕开 Rust 借用规则），再 iter_mut 写入 ProcessInfo.parent_chain。
 fn heavy_parent_chain_pass(
     processes: &mut HashMap<u32, ProcessInfo>,
-) -> HashMap<u32, Vec<(u32, String)>> {
-    let pid_to_chain: HashMap<u32, Vec<(u32, String)>> = processes
+) -> HashMap<u32, Vec<(u32, std::sync::Arc<str>)>> {
+    let pid_to_chain: HashMap<u32, Vec<(u32, std::sync::Arc<str>)>> = processes
         .keys()
         .map(|&pid| (pid, build_parent_chain(pid, processes)))
         .collect();

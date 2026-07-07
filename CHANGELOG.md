@@ -7,6 +7,28 @@
 
 ## [Unreleased]
 
+### v0.17.0 阶段 2 — 主题 A TD-47 parent_chain Arc<str> 重构零 heap alloc
+
+v0.17.0 cycle stage 2 Slice 落地（主题 A 性能优化第一弹）：把 `ProcessInfo.parent_chain: Vec<(u32, String)>` 重构为 `Vec<(u32, Arc<str>)>`，让 `build_parent_chain` 在 HeavyWorker 单轮 hot path 上从每元素 String 分配 + 拷贝改为 Arc refcount 共享（原子计数 inc，零 heap alloc）。bench_refresh_heavy 1000 进程档 6.45 ms（vs brainstorm 提及 v0.16 ~16.5 ms 基线，~2.5x 降幅）。serde 透明转发让旧 `.prec` 文件（String 序列化）能被新代码读，反之亦然，无需迁移层。
+
+- **Changed**: `src/collect.rs`（`ProcessInfo.parent_chain` 字段类型 `Vec<(u32, String)>` → `Vec<(u32, std::sync::Arc<str>)>` + 字段 doc comment 加 v0.17 stage 2 TD-47 说明；line 958 `pid_to_chain` 局部变量类型同步更新）。
+- **Changed**: `src/security/lineage.rs`（5 处签名更新：`SuspiciousPattern::description` / `chain_summary` / `build_parent_chain` / `detect_suspicious_chain` / `match_custom_rule` 全部 `&[(u32, String)]` → `&[(u32, std::sync::Arc<str>)]`；`build_parent_chain` body `chain.push((parent_pid, parent_proc.name.to_string()))` → `chain.push((parent_pid, std::sync::Arc::clone(&parent_proc.name)))` 实现零 heap alloc；2 处 `n.as_str()` → `n.as_ref()` 因 Arc<str> 无 as_str 方法走 AsRef<str>；内嵌 tests mod 13 处 `vec![(N, "..".to_string())]` 字面量改 `vec![(N, std::sync::Arc::<str>::from(".."))]`）。
+- **Changed**: `src/tui/detail_view.rs`（2 处消费位点：line 373 + line 411 `.map(|(_, n)| n.as_str())` → `.map(|(_, n)| n.as_ref())`，因 Arc<str> 无 as_str 方法；其他渲染路径如 `format!("{}", parent_entry.1)` 通过 Display 自动 Deref 不需改）。
+- **Changed**: `benches/common/mod.rs`（fixture line 54-58 `vec![(pid - 1, vendors[...].to_string())]` → `vec![(pid - 1, std::sync::Arc::<str>::from(vendors[...]))]`）。
+- **Changed**: `benches/bench_refresh_heavy.rs`（`heavy_parent_chain_pass` 函数签名 + 局部变量类型 `HashMap<u32, Vec<(u32, String)>>` → `HashMap<u32, Vec<(u32, std::sync::Arc<str>)>>`；顶部 doc comment 加 v0.17 stage 2 TD-47 预期 alloc 数字下降说明）。
+- **Changed**: `tests/test_lineage.rs`（`make_proc` helper 签名 `parent_chain: Vec<(u32, String)>` → `Vec<(u32, std::sync::Arc<str>)>`；13 处调用点字面量 `vec![(N, "..".to_string())]` → `vec![(N, std::sync::Arc::<str>::from(".."))]`；末尾加 3 个 TD-47 行为测试：(a) `parent_chain_arc_sharing_after_build` —— 验证 build_parent_chain 返回的 chain 元素与源 ProcessInfo.name 共享同一 Arc 指针（`Arc::as_ptr` 比较），证明走 refcount 共享而非字符串拷贝；(b) `parent_chain_serde_legacy_json_round_trip` —— 验证 v0.16 旧格式 JSON（chain 元素 String）反序列化到新结构等价，serde 透明转发；(c) `parent_chain_clone_preserves_arc_sharing` —— 验证 chain.clone() 后 Arc 仍与原 Arc 共享（collect.rs:969 `proc.parent_chain = chain.clone()` 路径走 Arc::clone 原子计数 inc））。
+- **Docs**: `docs/stages/v0.17-stage-2.md`（新建，stage 2 任务清单 + 7 设计决策 + 9 任务 + 14 验收标准 + 6 已知风险 + stage 3 启动指令包）；`docs/stages/v0.17-brainstorm.md`（7 stage 总览表 stage 2 ⬜ → ✅）；`CONTEXT.md`(术语段不动，stage 1 已加 8 术语覆盖 stage 2 范围，本地不入 commit)。
+
+**关键数字**：
+
+| 指标 | v0.17.0 stage 1 基线 | v0.17.0 stage 2 落地 |
+|---|---|---|
+| 全量回归 | 1317 passed / 0 failed / 3 ignored | **1320 passed / 0 failed / 3 ignored**（+3 个 TD-47 行为测试）|
+| bench_refresh_heavy 1000 进程档 | ~16.5 ms（brainstorm 提及 v0.13 PERF-BASELINE 数字）| **6.45 ms**（~2.5x 降幅，与预期 ~3x alloc 减少一致）|
+| Heap alloc/单轮（推算）| ~32000 String 分配（1000 进程 × 32 深度链）| **0 String 分配**（仅 ~1000 Vec header 分配，元素走 Arc refcount 共享）|
+
+**设计要点**：(1) 与 v0.6 落地的 `ProcessInfo.name: Arc<str>` 同款 serde 透明转发模式延续；(2) `build_parent_chain` body 用 `Arc::clone` 替换 `String::to_string` 实现零 heap alloc；(3) 旧 `.prec` 文件 / JSON 兼容性自动获得，无需迁移层（Arc<str>: From<String> / From<&str> 反序列化透明转发）；(4) 不验 heap alloc 数字本身（count allocs 需 jemalloc/dhat 介入），改加 3 个行为测试验证 Arc 共享不变量。
+
 ### v0.17.0 阶段 1 — 5 主题骨架 + ADR-0026~0029 + CONTEXT 术语（开发中）
 
 v0.17.0 cycle 是 **5 主题大 cycle**（性能 + 可观测性 + VT100 replay + record 暴露 + USB/docker-rm 写操作），7 stage 节奏（1 Spike + 5 Slice + 1 Review+收尾合并段），预期 ~5540 行总改动。stage 1 Spike 落地 5 主题骨架 + 4 份 ADR + 8 术语 + 7 个新 tool stub + 3 个持久字段 stub，全量回归基线不变（1317 passed / 0 failed / 3 ignored）。
