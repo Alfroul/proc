@@ -25,6 +25,7 @@
 pub mod cli;
 pub mod inspect;
 pub mod metrics;
+pub mod record;
 
 use std::sync::{Arc, Mutex};
 
@@ -46,6 +47,7 @@ use crate::dns_log::DnsLogCollector;
 use cli::*;
 use inspect::*;
 use metrics::*;
+use record::*;
 
 /// MCP server 主入口（runtime 已在 [`super::run_mcp_serve`] 起好）。
 ///
@@ -590,6 +592,101 @@ impl ProcMcpHandler {
         Parameters(_args): Parameters<MetricsThermalArgs>,
     ) -> Result<CallToolResult, McpError> {
         ok_result(make_metrics_thermal_json())
+    }
+
+    #[tool(
+        name = "proc_replay_info",
+        description = "Read recording file metadata (v3 UiFrame footer or VT100 header). Returns { ok, format: \"uiframe\"|\"vt100\", version, frame_count, duration_secs, anomaly_count, event_count, max_cpu, max_mem, has_bookmarks_sidecar, path, size_bytes }. v3 UiFrame format includes start_time/end_time/hostname/anomaly_count/event_count. VT100 format includes start_ms/end_ms/width/height (no footer). File not found / not a recording / corrupt → ok=false + error."
+    )]
+    fn proc_replay_info(
+        &self,
+        Parameters(args): Parameters<ReplayInfoArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_replay_info_json(&args.file_path))
+    }
+
+    #[tool(
+        name = "proc_replay_search",
+        description = "Search recording frames by FilterExpr or substring (v3 UiFrame only). Query formats: substring `chrome` (matches any frame containing process named \"chrome\"); FilterExpr `: cpu > 80 AND name =~ /chrome/` (5 dimensions: timestamp/cpu/mem/name/anomaly.severity). Returns { ok, match_count, returned, truncated, matches: [{ frame_idx, timestamp, cpu_usage, memory_used, matched_processes[], anomaly_severity? }] }. Default limit: 100. Truncated=true when match_count > returned. VT100 format not supported (returns ok=false). Long recording performance: ~9s per 30min session (one-time scan)."
+    )]
+    fn proc_replay_search(
+        &self,
+        Parameters(args): Parameters<ReplaySearchArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_replay_search_json(
+            &args.file_path,
+            &args.query,
+            args.limit,
+        ))
+    }
+
+    #[tool(
+        name = "proc_bookmarks_list",
+        description = "List all bookmarks in a recording's sidecar (.prec.bookmarks.json). Returns { ok, count, sidecar_present, source_healthy, bookmarks: [{ id, frame_idx, timestamp_secs, label, created_at }] }. Sidecar not present → count=0 + sidecar_present=false + bookmarks=[]. Source recording changed (size/mtime mismatch) → source_healthy=false + bookmarks=[]."
+    )]
+    fn proc_bookmarks_list(
+        &self,
+        Parameters(args): Parameters<BookmarksListArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_bookmarks_list_json(&args.file_path))
+    }
+
+    #[tool(
+        name = "proc_bookmarks_add",
+        description = "Add a bookmark to a recording's sidecar. Args: file_path, frame_idx (0-based, must be < total_frames), label (optional, empty/None defaults to \"书签 #N\"), dry_run (optional, default false). Returns { ok, dry_run, action: \"add\", id, frame_idx, label, timestamp_secs, sidecar_written }. dry_run=true → sidecar_written=false (preview only)."
+    )]
+    fn proc_bookmarks_add(
+        &self,
+        Parameters(args): Parameters<BookmarksAddArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_bookmarks_add_json(
+            &args.file_path,
+            args.frame_idx,
+            args.label.as_deref(),
+            args.dry_run,
+        ))
+    }
+
+    #[tool(
+        name = "proc_bookmarks_edit",
+        description = "Edit a bookmark's label in a recording's sidecar. Args: file_path, id (bookmark id), label (new label), dry_run (optional, default false). Returns { ok, dry_run, action: \"edit\", id, old_label, new_label, sidecar_written }. Bookmark id not found → ok=false + error."
+    )]
+    fn proc_bookmarks_edit(
+        &self,
+        Parameters(args): Parameters<BookmarksEditArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_bookmarks_edit_json(
+            &args.file_path,
+            args.id,
+            &args.label,
+            args.dry_run,
+        ))
+    }
+
+    #[tool(
+        name = "proc_bookmarks_delete",
+        description = "Delete a bookmark from a recording's sidecar. Args: file_path, id (bookmark id), dry_run (optional, default false). Returns { ok, dry_run, action: \"delete\", id, frame_idx, label, sidecar_written }. Bookmark id not found → ok=false + error."
+    )]
+    fn proc_bookmarks_delete(
+        &self,
+        Parameters(args): Parameters<BookmarksDeleteArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_bookmarks_delete_json(
+            &args.file_path,
+            args.id,
+            args.dry_run,
+        ))
+    }
+
+    #[tool(
+        name = "proc_eject_status",
+        description = "Query USB / removable device eject status (read-only, no kill / no flush). Use case: agent kills locks then re-checks to confirm kill took effect. Args: drive (drive letter, e.g. \"E\" / \"E:\" / \"E:\\\\\" all accepted). Returns { ok, drive, device: { drive_letter, label, total_bytes, used_bytes, fs_type, is_removable }, ejectable: bool (= lock_count==0), lock_count, locks: [{ pid, name, exe_path, risk }], suggestion: \"eject_now\"|\"kill_locks\"|\"unknown_drive\"|\"unavailable\" }. suggestion=eject_now → can directly eject; suggestion=kill_locks → need to kill processes (use proc_kill); suggestion=unknown_drive → drive letter invalid or not removable; suggestion=unavailable → non-Windows platform or scan failed. Windows-only; other platforms return ok=true + suggestion=\"unavailable\"."
+    )]
+    fn proc_eject_status(
+        &self,
+        Parameters(args): Parameters<EjectStatusArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        ok_result(record::make_eject_status_json(&args.drive))
     }
 }
 
