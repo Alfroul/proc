@@ -7,7 +7,35 @@
 
 ## [Unreleased]
 
-下次 cycle（v0.17.0+）的候选方向：基于 v0.16 cycle 落地情况 + tech-debt TD-50~54 残留项决定。候选：主题 B 可观测性 cycle（rmcp Resource subscribe / SSE transport / 实时流，与 TD-52 sparkline 历史同款方向）/ 主题 A 性能优化 cycle（TD-54 MCP handler 内 SystemSnapshot/App 复用 + TD-44~47 残留 PERF-BASELINE）/ 主题 F VT100 replay 增强 cycle（TD-49 字节流转码 UiFrame / 反向解释器，让 VT100 录屏也支持 search / 倒放）/ record 暴露评估（spawn `proc record` 子进程 / worker 持续采样 / MCP-level confirm，与本 cycle ADR-0025b 同款推迟理由）/ USB release / docker-rm 写操作 cycle（`proc_usb_release(drive, kill_pids, dry_run=false)` 一次完成 kill + flush + eject / `proc_docker_rm` 系列，与本 cycle brainstorm §决策 9 用户设计偏好同款）。
+### v0.17.0 阶段 1 — 5 主题骨架 + ADR-0026~0029 + CONTEXT 术语（开发中）
+
+v0.17.0 cycle 是 **5 主题大 cycle**（性能 + 可观测性 + VT100 replay + record 暴露 + USB/docker-rm 写操作），7 stage 节奏（1 Spike + 5 Slice + 1 Review+收尾合并段），预期 ~5540 行总改动。stage 1 Spike 落地 5 主题骨架 + 4 份 ADR + 8 术语 + 7 个新 tool stub + 3 个持久字段 stub，全量回归基线不变（1317 passed / 0 failed / 3 ignored）。
+
+- **Added**: `src/mcp/handler/observable.rs`（新 ~85 行 = MetricsHistoryArgs struct + make_metrics_history_json stub helper + 模块 doc comment，stage 4 实装 ResourceRoute trait impl + SSE transport 入口 + TD-52 sparkline worker）。
+- **Added**: `src/record/vt100_to_uiframe.rs`（新 ~70 行 = Vt100ToUiFrameConverter struct + new/feed_bytes/snapshot_frame 三方法 stub 返 "v0.17-stage-5 未实装" 错误 + Default impl，stage 5 实装增量解析 + 累积屏幕 buffer + 30 FPS 切片为 UiFrame）。
+- **Added**: `src/mcp/transport.rs`（新 ~55 行 = SseTransportConfig struct + serve_sse 函数 stub，stage 4 实装 `proc mcp serve --transport sse --port 8080` 入口）。
+- **Added**: `src/mcp/resources.rs`（新 ~50 行 = PROC_RESOURCE_URIS 常量数组 3 个 URI + ResourceRoute trait + route 方法 stub，stage 4 实装 `proc://metrics/system` 等资源 URI 路由 + client 订阅后 worker 1s tick 推送增量）。
+- **Added**: `docs/adr/{0026-mcp-handler-persistent-fields.md(新 ~150 行，MCP handler 持久字段策略：3 个 Arc<Mutex<T>> 字段 + mcp-persistent-state feature flag + 与 v0.12 TD-36 持久 dns_collector 同款模式延续), 0027-rmcp-resource-subscribe-sse-transport.md(新 ~150 行，rmcp 0.11 Resource subscribe + SSE transport 设计：3 件套落地主题 B 可观测性 schema), 0028-vt100-to-uiframe-converter.md(新 ~150 行，VT100 字节流转码 UiFrame 路径：临时转码方案 a，不破坏原 VT100 文件 + 转码失败可回退 VtPlayer 正向 replay), 0029-record-exposure-and-confirm-mechanism.md(新 ~150 行，record 暴露方案 (a) spawn `proc record` 子进程 + 写操作 confirm 机制方案 A 参数 confirm: bool + 与既有 dry_run 互补)}`。
+- **Changed**: `src/mcp/handler/mod.rs`（顶部加 `pub mod observable;` + `use observable::*;` + import VecDeque / SystemSnapshot 加 cfg-gate + struct 加 3 个持久字段 stub（`snapshot: Arc<Mutex<Option<SystemSnapshot>>>` / `system_history: Arc<Mutex<VecDeque<SystemSnapshot>>>` / `record_handle: Arc<Mutex<Option<Child>>>`，全 cfg-gate `mcp-persistent-state` feature flag）+ Clone / Default / new() impl 加 3 字段初始化（Default / new() 都返 None / 空 VecDeque，与 v0.12 TD-36 dns_collector 同款规则——测试路径不 spawn worker）+ `#[tool_router] impl` 块末尾追加 7 个 `#[tool]` stub 方法，39 → 46 tool）。
+- **Changed**: `src/mcp/handler/record.rs`（扩 +200 行 = 6 个新 Args struct（RecordStartArgs / RecordStopArgs / UsbReleaseArgs / DockerRmArgs / DockerImageRmArgs / DockerVolumeRmArgs）+ 6 个 stub helper 返 `{ ok:true, stub:true, stage:"v0.17-stage-6", message, received_* }` placeholder JSON + 顶部 doc comment 扩加 v0.17 cycle 6 tool 说明）。
+- **Changed**: `src/record/mod.rs`（加 `pub mod vt100_to_uiframe;` + re-export `Vt100ToUiFrameConverter`）。
+- **Changed**: `src/mcp/mod.rs`（加 `pub mod transport; pub mod resources;` + re-export `SseTransportConfig` / `serve_sse` / `PROC_RESOURCE_URIS` / `ResourceRoute`）。
+- **Changed**: `src/cli/{def.rs(Command::Record 加 #[arg(long = "no-tui")] no_tui: bool 字段), mod.rs(dispatch 传 *no_tui), record.rs(run_record 签名加 no_tui: bool 参数 + 顶部加 stub 分支返 "v0.17-stage-6 未实装" 错误 + exit 1)}`。
+- **Changed**: `Cargo.toml`（`[features]` 段加 `mcp-persistent-state = []` + `default = ["nvidia", "mcp-persistent-state"]`，默认开启让生产路径有持久字段，`--no-default-features` 时 cfg-gate 掉）。
+- **Changed**: `docs/adr/README.md`（索引段加 4 份新 ADR 0026-0029）。
+- **Docs**: `docs/stages/v0.17-stage-1.md`（stage 1 任务清单 + 8 设计决策 + 11 任务 + 22 验收标准 + 7 已知风险 + stage 2 启动指令包）；`docs/stages/v0.17-brainstorm.md`（cycle 总览，7 stage 设计 + 8 决策点 + 阶段总览表 stage 1 ⬜ → ✅）；`CONTEXT.md`(术语段加 v0.17.0 段 8 术语 + 演进历史加 v0.17.0 段 stage 1 行，本地不入 commit)。
+
+**关键数字**：
+
+| 指标 | v0.16.0 基线 | v0.17.0 stage 1 落地 |
+|---|---|---|
+| 全量回归 | 1317 passed / 0 failed / 3 ignored | **1317 passed / 0 failed / 3 ignored**（基线不变，stage 1 仅加 stub helper + 骨架）|
+| MCP tool 总数 | 39（v0.16 落地）| **46**（39 v0.16 既有 + 7 v0.17 stage 1 新增 stub）|
+| handler 模块结构 | `handler/{mod, cli, inspect, metrics, record}` 5 子 module | **+ `observable.rs` ~85 行 = 6 子 module**（含 v0.17 stage 1 7 新 tool stub）|
+| ADR 总数 | 0025a + 0025b（v0.16 末态）| **+ 0026 / 0027 / 0028 / 0029**（4 份新 ADR）|
+| Cargo feature | `default = ["nvidia"]` | **+ `mcp-persistent-state`**（默认开启，cfg-gate 持久字段）|
+
+**技术决策**（brainstorm 8 个决策点用户已全部同意推荐方案）：(1) 7 stage 节奏（Review + 收尾合并段）；(2) 5 主题排序 stage 2 → 3 → 4 → 5 → 6；(3) 全实装 TD-44 + TD-45；(4) record 暴露方案 (a) spawn `proc record` 子进程；(5) confirm 机制方案 A 参数 `confirm: bool`；(6) VT100 转码路径 (a) 临时转码；(7) 4 份独立 ADR；(8) 7 stage 默认 + 自适应拆分规则。
 
 ## [0.16.0] - 2026-07-07
 
