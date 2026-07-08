@@ -162,21 +162,86 @@ impl ProcMcpHandler {
     /// → PowerShell fallback；其它平台 → None）。collector 与 handler 同生命周期，
     /// `proc_dns` tool call 通过 `Arc::clone` 共享同一实例。
     ///
-    /// v0.17 stage 1 Spike：持久字段（snapshot / system_history / record_handle）
-    /// 与 Default 同款返 None / 空 VecDeque——stage 3/4/6 各 Slice 实装 worker
-    /// spawn 逻辑后才在此填充（ADR-0026）。
+    /// v0.17 stage 3 TD-54：`snapshot` 字段也 spawn 一个 1s tick worker
+    /// （`mcp-snapshot-worker`）持续 refresh SystemSnapshot，让 `metrics_*` /
+    /// `proc_ls` / `proc_tree` / `proc_export` 等读 SystemSnapshot 的 tool 复用
+    /// 字段而非每次现场 `SystemSnapshot::new() + refresh()` 累积 ~50-200ms 开销
+    /// （ADR-0026）。fire-and-forget 模式：worker 持 `Arc::clone(&snapshot)`，
+    /// handler 不持 `JoinHandle`，进程退出时 worker 自然终止。
     #[must_use]
     pub fn new() -> Self {
         let (collector, _kind) = crate::dns_log::detect_collector();
+
+        #[cfg(feature = "mcp-persistent-state")]
+        let snapshot: Arc<Mutex<Option<SystemSnapshot>>> = Arc::new(Mutex::new(None));
+
+        #[cfg(feature = "mcp-persistent-state")]
+        {
+            let snapshot_clone = Arc::clone(&snapshot);
+            // spawn 失败静默降级（与 DNS collector detect 同款规则），handler 仍创建
+            // （snapshot 字段为 None，后续 tool 调用走 fallback 现场新建路径）。
+            let _ = std::thread::Builder::new()
+                .name("mcp-snapshot-worker".to_string())
+                .spawn(move || run_snapshot_worker(snapshot_clone));
+        }
+
         Self {
             dns_collector: Arc::new(Mutex::new(collector)),
             #[cfg(feature = "mcp-persistent-state")]
-            snapshot: Arc::new(Mutex::new(None)),
+            snapshot,
             #[cfg(feature = "mcp-persistent-state")]
             system_history: Arc::new(Mutex::new(VecDeque::new())),
             #[cfg(feature = "mcp-persistent-state")]
             record_handle: Arc::new(Mutex::new(None)),
         }
+    }
+}
+
+/// v0.17 stage 3 TD-54：1s tick SystemSnapshot refresh worker。
+///
+/// fire-and-forget 模式（handler 不持 JoinHandle，进程退出时终止）。每 tick：
+/// 1. 从 `Arc<Mutex<Option<SystemSnapshot>>>` 字段 take 出 owned snapshot（如有）
+/// 2. refresh + refresh_heavy_incremental（复用 sysinfo System 内部增量状态，比
+///    每次 `SystemSnapshot::new()` 全新初始化快 ~5x）
+/// 3. move 回字段
+/// 4. sleep 减去本次耗时（保证 1s tick 节奏）
+///
+/// 持锁窗口 ~30-50ms（refresh 耗时），1s tick 占空比 < 5%。helper 在持锁窗口
+/// 读字段时 take 出来 → 读到 None → fallback 现场新建（与 v0.16 行为一致）。
+///
+/// refresh 失败时保 `last_snapshot` 不变，下 tick 重试（worker 永不退出）。
+#[cfg(feature = "mcp-persistent-state")]
+fn run_snapshot_worker(snapshot: Arc<Mutex<Option<SystemSnapshot>>>) {
+    loop {
+        let tick_start = std::time::Instant::now();
+
+        // 1. take owned snapshot（如有），没有则 new
+        let mut s = match snapshot.lock().ok().and_then(|mut g| g.take()) {
+            Some(s) => s,
+            None => match SystemSnapshot::new() {
+                Ok(s) => s,
+                Err(_) => {
+                    // new 失败：sleep 1s 重试，字段保持 None（helper 走 fallback）
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue;
+                }
+            },
+        };
+
+        // 2. refresh（失败保原 snapshot 不变）
+        if s.refresh().is_ok() {
+            let _ = s.refresh_heavy_incremental();
+        }
+
+        // 3. move 回字段（持锁失败说明 mutex 中毒，不退出 worker 重试下 tick）
+        if let Ok(mut guard) = snapshot.lock() {
+            *guard = Some(s);
+        }
+
+        // 4. sleep 减去本次耗时（保证 1s tick 节奏）
+        let elapsed = tick_start.elapsed();
+        let sleep_dur = std::time::Duration::from_secs(1).saturating_sub(elapsed);
+        std::thread::sleep(sleep_dur);
     }
 }
 
@@ -304,6 +369,18 @@ impl ProcMcpHandler {
         description = "List processes, sorted by cpu/mem/name/pid/disk_read/disk_write/net_sent/net_recv. Returns JSON { ok, sort, count, processes[] }. Fields: pid/name/cpu_usage/memory_bytes/memory_pct/disk_read_bps/disk_write_bps/net_sent_bps/net_recv_bps/status/parent_pid/start_time_unix/run_time_secs/cmd. Verbose fields (exe/cwd/user_id) omitted to avoid leaking sensitive paths."
     )]
     fn proc_ls(&self, Parameters(args): Parameters<LsArgs>) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "mcp-persistent-state")]
+        {
+            if let Ok(guard) = self.snapshot.lock() {
+                if let Some(s) = guard.as_ref() {
+                    return ok_result(processes_json_from_snapshot(
+                        s,
+                        args.sort.as_deref(),
+                        args.limit,
+                    ));
+                }
+            }
+        }
         ok_result(make_processes_json(args.sort.as_deref(), args.limit))
     }
 
@@ -312,6 +389,14 @@ impl ProcMcpHandler {
         description = "Build the full process tree (parent → children). Returns JSON { ok, roots[] } where each node has { pid, name, cpu_usage, memory_bytes, status, children[] }. Useful for understanding process ancestry."
     )]
     fn proc_tree(&self) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "mcp-persistent-state")]
+        {
+            if let Ok(guard) = self.snapshot.lock() {
+                if let Some(s) = guard.as_ref() {
+                    return ok_result(process_tree_json_from_snapshot(s));
+                }
+            }
+        }
         ok_result(make_process_tree_json())
     }
 
@@ -408,7 +493,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_smart",
-        description = "SMART disk health. device=None lists all disks with summary; device=\"/dev/sda\" or \"PhysicalDrive0\" returns detailed attributes. Returns JSON { ok, disks[] | disk } with { device, model, serial, temperature, health, attributes[] }. health is one of Ok/Warning/Critical/Unknown."
+        description = "[Deprecated] SMART disk health. Prefer proc_metrics_smart for aggregated or single-device mode (richer schema + same SMART data source). This tool is kept for backward compatibility but will be removed in v0.18+. device=None lists all disks with summary; device=\"/dev/sda\" or \"PhysicalDrive0\" returns detailed attributes. Returns JSON { ok, disks[] | disk } with { device, model, serial, temperature, health, attributes[] }. health is one of Ok/Warning/Critical/Unknown."
     )]
     fn proc_smart(
         &self,
@@ -509,6 +594,19 @@ impl ProcMcpHandler {
         &self,
         Parameters(args): Parameters<ExportArgs>,
     ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "mcp-persistent-state")]
+        {
+            if let Ok(guard) = self.snapshot.lock() {
+                if let Some(s) = guard.as_ref() {
+                    return ok_result(cli::export_json_from_snapshot(
+                        s,
+                        args.format.as_deref(),
+                        args.sort.as_deref(),
+                        args.limit,
+                    ));
+                }
+            }
+        }
         ok_result(make_export_json(
             args.format.as_deref(),
             args.sort.as_deref(),
@@ -600,6 +698,14 @@ impl ProcMcpHandler {
         &self,
         Parameters(_args): Parameters<MetricsSystemArgs>,
     ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "mcp-persistent-state")]
+        {
+            if let Ok(guard) = self.snapshot.lock() {
+                if let Some(s) = guard.as_ref() {
+                    return ok_result(metrics::metrics_system_json_from_snapshot(s));
+                }
+            }
+        }
         ok_result(make_metrics_system_json())
     }
 
@@ -622,6 +728,17 @@ impl ProcMcpHandler {
         &self,
         Parameters(args): Parameters<MetricsDiskIoArgs>,
     ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "mcp-persistent-state")]
+        {
+            if let Ok(guard) = self.snapshot.lock() {
+                if let Some(s) = guard.as_ref() {
+                    return ok_result(metrics::metrics_disk_io_json_from_snapshot(
+                        s,
+                        args.device.as_deref(),
+                    ));
+                }
+            }
+        }
         ok_result(make_metrics_disk_io_json(args.device.as_deref()))
     }
 
@@ -644,6 +761,14 @@ impl ProcMcpHandler {
         &self,
         Parameters(_args): Parameters<MetricsThermalArgs>,
     ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "mcp-persistent-state")]
+        {
+            if let Ok(guard) = self.snapshot.lock() {
+                if let Some(s) = guard.as_ref() {
+                    return ok_result(metrics::metrics_thermal_json_from_snapshot(s));
+                }
+            }
+        }
         ok_result(make_metrics_thermal_json())
     }
 
@@ -940,6 +1065,15 @@ pub fn make_processes_json(sort: Option<&str>, limit: Option<usize>) -> Value {
         return err(format!("snapshot refresh failed: {e}"));
     }
     let _ = snapshot.refresh_heavy_incremental();
+    processes_json_from_snapshot(&snapshot, sort, limit)
+}
+
+/// v0.17 stage 3 TD-54：从已有 SystemSnapshot 读字段（生产路径，避免现场 new）。
+pub(crate) fn processes_json_from_snapshot(
+    snapshot: &collect::SystemSnapshot,
+    sort: Option<&str>,
+    limit: Option<usize>,
+) -> Value {
     let mut processes = snapshot.cached_processes_vec();
     let sort_field = parse_sort_field(sort);
     collect::sort_processes(&mut processes, sort_field);
@@ -993,6 +1127,11 @@ pub fn make_process_tree_json() -> Value {
         return err(format!("snapshot refresh failed: {e}"));
     }
     let _ = snapshot.refresh_heavy_incremental();
+    process_tree_json_from_snapshot(&snapshot)
+}
+
+/// v0.17 stage 3 TD-54：从已有 SystemSnapshot 读字段（生产路径）。
+pub(crate) fn process_tree_json_from_snapshot(snapshot: &collect::SystemSnapshot) -> Value {
     let processes = snapshot.cached_processes_vec();
     let (_, total_mem) = snapshot.memory_usage();
     let roots = crate::tree::build_process_tree(&processes, total_mem);

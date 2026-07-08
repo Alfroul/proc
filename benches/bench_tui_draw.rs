@@ -131,6 +131,30 @@ fn bench_tui_draw(c: &mut Criterion) {
         );
     }
     group.finish();
+
+    // v0.17 stage 3 TD-44：format_bytes B 档 itoa vs std format! 对比。
+    // 预期 itoa 路径 ~50ns vs 旧 std format! 路径 ~150ns（2-3x 降幅）。
+    // 仅测 B 档（bytes < 1024），MB/KB/GB 档保留 f64 {:.1} 路径不在 itoa 范围。
+    bench_format_bytes_itoa_vs_format(c);
+}
+
+fn bench_format_bytes_itoa_vs_format(c: &mut Criterion) {
+    let mut group = c.benchmark_group("format_bytes_itoa_vs_format");
+    let sizes: &[u64] = &[0, 1, 100, 500, 999, 1023];
+    for &size in sizes {
+        group.bench_with_input(BenchmarkId::new("itoa", size), &size, |b, &n| {
+            b.iter(|| {
+                let mut buf = itoa::Buffer::new();
+                let _ = black_box(format!("{}B", buf.format(black_box(n))));
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("std_format", size), &size, |b, &n| {
+            b.iter(|| {
+                let _ = black_box(format!("{}B", black_box(n)));
+            });
+        });
+    }
+    group.finish();
 }
 
 criterion_group!(benches, bench_tui_draw);

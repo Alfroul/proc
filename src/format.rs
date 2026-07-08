@@ -1,4 +1,8 @@
 /// Format bytes as human-readable string (e.g., "1.5GB", "200MB", "50KB", "128B")
+///
+/// v0.17 stage 3 TD-44：B 档（bytes < 1024）走 itoa 路径跳过 std `format!` 抽象
+/// （省 1 次 heap alloc + 1 次 fmt 调度）。MB / KB / GB 档仍走 f64 `{:.1}` / `{:.0}`
+/// 路径（itoa 不处理 f64）。
 #[must_use]
 pub fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -11,7 +15,8 @@ pub fn format_bytes(bytes: u64) -> String {
     } else if bytes >= KB {
         format!("{:.0}KB", bytes as f64 / KB as f64)
     } else {
-        format!("{}B", bytes)
+        let mut buf = itoa::Buffer::new();
+        format!("{}B", buf.format(bytes))
     }
 }
 
@@ -20,17 +25,23 @@ pub fn format_uptime(seconds: u64) -> String {
     let days = seconds / 86400;
     let hours = (seconds % 86400) / 3600;
     let mins = (seconds % 3600) / 60;
+    let mut d_buf = itoa::Buffer::new();
+    let mut h_buf = itoa::Buffer::new();
+    let mut m_buf = itoa::Buffer::new();
     if days > 0 {
-        format!("{}天{}小时", days, hours)
+        format!("{}天{}小时", d_buf.format(days), h_buf.format(hours))
     } else if hours > 0 {
-        format!("{}小时{}分", hours, mins)
+        format!("{}小时{}分", h_buf.format(hours), m_buf.format(mins))
     } else {
-        format!("{}分钟", mins)
+        format!("{}分钟", m_buf.format(mins))
     }
 }
 
 /// Format throughput as a 1-decimal-place string with SI units (decimal, not binary).
 /// Mirrors the convention used in port/process tables: 1.5GB/s, 200MB/s, 50KB/s, 128B/s.
+///
+/// v0.17 stage 3 TD-44：B/s 档（bytes_per_sec < 1000）走 itoa 路径，其它档保留
+/// f64 `{:.1}` 路径。
 #[must_use]
 pub fn format_speed(bytes_per_sec: u64) -> String {
     const UNITS: &[(&str, u64)] = &[
@@ -43,7 +54,8 @@ pub fn format_speed(bytes_per_sec: u64) -> String {
             return format!("{:.1}{}", bytes_per_sec as f64 / *threshold as f64, unit);
         }
     }
-    format!("{}B/s", bytes_per_sec)
+    let mut buf = itoa::Buffer::new();
+    format!("{}B/s", buf.format(bytes_per_sec))
 }
 
 #[must_use]
@@ -52,14 +64,18 @@ pub fn format_run_time(seconds: u64) -> String {
     let hours = (seconds % 86400) / 3600;
     let mins = (seconds % 3600) / 60;
     let secs = seconds % 60;
+    let mut buf_d = itoa::Buffer::new();
+    let mut buf_h = itoa::Buffer::new();
+    let mut buf_m = itoa::Buffer::new();
+    let mut buf_s = itoa::Buffer::new();
     if days > 0 {
-        format!("{}d{}h", days, hours)
+        format!("{}d{}h", buf_d.format(days), buf_h.format(hours))
     } else if hours > 0 {
-        format!("{}h{}m", hours, mins)
+        format!("{}h{}m", buf_h.format(hours), buf_m.format(mins))
     } else if mins > 0 {
-        format!("{}m{}s", mins, secs)
+        format!("{}m{}s", buf_m.format(mins), buf_s.format(secs))
     } else {
-        format!("{}s", secs)
+        format!("{}s", buf_s.format(secs))
     }
 }
 
@@ -201,5 +217,63 @@ mod tests {
         let has_offset = ts.rfind('+').is_some() || ts[ts.len() - 6..].contains('-');
         assert!(has_offset, "missing offset in {}", ts);
         assert!(ts.ends_with(":00"), "expected :00 minute suffix in {}", ts);
+    }
+
+    // v0.17 stage 3 TD-44：itoa 路径与 std format! 输出等价性回归测试。
+
+    #[test]
+    fn format_bytes_itoa_equivalence_b_tier() {
+        // B 档走 itoa，与 std format! 输出一致
+        assert_eq!(format_bytes(0), "0B");
+        assert_eq!(format_bytes(1), "1B");
+        assert_eq!(format_bytes(512), "512B");
+        assert_eq!(format_bytes(1023), "1023B");
+    }
+
+    #[test]
+    fn format_bytes_itoa_equivalence_upper_tiers_unchanged() {
+        // MB / KB / GB 档保留 f64 路径，行为不变
+        assert_eq!(format_bytes(1024), "1KB");
+        assert_eq!(format_bytes(1048576), "1MB");
+        assert_eq!(format_bytes(1_073_741_824), "1.0GB");
+    }
+
+    #[test]
+    fn format_speed_itoa_equivalence_b_tier() {
+        assert_eq!(format_speed(0), "0B/s");
+        assert_eq!(format_speed(100), "100B/s");
+        assert_eq!(format_speed(999), "999B/s");
+    }
+
+    #[test]
+    fn format_speed_itoa_equivalence_upper_tiers_unchanged() {
+        assert_eq!(format_speed(1_000), "1.0KB/s");
+        assert_eq!(format_speed(1_000_000), "1.0MB/s");
+        assert_eq!(format_speed(1_000_000_000), "1.0GB/s");
+    }
+
+    #[test]
+    fn format_uptime_itoa_equivalence() {
+        // 单分钟档
+        assert_eq!(format_uptime(60), "1分钟");
+        assert_eq!(format_uptime(600), "10分钟");
+        // 小时档
+        assert_eq!(format_uptime(3600), "1小时0分");
+        assert_eq!(format_uptime(3660), "1小时1分");
+        // 天档
+        assert_eq!(format_uptime(86400), "1天0小时");
+        assert_eq!(format_uptime(90000), "1天1小时");
+    }
+
+    #[test]
+    fn format_run_time_itoa_equivalence() {
+        assert_eq!(format_run_time(0), "0s");
+        assert_eq!(format_run_time(45), "45s");
+        assert_eq!(format_run_time(60), "1m0s");
+        assert_eq!(format_run_time(125), "2m5s");
+        assert_eq!(format_run_time(3600), "1h0m");
+        assert_eq!(format_run_time(3665), "1h1m");
+        assert_eq!(format_run_time(86400), "1d0h");
+        assert_eq!(format_run_time(90000), "1d1h");
     }
 }

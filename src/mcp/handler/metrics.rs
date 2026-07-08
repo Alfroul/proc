@@ -70,6 +70,10 @@ pub struct MetricsThermalArgs {
 ///
 /// **sparkline 30 秒历史暂不暴露**（决策 3）—— 需要持久化 + worker 累积，MCP 一次性
 /// request-response 不适合。stage 4 Review 评估是否加（暂留 v0.16+ 候选）。
+///
+/// v0.17 stage 3 TD-54：保留旧签名作 fallback 路径（测试 + worker warm-up 期间用），
+/// 生产路径走 [`metrics_system_json_from_snapshot`] 复用 `ProcMcpHandler::snapshot`
+/// 字段（worker 1s tick refresh，跳过 SystemSnapshot::new + refresh ~50ms 开销）。
 pub fn make_metrics_system_json() -> Value {
     let mut snapshot = match crate::collect::SystemSnapshot::new() {
         Ok(s) => s,
@@ -79,7 +83,16 @@ pub fn make_metrics_system_json() -> Value {
         return super::err(format!("snapshot refresh failed: {e}"));
     }
     let _ = snapshot.refresh_heavy_incremental();
+    metrics_system_json_from_snapshot(&snapshot)
+}
 
+/// v0.17 stage 3 TD-54：从已有 SystemSnapshot 读字段（生产路径，避免现场 new）。
+///
+/// 公开度 `pub(crate)` 让 `mod.rs::proc_metrics_system` `#[tool]` 方法可调；不暴露
+/// 给集成测试以外（既有 `make_metrics_system_json()` 是公开 fallback 入口）。
+pub(crate) fn metrics_system_json_from_snapshot(
+    snapshot: &crate::collect::SystemSnapshot,
+) -> Value {
     let cpu_usage = snapshot.cpu_usage();
     let (mem_used, mem_total) = snapshot.memory_usage();
     let (swap_used, swap_total) = snapshot.swap_usage();
@@ -176,6 +189,9 @@ pub fn make_metrics_gpu_json() -> Value {
 /// **per-process disk_io 暂不暴露**（决策 5）—— 需要 ETW + thread_map（disk_io_etw
 /// worker 模式），MCP 一次性调用启动 ETW session 不实用。stage 4 Review 评估是否
 /// 加（暂留 v0.16+ 候选）。
+///
+/// v0.17 stage 3 TD-54：保留旧签名作 fallback 路径，生产路径走
+/// [`metrics_disk_io_json_from_snapshot`]。
 pub fn make_metrics_disk_io_json(device: Option<&str>) -> Value {
     let mut snapshot = match crate::collect::SystemSnapshot::new() {
         Ok(s) => s,
@@ -184,7 +200,14 @@ pub fn make_metrics_disk_io_json(device: Option<&str>) -> Value {
     if let Err(e) = snapshot.refresh() {
         return super::err(format!("snapshot refresh failed: {e}"));
     }
+    metrics_disk_io_json_from_snapshot(&snapshot, device)
+}
 
+/// v0.17 stage 3 TD-54：从已有 SystemSnapshot 读字段（生产路径）。
+pub(crate) fn metrics_disk_io_json_from_snapshot(
+    snapshot: &crate::collect::SystemSnapshot,
+    device: Option<&str>,
+) -> Value {
     let (total_read, total_write) = snapshot.disk_io_speed();
     let per_disk: Vec<crate::collect::DiskIoInfo> = snapshot.per_disk_io_speed();
     let disks: Vec<crate::collect::DiskInfo> = snapshot.all_disks();
@@ -249,6 +272,9 @@ pub fn make_metrics_smart_json(device: Option<&str>) -> Value {
 /// 非 Windows / 无 PROCESSOR_POWER_INFORMATION 访问权限 → `throttle: null` +
 /// `reason: "Unavailable"`；per_core_freq/temp 仍能从 sysinfo 拿（Linux cpufreq /
 /// Windows 注册表）。
+///
+/// v0.17 stage 3 TD-54：保留旧签名作 fallback 路径，生产路径走
+/// [`metrics_thermal_json_from_snapshot`]。
 pub fn make_metrics_thermal_json() -> Value {
     let mut snapshot = match crate::collect::SystemSnapshot::new() {
         Ok(s) => s,
@@ -258,7 +284,13 @@ pub fn make_metrics_thermal_json() -> Value {
         return super::err(format!("snapshot refresh failed: {e}"));
     }
     let _ = snapshot.refresh_heavy_incremental();
+    metrics_thermal_json_from_snapshot(&snapshot)
+}
 
+/// v0.17 stage 3 TD-54：从已有 SystemSnapshot 读字段（生产路径）。
+pub(crate) fn metrics_thermal_json_from_snapshot(
+    snapshot: &crate::collect::SystemSnapshot,
+) -> Value {
     let per_core_freq: Vec<u64> = snapshot.per_core_freq().to_vec();
     let per_core_temp: Vec<Option<f32>> = snapshot.per_core_temp().to_vec();
     let cpu_usage = snapshot.cpu_usage();

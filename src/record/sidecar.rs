@@ -11,8 +11,10 @@
 
 use std::path::{Path, PathBuf};
 
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 
+use super::encoding::options_for_version;
 use super::frame::{RecordingFooter, RecordingHeader};
 
 const SIDECAR_MAGIC: [u8; 8] = *b"PRECIDX\x01";
@@ -41,7 +43,9 @@ impl IdxSidecar {
     pub fn try_load(prec_path: &Path) -> Option<Self> {
         let sidecar_path = Self::sidecar_path(prec_path);
         let bytes = std::fs::read(&sidecar_path).ok()?;
-        let sidecar: IdxSidecar = bincode::deserialize(&bytes).ok()?;
+        // v0.17 stage 3 TD-45：sidecar 格式 v1，按 version=1 选 bincode 配置
+        // （当前所有版本 fixint，与 stage 3 前行为完全等价）。
+        let sidecar: IdxSidecar = options_for_version(1).deserialize(&bytes).ok()?;
         if sidecar.magic != SIDECAR_MAGIC {
             return None;
         }
@@ -63,7 +67,7 @@ impl IdxSidecar {
     /// 把 sidecar 写到 `<prec_path>.idx`。失败静默（用户目录只读不致命）。
     pub fn write(&self, prec_path: &Path) {
         let sidecar_path = Self::sidecar_path(prec_path);
-        let Ok(bytes) = bincode::serialize(self) else {
+        let Ok(bytes) = options_for_version(1).serialize(self) else {
             return;
         };
         let _ = std::fs::write(sidecar_path, bytes);
@@ -173,7 +177,7 @@ mod tests {
         // 构造一个 magic 错误的 sidecar
         let mut s = IdxSidecar::from_legacy(&prec, dummy_header(), dummy_footer());
         s.magic = *b"BADMAGIC";
-        let bytes = bincode::serialize(&s).unwrap();
+        let bytes = options_for_version(1).serialize(&s).unwrap();
         let sidecar_path = IdxSidecar::sidecar_path(&prec);
         std::fs::write(&sidecar_path, bytes).unwrap();
         assert!(IdxSidecar::try_load(&prec).is_none());

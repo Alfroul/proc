@@ -3,7 +3,10 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use super::frame::{FOOTER_MAGIC, RecordingFooter, RecordingHeader, UiFrame};
+use bincode::Options;
+
+use super::encoding::options_for_version;
+use super::frame::{FOOTER_MAGIC, RECORDING_VERSION, RecordingFooter, RecordingHeader, UiFrame};
 
 #[allow(clippy::large_enum_variant)]
 enum WriterMsg {
@@ -31,7 +34,7 @@ impl Recorder {
 
         let mut file = BufWriter::new(File::create(&path)?);
 
-        let header_bytes = bincode::serialize(&header)?;
+        let header_bytes = options_for_version(RECORDING_VERSION).serialize(&header)?;
         let header_len = header_bytes.len() as u64;
         file.write_all(&header_len.to_le_bytes())?;
         file.write_all(&header_bytes)?;
@@ -60,10 +63,11 @@ impl Recorder {
                 while let Ok(msg) = rx.recv() {
                     match msg {
                         WriterMsg::Frame(frame) => {
-                            let bytes = match bincode::serialize(&frame) {
-                                Ok(b) => b,
-                                Err(_) => continue,
-                            };
+                            let bytes =
+                                match options_for_version(RECORDING_VERSION).serialize(&frame) {
+                                    Ok(b) => b,
+                                    Err(_) => continue,
+                                };
                             let len = bytes.len() as u64;
 
                             // 在 write 之前记录 offset（指向 8B len prefix）
@@ -117,7 +121,7 @@ impl Recorder {
                                 max_mem,
                                 frame_offsets,
                             };
-                            match bincode::serialize(&footer) {
+                            match options_for_version(RECORDING_VERSION).serialize(&footer) {
                                 Ok(footer_bytes) => {
                                     let footer_len = footer_bytes.len() as u64;
                                     // 顺序：footer_bytes + footer_len(8B LE) + FOOTER_MAGIC(8B)
@@ -276,8 +280,9 @@ mod tests {
 
         // footer deserialize
         let footer_start = n - 16 - footer_len;
-        let footer: RecordingFooter =
-            bincode::deserialize(&bytes[footer_start..footer_start + footer_len]).unwrap();
+        let footer: RecordingFooter = options_for_version(RECORDING_VERSION)
+            .deserialize(&bytes[footer_start..footer_start + footer_len])
+            .unwrap();
         assert_eq!(footer.frame_count, 5);
         assert_eq!(footer.frame_offsets.len(), 5);
         assert_eq!(footer.start_time, 1000);
@@ -304,8 +309,9 @@ mod tests {
         len_buf.copy_from_slice(&bytes[n - 16..n - 8]);
         let footer_len = u64::from_le_bytes(len_buf) as usize;
         let footer_start = n - 16 - footer_len;
-        let footer: RecordingFooter =
-            bincode::deserialize(&bytes[footer_start..footer_start + footer_len]).unwrap();
+        let footer: RecordingFooter = options_for_version(RECORDING_VERSION)
+            .deserialize(&bytes[footer_start..footer_start + footer_len])
+            .unwrap();
         assert_eq!(footer.frame_count, 0);
         assert!(footer.frame_offsets.is_empty());
     }

@@ -2066,6 +2066,7 @@ dependencies = [
  "filelocksmith",
  "filetime",
  "futures-util",
+ "itoa",
  "netstat2",
  "nom",
  "nucleo",

@@ -216,6 +216,9 @@ pub fn make_throttle_json(pid: u32, set: Option<bool>) -> Value {
 ///
 /// 与 CLI `proc export` 同款路径：`SystemSnapshot` + `format::export_processes_as_*`。
 /// 默认 `format=None` → JSON；agent 拿到的就是 stdout 字符串（不写文件）。
+///
+/// v0.17 stage 3 TD-54：保留旧签名作 fallback 路径，生产路径走
+/// [`export_json_from_snapshot`]。
 pub fn make_export_json(format: Option<&str>, sort: Option<&str>, limit: Option<usize>) -> Value {
     let mut snapshot = match crate::collect::SystemSnapshot::new() {
         Ok(s) => s,
@@ -225,6 +228,16 @@ pub fn make_export_json(format: Option<&str>, sort: Option<&str>, limit: Option<
         return super::err(format!("snapshot refresh failed: {e}"));
     }
     let _ = snapshot.refresh_heavy_incremental();
+    export_json_from_snapshot(&snapshot, format, sort, limit)
+}
+
+/// v0.17 stage 3 TD-54：从已有 SystemSnapshot 读字段（生产路径）。
+pub(crate) fn export_json_from_snapshot(
+    snapshot: &crate::collect::SystemSnapshot,
+    format: Option<&str>,
+    sort: Option<&str>,
+    limit: Option<usize>,
+) -> Value {
     let mut processes = snapshot.cached_processes_vec();
     let sort_field = super::parse_sort_field(sort);
     crate::collect::sort_processes(&mut processes, sort_field);

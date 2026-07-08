@@ -4,11 +4,14 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Instant;
 
+use bincode::Options;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use ratatui::widgets::Widget;
 use serde::{Deserialize, Serialize};
+
+use super::encoding::options_for_version;
 
 pub const VT100_MAGIC: &[u8; 4] = b"VT10";
 pub const VT100_VERSION: u16 = 2;
@@ -264,7 +267,7 @@ impl VtRecorder {
         };
 
         let mut file = BufWriter::new(File::create(&path)?);
-        let header_bytes = bincode::serialize(&header)?;
+        let header_bytes = options_for_version(VT100_VERSION).serialize(&header)?;
         file.write_all(&(header_bytes.len() as u64).to_le_bytes())?;
         file.write_all(&header_bytes)?;
         file.flush()?;
@@ -282,7 +285,8 @@ impl VtRecorder {
                 while let Ok(msg) = rx.recv() {
                     match msg {
                         RecorderMsg::Frame(frame) => {
-                            if let Ok(bytes) = bincode::serialize(&frame) {
+                            if let Ok(bytes) = options_for_version(VT100_VERSION).serialize(&frame)
+                            {
                                 let _ = file.write_all(&(bytes.len() as u64).to_le_bytes());
                                 let _ = file.write_all(&bytes);
                                 let _ = file.flush();
@@ -385,7 +389,7 @@ impl VtPlayer {
         let header_len = u64::from_le_bytes(len_buf) as usize;
         let mut header_buf = vec![0u8; header_len];
         reader.read_exact(&mut header_buf)?;
-        let header: VtHeader = bincode::deserialize(&header_buf)?;
+        let header: VtHeader = options_for_version(VT100_VERSION).deserialize(&header_buf)?;
 
         if &header.magic != VT100_MAGIC {
             anyhow::bail!("无效的 VT100 录制文件");
@@ -410,7 +414,10 @@ impl VtPlayer {
             if reader.read_exact(&mut frame_buf).is_err() {
                 break;
             }
-            if let Ok(frame) = bincode::deserialize::<VtFrame>(&frame_buf) {
+            // 每次创建 opts（impl Options 不是 Copy，不能跨 loop 持有）
+            if let Ok(frame) =
+                options_for_version(header.version).deserialize::<VtFrame>(&frame_buf)
+            {
                 frames.push(frame);
             }
         }
@@ -480,7 +487,7 @@ pub fn is_vt100_file(path: &std::path::Path) -> bool {
     if reader.read_exact(&mut header_buf).is_err() {
         return false;
     }
-    let Ok(header) = bincode::deserialize::<VtHeader>(&header_buf) else {
+    let Ok(header) = options_for_version(VT100_VERSION).deserialize::<VtHeader>(&header_buf) else {
         return false;
     };
     &header.magic == VT100_MAGIC
