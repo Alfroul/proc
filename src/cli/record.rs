@@ -57,25 +57,59 @@ pub fn run_replay(file: &Path, info: bool) {
         return;
     }
     if is_vt100_file(file) {
-        run_vt100_replay(file);
+        // v0.17 stage 5：VT100 自动转码到临时 v3 文件，让用户享受 search / 倒放 / 书签能力。
+        // 转码失败 fallback 走 VtPlayer 正向 replay（保留 v0.6 既有路径）。
+        match try_transcode_vt100_for_replay(file) {
+            Ok(tmp_path) => {
+                run_legacy_replay(&tmp_path);
+            }
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    format!("VT100 转码失败，回退 VtPlayer 路径: {e}").yellow()
+                );
+                run_vt100_replay(file);
+            }
+        }
     } else {
         run_legacy_replay(file);
     }
 }
 
+/// v0.17 stage 5：VT100 → 临时 v3 文件转码 + RAII 清理。
+///
+/// 返回临时文件路径（`<file>.prec.tmp.v3`），调用方用它走 v3 Player 路径。
+/// 临时文件生命周期由 [`crate::record::TranscodedTempFile`] Drop 管理——本函数
+/// leak 一个 wrapper 到 'static 让它进程退出时才清理（replay 场景进程退出 =
+/// 用户结束 replay）。
+fn try_transcode_vt100_for_replay(file: &Path) -> anyhow::Result<std::path::PathBuf> {
+    let tmp_path = file.with_extension("prec.tmp.v3");
+    let stats = crate::record::convert_vt100_to_v3_file(file, &tmp_path)
+        .map_err(|e| anyhow::anyhow!("转码失败: {e}"))?;
+    tracing::info!(
+        frame_count = stats.frame_count,
+        unique_processes = stats.unique_process_count,
+        tmp_path = %tmp_path.display(),
+        "VT100 → v3 转码完成",
+    );
+    // RAII wrapper：leak 到 'static 让进程退出时才删（replay 单次会话场景，
+    // run_legacy_replay 不返 wrapper，Box::leak 是最简方案）
+    Box::leak(Box::new(crate::record::TranscodedTempFile::new(
+        tmp_path.clone(),
+    )));
+    Ok(tmp_path)
+}
+
 /// `proc replay recording.prec --info`：不开 TUI，输出 footer 元数据。
-/// VT100 录制走单独路径（无 footer，只输出 start_time / total_frames）。
+///
+/// v0.17 stage 5：VT100 路径走透明转码 + 输出 v3 footer 元数据（含 hostname /
+/// anomaly_count / max_cpu 等 VT100 header 不携带的字段）。转码失败 fallback
+/// 输出原 VT100 header 信息（保留 v0.6 既有行为）。
 fn run_replay_info(file: &Path) -> anyhow::Result<()> {
     if is_vt100_file(file) {
-        let player = VtPlayer::open(file.to_path_buf())?;
-        println!("{}", format!("录制文件:   {}", file.display()).cyan());
-        println!("格式:       VT100 v2");
-        let total = player.total_frames();
-        let (start_ms, end_ms) = player.time_range_ms();
-        println!("帧数:       {total}");
-        println!("开始 (ms):  {start_ms}");
-        println!("结束 (ms):  {end_ms}");
-        return Ok(());
+        // 尝试转码输出 v3 footer 元数据；失败 fallback 走 VT100 header 路径
+        return run_replay_info_vt100_transcoded(file)
+            .or_else(|_| run_replay_info_vt100_legacy(file));
     }
     use crate::record::Player;
     let player = Player::open(file.to_path_buf())?;
@@ -101,6 +135,66 @@ fn run_replay_info(file: &Path) -> anyhow::Result<()> {
     println!("docker/操作: {}", meta.event_count);
     println!("最高 CPU:   {:.1}%", meta.max_cpu);
     println!("最高内存:   {}", format_bytes(meta.max_mem));
+    Ok(())
+}
+
+/// VT100 录制 → 转码后输出 v3 footer 元数据（v0.17 stage 5）。
+///
+/// 临时文件 `<file>.info.tmp.v3` 在函数结束时手动清理（不用 RAII wrapper，
+/// 因为 info 路径是 one-shot，函数结束就完成）。
+fn run_replay_info_vt100_transcoded(file: &Path) -> anyhow::Result<()> {
+    let tmp_path = file.with_extension("info.tmp.v3");
+    let result = (|| -> anyhow::Result<()> {
+        let stats = crate::record::convert_vt100_to_v3_file(file, &tmp_path)
+            .map_err(|e| anyhow::anyhow!("转码失败: {e}"))?;
+
+        use crate::record::Player;
+        let player = Player::open(tmp_path.to_path_buf())?;
+        let header = player.header();
+        let meta = player.meta();
+        println!("{}", format!("录制文件:   {}", file.display()).cyan());
+        println!("格式:       VT100 (v2 转码 v3)");
+        println!("格式版本:   v{}", header.version);
+        println!("主机名:     {}", header.hostname);
+        println!(
+            "开始时间:   {} (unix {})",
+            format_iso(header.start_time),
+            header.start_time
+        );
+        println!(
+            "结束时间:   {} (unix {})",
+            format_iso(meta.end_time),
+            meta.end_time
+        );
+        let duration = meta.end_time.saturating_sub(meta.start_time);
+        println!("时长:       {}", format_duration_human(duration));
+        println!("帧数:       {}", meta.frame_count);
+        println!("异常事件:   {}", meta.anomaly_count);
+        println!("docker/操作: {}", meta.event_count);
+        println!("最高 CPU:   {:.1}%", meta.max_cpu);
+        println!("最高内存:   {}", format_bytes(meta.max_mem));
+        println!(
+            "{} VT100 转码统计：{} unique 进程",
+            "转码:".cyan(),
+            stats.unique_process_count
+        );
+        Ok(())
+    })();
+    // 无论成功 / 失败都清理临时文件（info 路径 one-shot）
+    let _ = std::fs::remove_file(&tmp_path);
+    result
+}
+
+/// VT100 录制 → fallback 输出 header 信息（v0.17 stage 5 保留 v0.6 既有行为）。
+fn run_replay_info_vt100_legacy(file: &Path) -> anyhow::Result<()> {
+    let player = VtPlayer::open(file.to_path_buf())?;
+    println!("{}", format!("录制文件:   {}", file.display()).cyan());
+    println!("格式:       VT100 v2");
+    let total = player.total_frames();
+    let (start_ms, end_ms) = player.time_range_ms();
+    println!("帧数:       {total}");
+    println!("开始 (ms):  {start_ms}");
+    println!("结束 (ms):  {end_ms}");
     Ok(())
 }
 

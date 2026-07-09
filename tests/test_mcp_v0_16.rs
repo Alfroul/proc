@@ -163,18 +163,20 @@ fn test_replay_info_vt100_recording_returns_vt100_format() {
 
     let out = record::make_replay_info_json(path.to_str().unwrap());
     assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
-    assert_eq!(out["format"], serde_json::json!("vt100"));
-    assert_eq!(out["version"], serde_json::json!(2));
+    // v0.17 stage 5：VT100 透明转码 → format: "vt100-transcoded"（vs 旧 "vt100"）
+    // 让 agent 知道这是 VT100 转码后的 v3 数据，可享受全部 v3 能力
+    assert_eq!(out["format"], serde_json::json!("vt100-transcoded"));
+    assert_eq!(out["source_format"], serde_json::json!("vt100"));
     assert_eq!(out["frame_count"], serde_json::json!(5));
-    assert_eq!(out["width"], serde_json::json!(200));
-    assert_eq!(out["height"], serde_json::json!(50));
-    // VT100 路径 start_ms / end_ms 字段在（time_range_ms）
-    assert!(out["start_ms"].as_u64().is_some(), "start_ms missing");
-    assert!(out["end_ms"].as_u64().is_some(), "end_ms missing");
-    // VT100 无 footer → 无 anomaly_count / max_cpu 字段
+    // v3 footer 字段（VT100 转码后现可用）
+    assert!(out["hostname"].as_str().is_some(), "hostname missing");
     assert!(
-        out.get("anomaly_count").is_none(),
-        "VT100 should not have anomaly_count: {out}"
+        out["anomaly_count"].as_u64().is_some(),
+        "anomaly_count should be present after stage 5 transcoding: {out}"
+    );
+    assert!(
+        out["unique_process_count"].as_u64().is_some(),
+        "unique_process_count should be present: {out}"
     );
 }
 
@@ -362,13 +364,13 @@ fn test_replay_search_vt100_returns_ok_false() {
     let path = dir.path().join("vt100_search.prec");
     write_vt100_recording(&path, 5, 200, 50);
 
+    // v0.17 stage 5：VT100 透明转码 + 走 v3 全帧遍历，不再返「不支持」错误。
+    // 转 5 帧空内容（write_vt100_recording 写空白 VtFrame），search 任意 query
+    // 应返 ok=true（无命中也是成功）。
     let out = record::make_replay_search_json(path.to_str().unwrap(), "anything", None);
-    assert_eq!(out["ok"], serde_json::json!(false), "out: {out}");
-    let error = out["error"].as_str().expect("error string");
-    assert!(
-        error.contains("VT100") || error.contains("不支持"),
-        "error should mention VT100 not supported: {error}"
-    );
+    assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
+    assert_eq!(out["match_count"], serde_json::json!(0));
+    assert_eq!(out["returned"], serde_json::json!(0));
 }
 
 #[test]

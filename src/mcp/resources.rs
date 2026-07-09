@@ -91,7 +91,9 @@ impl ResourceRoute for ProcMcpHandler {
                 {
                     if let Ok(guard) = self.snapshot.lock() {
                         if let Some(s) = guard.as_ref() {
-                            return Ok(crate::mcp::handler::metrics::metrics_system_json_from_snapshot(s));
+                            return Ok(
+                                crate::mcp::handler::metrics::metrics_system_json_from_snapshot(s),
+                            );
                         }
                     }
                 }
@@ -111,7 +113,10 @@ impl ResourceRoute for ProcMcpHandler {
                         }
                     }
                 }
-                Ok(crate::mcp::handler::make_processes_json(Some("cpu"), Some(50)))
+                Ok(crate::mcp::handler::make_processes_json(
+                    Some("cpu"),
+                    Some(50),
+                ))
             }
             "proc://docker/events" => {
                 // 与 proc_docker_events tool 同款路径（500ms 窗口采 + limit 50）

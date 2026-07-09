@@ -126,10 +126,14 @@ pub struct EjectStatusArgs {
 // 统一走 `super::err(msg)` 返 `{ ok: false, error: <msg> }`。
 // ===========================================================================
 
-/// `proc_replay_info` — 读取录屏元数据（双路径：v3 UiFrame footer / VT100 header）。
+/// `proc_replay_info` — 读取录屏元数据（v0.17 stage 5 后单一路径：v3 footer）。
 ///
-/// 走 [`is_vt100_file`] 分发：VT100 路径用 [`VtPlayer`] 返 `format: "vt100"` +
-/// header 字段；v3 路径用 [`Player`] 返 `format: "uiframe"` + 完整 footer 字段。
+/// v0.17 stage 5 改造：VT100 路径走透明转码到临时 v3 文件 + 返 v3 footer
+/// 字段（`format: "vt100-transcoded"` 标识）。VT100 路径不再单独走 VtPlayer
+/// 路径，让 VT100 录屏也能享受 v3 footer 完整字段（hostname / max_cpu /
+/// anomaly_count 等 VT100 header 不携带的）。转码失败 fallback 返原 VT100
+/// header 字段（`format: "vt100"`，保留 v0.16 既有行为）。
+///
 /// 共通字段：`has_bookmarks_sidecar`、`path`、`size_bytes`。
 ///
 /// 失败路径（文件不存在 / IO 错误 / 反序列化失败）→ `{ ok: false, error: <msg> }`。
@@ -150,6 +154,16 @@ pub fn make_replay_info_json(file_path: &str) -> Value {
     };
 
     if is_vt100_file(path) {
+        // v0.17 stage 5：透明转码 → v3 footer 字段；失败 fallback 走原 VT100 header 路径
+        if let Some(v3_json) = try_make_replay_info_vt100_transcoded(
+            path,
+            file_path,
+            size_bytes,
+            has_bookmarks_sidecar,
+        ) {
+            return v3_json;
+        }
+        // fallback：原 VT100 header 字段（v0.16 既有行为）
         let player = match VtPlayer::open(path.to_path_buf()) {
             Ok(p) => p,
             Err(e) => {
@@ -206,11 +220,60 @@ pub fn make_replay_info_json(file_path: &str) -> Value {
     })
 }
 
+/// VT100 → 临时 v3 转码后返 v3 footer JSON（v0.17 stage 5）。
+///
+/// 临时文件 `<file>.info.tmp.v3` 在函数结束时手动清理（one-shot info 路径）。
+/// 转码失败返 `None` 让调用方 fallback 走原 VT100 header 路径。
+fn try_make_replay_info_vt100_transcoded(
+    src: &std::path::Path,
+    file_path: &str,
+    size_bytes: u64,
+    has_bookmarks_sidecar: bool,
+) -> Option<Value> {
+    let tmp_path = src.with_extension("info.tmp.v3");
+    let result = (|| -> Option<(Value, usize)> {
+        let stats = crate::record::convert_vt100_to_v3_file(src, &tmp_path).ok()?;
+        let player = Player::open(tmp_path.to_path_buf()).ok()?;
+        let header = player.header();
+        let footer = player.meta();
+        let (start_time, end_time) = player.time_range();
+        let duration_secs = end_time.saturating_sub(start_time);
+        let json = json!({
+            "ok": true,
+            "format": "vt100-transcoded",
+            "source_format": "vt100",
+            "version": header.version,
+            "hostname": header.hostname,
+            "start_time": start_time,
+            "end_time": end_time,
+            "duration_secs": duration_secs,
+            "frame_count": player.total_frames(),
+            "anomaly_count": footer.anomaly_count,
+            "event_count": footer.event_count,
+            "max_cpu": footer.max_cpu,
+            "max_mem": footer.max_mem,
+            "unique_process_count": stats.unique_process_count,
+            "has_bookmarks_sidecar": has_bookmarks_sidecar,
+            "path": file_path,
+            "size_bytes": size_bytes,
+        });
+        Some((json, stats.unique_process_count))
+    })();
+    // 清理临时文件（无论成功失败）
+    let _ = std::fs::remove_file(&tmp_path);
+    result.map(|(v, _)| v)
+}
+
 /// `proc_replay_search` — FilterExpr / substring 双入口 + 全帧遍历 + limit 截断。
 ///
 /// query `:` 前缀走 [`parse_frame`]（FilterExpr 模式，5 维度 timestamp/cpu/mem/name/
 /// anomaly.severity），无 `:` 前缀走 [`filter::build_frame_substring_expr`]（substring
-/// → `name =~ /query/i` regex）。VT100 路径不支持 search（无结构化帧）。
+/// → `name =~ /query/i` regex）。
+///
+/// v0.17 stage 5 改造：VT100 路径不再返「不支持 search」错误，改为透明转码到
+/// 临时 v3 文件 + 走 v3 全帧遍历。VT100 录屏现可享受 FilterExpr 全部 5 维度
+/// 搜索能力（processes 字段从屏幕文本启发式提取，cpu/mem 字段填 0 让
+/// `cpu > 50` 等数值条件不命中但 `name =~ /chrome/` 文本条件命中）。
 ///
 /// 返回 `{ ok, query, match_count, returned, truncated, limit, matches: [...] }`，
 /// matches[] 含 frame_idx / timestamp / cpu_usage / memory_used / matched_processes[]
@@ -218,11 +281,30 @@ pub fn make_replay_info_json(file_path: &str) -> Value {
 pub fn make_replay_search_json(file_path: &str, query: &str, limit: Option<usize>) -> Value {
     let path = std::path::Path::new(file_path);
 
+    // v0.17 stage 5：VT100 透明转码 + 走 v3 全帧遍历
+    let transcoded_tmp: Option<std::path::PathBuf>;
+    let effective_path: std::path::PathBuf;
+
     if is_vt100_file(path) {
-        return super::err("VT100 录屏不支持 search（仅 v3 UiFrame）");
+        let tmp_path = path.with_extension("search.tmp.v3");
+        match crate::record::convert_vt100_to_v3_file(path, &tmp_path) {
+            Ok(_) => {
+                transcoded_tmp = Some(tmp_path.clone());
+                effective_path = tmp_path;
+            }
+            Err(e) => {
+                return super::err(format!("VT100 转码失败: {e}"));
+            }
+        }
+    } else {
+        transcoded_tmp = None;
+        effective_path = path.to_path_buf();
     }
 
-    let player = match Player::open(path.to_path_buf()) {
+    // RAII 清理（ transcoded 时函数结束自动删临时文件）
+    let _cleanup = transcoded_tmp.map(crate::record::TranscodedTempFile::new);
+
+    let player = match Player::open(effective_path) {
         Ok(p) => p,
         Err(e) => {
             return super::err(format!("录屏文件打开失败: {e}"));

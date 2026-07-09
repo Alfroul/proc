@@ -17,5 +17,7 @@ pub use frame::{
 pub use reader::Player;
 pub use sidecar::IdxSidecar;
 pub use vt100::{VtFrameWidget, VtPlayer, VtRecorder, is_vt100_file};
-pub use vt100_to_uiframe::Vt100ToUiFrameConverter;
+pub use vt100_to_uiframe::{
+    TranscodedTempFile, Vt100ToUiFrameConverter, Vt100TranscodeStats, convert_vt100_to_v3_file,
+};
 pub use writer::Recorder;

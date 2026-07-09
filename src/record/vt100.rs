@@ -492,3 +492,250 @@ pub fn is_vt100_file(path: &std::path::Path) -> bool {
     };
     &header.magic == VT100_MAGIC
 }
+
+// ── v0.17 stage 5：VT100 → UiFrame 转码辅助 ──
+
+/// 把 RLE cells 按行展开为字符串向量（每行一个 String）。
+///
+/// 给 [`extract_process_names_from_rle`] 用 —— 把 VtFrame 的 rle: Vec<(u16, CellDump)>
+/// 还原为屏幕文本（按 width 换行），让后续 regex 提取按行处理。
+///
+/// # Parameters
+///
+/// - `rle`：VtFrame.rle 字段（run-length encoded cells）
+/// - `width`：VtFrame.width 字段（屏幕列数）
+///
+/// # Returns
+///
+/// `Vec<String>` —— 每行一个 String（无 trailing newline），行数 = ceil(total_cells / width)。
+/// 空字符（`\0`）按空格处理（与 VtFrameWidget::render 一致，src/record/vt100.rs:115）。
+fn rle_to_lines(rle: &[(u16, CellDump)], width: u16) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let width = width as usize;
+    let mut lines: Vec<String> = Vec::new();
+    let mut current_line = String::new();
+    let mut col: usize = 0;
+
+    for (count, cell) in rle {
+        for _ in 0..*count {
+            let ch = char::from_u32(cell.ch).unwrap_or(' ');
+            let push_ch = if ch == '\0' { ' ' } else { ch };
+            current_line.push(push_ch);
+            col += 1;
+            if col >= width {
+                lines.push(std::mem::take(&mut current_line));
+                col = 0;
+            }
+        }
+    }
+    if col > 0 {
+        lines.push(current_line);
+    }
+    lines
+}
+
+/// 从屏幕文本提取进程名候选（Windows .exe / 通用单词 pattern）。
+///
+/// v0.17 stage 5 落地（ADR-0028 决策 3）—— VT100 录屏的屏幕文本是终端渲染结果，
+/// 无法精确还原 ProcessInfo 全字段，但能识别「name.exe」/「name」等单词作为
+/// search `name =~ /<pattern>/` 命中线索。pid/cpu/memory 字段填占位值
+/// （pid=0, cpu=0.0, memory=0, disk_read=0, disk_write=0）。
+///
+/// **提取规则**：
+/// 1. 优先匹配 `\b[\w\-\.]+\.exe\b`（Windows 可执行名，如 `chrome.exe` / `code.exe`）
+/// 2. fallback 匹配 `\b[\w\-]{3,30}\b`（通用单词，排除太短 / 太长噪声，仅当 .exe
+///    命中数 < 3 时启用，避免单帧噪声过多）
+/// 3. 同帧内 dedup（按 lowercase 归一，与 v0.6 `name_lower` 字段策略一致）
+///
+/// # Parameters
+///
+/// - `rle`：VtFrame.rle 字段
+/// - `width`：VtFrame.width 字段
+///
+/// # Returns
+///
+/// `Vec<FrameProcess>` —— 去重后的进程列表（每个含 name + 占位字段）。
+/// 顺序按首次出现顺序保留（与 v0.6 process list 默认顺序一致）。
+#[must_use]
+pub fn extract_process_names_from_rle(
+    rle: &[(u16, CellDump)],
+    width: u16,
+) -> Vec<super::frame::FrameProcess> {
+    let lines = rle_to_lines(rle, width);
+
+    let exe_re = regex::Regex::new(r"(?i)\b[\w\-\.]+\.exe\b").expect("static regex");
+    let word_re = regex::Regex::new(r"\b[\w\-]{3,30}\b").expect("static regex");
+
+    // 第一遍：收 .exe 命中（lowercase 归一 dedup）
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ordered: Vec<String> = Vec::new();
+    for line in &lines {
+        for m in exe_re.find_iter(line) {
+            let lower = m.as_str().to_lowercase();
+            if seen.insert(lower) {
+                ordered.push(m.as_str().to_string());
+            }
+        }
+    }
+
+    // fallback：仅当 0 个 .exe 命中时启用通用单词匹配（避免对 chrome.exe 拆出
+    // chrome / exe 子词噪声）。已有 .exe 命中时不再 fallback，让 processes 字段
+    // 纯粹反映 .exe 命中（更精确，agent search 体验更可控）。
+    if ordered.is_empty() {
+        for line in &lines {
+            for m in word_re.find_iter(line) {
+                let lower = m.as_str().to_lowercase();
+                // 排除已见的 / 太通用的英文虚词
+                if matches!(
+                    lower.as_str(),
+                    "the"
+                        | "and"
+                        | "for"
+                        | "with"
+                        | "from"
+                        | "this"
+                        | "that"
+                        | "have"
+                        | "has"
+                        | "was"
+                        | "were"
+                        | "are"
+                        | "not"
+                        | "but"
+                        | "you"
+                        | "all"
+                        | "can"
+                        | "her"
+                        | "would"
+                        | "could"
+                        | "will"
+                        | "they"
+                        | "their"
+                        | "what"
+                        | "about"
+                        | "which"
+                        | "when"
+                        | "your"
+                        | "them"
+                        | "into"
+                        | "than"
+                        | "then"
+                        | "also"
+                ) {
+                    continue;
+                }
+                if seen.insert(lower) {
+                    ordered.push(m.as_str().to_string());
+                }
+            }
+        }
+    }
+
+    ordered
+        .into_iter()
+        .map(|name| super::frame::FrameProcess {
+            pid: 0,
+            name,
+            cpu: 0.0,
+            memory: 0,
+            disk_read: 0,
+            disk_write: 0,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod vt100_extract_tests {
+    use super::*;
+
+    fn cell(ch: u32) -> CellDump {
+        CellDump {
+            ch,
+            fg: 0,
+            bg: 0,
+            flags: 0,
+        }
+    }
+
+    fn make_rle(text: &str, _width: u16) -> Vec<(u16, CellDump)> {
+        // 简化 RLE：每字符单独一项（不合并相邻同字符，测试用足够）
+        text.chars().map(|c| (1, cell(c as u32))).collect()
+    }
+
+    #[test]
+    fn extract_finds_exe_names() {
+        let text = "chrome.exe    code.exe     12.5%\nslack.exe";
+        let rle = make_rle(text, 30);
+        let procs = extract_process_names_from_rle(&rle, 30);
+        let names: Vec<&str> = procs.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.iter().any(|n| n.to_lowercase() == "chrome.exe"));
+        assert!(names.iter().any(|n| n.to_lowercase() == "code.exe"));
+        assert!(names.iter().any(|n| n.to_lowercase() == "slack.exe"));
+    }
+
+    #[test]
+    fn extract_dedup_within_frame() {
+        let text = "chrome.exe    chrome.exe    chrome.exe";
+        let rle = make_rle(text, 30);
+        let procs = extract_process_names_from_rle(&rle, 30);
+        let chrome_count = procs
+            .iter()
+            .filter(|p| p.name.to_lowercase() == "chrome.exe")
+            .count();
+        assert_eq!(chrome_count, 1);
+    }
+
+    #[test]
+    fn extract_fallback_words_when_no_exe() {
+        let text = "firefox    chrome    edge";
+        let rle = make_rle(text, 30);
+        let procs = extract_process_names_from_rle(&rle, 30);
+        // 3 个非 .exe 单词，fallback 触发（.exe < 3）
+        let names: Vec<String> = procs.iter().map(|p| p.name.to_lowercase()).collect();
+        assert!(names.contains(&"firefox".to_string()));
+        assert!(names.contains(&"chrome".to_string()));
+        assert!(names.contains(&"edge".to_string()));
+    }
+
+    #[test]
+    fn extract_skips_common_english_words() {
+        let text = "the chrome and the firefox";
+        let rle = make_rle(text, 30);
+        let procs = extract_process_names_from_rle(&rle, 30);
+        let names: Vec<String> = procs.iter().map(|p| p.name.to_lowercase()).collect();
+        assert!(!names.contains(&"the".to_string()));
+        assert!(!names.contains(&"and".to_string()));
+        assert!(names.contains(&"chrome".to_string()));
+        assert!(names.contains(&"firefox".to_string()));
+    }
+
+    #[test]
+    fn extract_returns_empty_for_blank_screen() {
+        let text = "        \n        ";
+        let rle = make_rle(text, 8);
+        let procs = extract_process_names_from_rle(&rle, 8);
+        // fallback 模式下空行不应产生进程名（空字符串 regex 不匹配 \b[\w\-]{3,30}\b）
+        assert!(procs.iter().all(|p| !p.name.trim().is_empty()));
+    }
+
+    #[test]
+    fn extract_handles_zero_width() {
+        let rle = make_rle("chrome.exe", 0);
+        let procs = extract_process_names_from_rle(&rle, 0);
+        assert!(procs.is_empty(), "width=0 should produce no processes");
+    }
+
+    #[test]
+    fn rle_to_lines_basic() {
+        let text = "hello world";
+        let rle = make_rle(text, 5);
+        let lines = rle_to_lines(&rle, 5);
+        // 11 chars / width 5 = 3 lines (5 + 5 + 1)
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "hello");
+        assert_eq!(lines[1], " worl");
+        assert_eq!(lines[2], "d");
+    }
+}
