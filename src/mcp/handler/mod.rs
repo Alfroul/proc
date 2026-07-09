@@ -47,6 +47,46 @@ use crate::collect::SystemSnapshot;
 use crate::collect::{self, SortField};
 use crate::dns_log::DnsLogCollector;
 
+/// v0.17 stage 4 TD-52：sparkline 单个采样点（轻量 Copy struct）。
+///
+/// `SystemSnapshot` 含 `JoinHandle` / `Receiver` 等 non-Clone 字段，无法直接
+/// 存进 `VecDeque`。worker 每 tick 从 `SystemSnapshot` 提取这 4 个标量字段
+/// （cpu/memory/swap + unix timestamp）push 到 `system_history: VecDeque<MetricsSample>`，
+/// 让 `proc_metrics_history` tool drain 返 sparkline 数据点（ADR-0026 / ADR-0027）。
+///
+/// Copy + Clone 让 worker push 用 `*sample` 解引用（零开销），drain 时
+/// `iter().rev().take(N).rev()` 直接复制 Copy 数据，无 alloc。
+#[cfg(feature = "mcp-persistent-state")]
+#[derive(Clone, Copy, Debug)]
+pub struct MetricsSample {
+    /// CPU 使用率（0-100，f32 与 SystemSnapshot::cpu_usage() 一致）。
+    pub cpu_usage: f32,
+    /// 已用内存（bytes，u64 与 SystemSnapshot::memory_usage().0 一致）。
+    pub memory_used: u64,
+    /// 已用 Swap（bytes，u64 与 SystemSnapshot::swap_usage().0 一致）。
+    pub swap_used: u64,
+    /// 采集时间戳（unix seconds，worker push 时 `SystemSnapshot::uptime_secs()` 或
+    /// `chrono::Utc::now().timestamp()`）。
+    pub timestamp_unix: u64,
+}
+
+#[cfg(feature = "mcp-persistent-state")]
+impl MetricsSample {
+    /// 从 SystemSnapshot 提取 MetricsSample（worker 每 tick 调一次）。
+    fn from_snapshot(s: &SystemSnapshot) -> Self {
+        let cpu_usage = s.cpu_usage();
+        let (memory_used, _) = s.memory_usage();
+        let (swap_used, _) = s.swap_usage();
+        let timestamp_unix = SystemSnapshot::uptime_secs();
+        Self {
+            cpu_usage,
+            memory_used,
+            swap_used,
+            timestamp_unix,
+        }
+    }
+}
+
 // v0.15 阶段 1 子 module re-export：让本文件 `#[tool]` 方法可以直接调
 // `cli::make_flows_json(...)` / `inspect::make_inspect_json(...)` /
 // `metrics::make_metrics_system_json()`，不需要 `self::cli::` 前缀。
@@ -113,8 +153,12 @@ pub struct ProcMcpHandler {
     /// stage 1 Spike 仅声明字段 + Default 返空 VecDeque；stage 4 实装 worker
     /// push 逻辑，让 `proc_metrics_history` tool drain 此字段返 sparkline
     /// 数据点（ADR-0026 / ADR-0027）。
+    ///
+    /// **存储 [`MetricsSample`] 而非 `SystemSnapshot`**：SystemSnapshot 含
+    /// JoinHandle / Receiver 等 non-Clone 字段，无法直接存进 VecDeque。worker
+    /// 每 tick 提取 cpu/memory/swap/ts 4 个标量 push（Copy，零 alloc）。
     #[cfg(feature = "mcp-persistent-state")]
-    pub system_history: Arc<Mutex<VecDeque<SystemSnapshot>>>,
+    pub system_history: Arc<Mutex<VecDeque<MetricsSample>>>,
 
     /// v0.17 stage 6 record 暴露落地：spawn `proc record` 子进程 handle。
     /// stage 1 Spike 仅声明字段 + Default 返 None；stage 6 实装 spawn +
@@ -176,13 +220,20 @@ impl ProcMcpHandler {
         let snapshot: Arc<Mutex<Option<SystemSnapshot>>> = Arc::new(Mutex::new(None));
 
         #[cfg(feature = "mcp-persistent-state")]
+        let system_history: Arc<Mutex<VecDeque<MetricsSample>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
+
+        #[cfg(feature = "mcp-persistent-state")]
         {
             let snapshot_clone = Arc::clone(&snapshot);
+            let history_clone = Arc::clone(&system_history);
             // spawn 失败静默降级（与 DNS collector detect 同款规则），handler 仍创建
             // （snapshot 字段为 None，后续 tool 调用走 fallback 现场新建路径）。
+            // v0.17 stage 4 TD-52：worker 兼任 system_history VecDeque push（30s cap），
+            // 不 spawn 第二个 worker（决策 1）。
             let _ = std::thread::Builder::new()
                 .name("mcp-snapshot-worker".to_string())
-                .spawn(move || run_snapshot_worker(snapshot_clone));
+                .spawn(move || run_snapshot_worker(snapshot_clone, history_clone));
         }
 
         Self {
@@ -190,28 +241,38 @@ impl ProcMcpHandler {
             #[cfg(feature = "mcp-persistent-state")]
             snapshot,
             #[cfg(feature = "mcp-persistent-state")]
-            system_history: Arc::new(Mutex::new(VecDeque::new())),
+            system_history,
             #[cfg(feature = "mcp-persistent-state")]
             record_handle: Arc::new(Mutex::new(None)),
         }
     }
 }
 
-/// v0.17 stage 3 TD-54：1s tick SystemSnapshot refresh worker。
+/// v0.17 stage 3 TD-54 + stage 4 TD-52：1s tick SystemSnapshot refresh + history push worker。
 ///
 /// fire-and-forget 模式（handler 不持 JoinHandle，进程退出时终止）。每 tick：
 /// 1. 从 `Arc<Mutex<Option<SystemSnapshot>>>` 字段 take 出 owned snapshot（如有）
 /// 2. refresh + refresh_heavy_incremental（复用 sysinfo System 内部增量状态，比
 ///    每次 `SystemSnapshot::new()` 全新初始化快 ~5x）
-/// 3. move 回字段
-/// 4. sleep 减去本次耗时（保证 1s tick 节奏）
+/// 3. 从 snapshot 提取 `MetricsSample`（cpu/memory/swap/ts），push 到
+///    `system_history: VecDeque<MetricsSample>`，30s cap（TD-52）
+/// 4. move owned snapshot 回 snapshot 字段
+/// 5. sleep 减去本次耗时（保证 1s tick 节奏）
 ///
 /// 持锁窗口 ~30-50ms（refresh 耗时），1s tick 占空比 < 5%。helper 在持锁窗口
 /// 读字段时 take 出来 → 读到 None → fallback 现场新建（与 v0.16 行为一致）。
 ///
 /// refresh 失败时保 `last_snapshot` 不变，下 tick 重试（worker 永不退出）。
+///
+/// **stage 4 TD-52 兼任 push**（决策 1）：不 spawn 第二个 worker，single worker
+/// 写回 snapshot 字段前先提取 `MetricsSample`（Copy struct，零 alloc）push 到
+/// system_history VecDeque。system_history 字段不存 SystemSnapshot（含 non-Clone
+/// 字段如 JoinHandle / Receiver），仅存 4 个标量。
 #[cfg(feature = "mcp-persistent-state")]
-fn run_snapshot_worker(snapshot: Arc<Mutex<Option<SystemSnapshot>>>) {
+fn run_snapshot_worker(
+    snapshot: Arc<Mutex<Option<SystemSnapshot>>>,
+    system_history: Arc<Mutex<VecDeque<MetricsSample>>>,
+) {
     loop {
         let tick_start = std::time::Instant::now();
 
@@ -233,12 +294,23 @@ fn run_snapshot_worker(snapshot: Arc<Mutex<Option<SystemSnapshot>>>) {
             let _ = s.refresh_heavy_incremental();
         }
 
-        // 3. move 回字段（持锁失败说明 mutex 中毒，不退出 worker 重试下 tick）
+        // 3. v0.17 stage 4 TD-52：从 snapshot 提取 MetricsSample push 到 system_history
+        //    VecDeque（30s cap）。MetricsSample 是 Copy struct，零 alloc；不同 mutex
+        //    不冲突，但顺序固定（先 history 再 snapshot）避免同时持两锁。
+        let sample = MetricsSample::from_snapshot(&s);
+        if let Ok(mut history) = system_history.lock() {
+            history.push_back(sample);
+            while history.len() > 30 {
+                history.pop_front();
+            }
+        }
+
+        // 4. move owned snapshot 回字段
         if let Ok(mut guard) = snapshot.lock() {
             *guard = Some(s);
         }
 
-        // 4. sleep 减去本次耗时（保证 1s tick 节奏）
+        // 5. sleep 减去本次耗时（保证 1s tick 节奏）
         let elapsed = tick_start.elapsed();
         let sleep_dur = std::time::Duration::from_secs(1).saturating_sub(elapsed);
         std::thread::sleep(sleep_dur);
@@ -971,16 +1043,29 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_metrics_history",
-        description = "Query sparkline history (last N seconds, default 30s, max 30s). Args: metric (\"cpu\" / \"memory\" / \"swap\"), seconds (optional, default 30, max 30 because system_history field is 30s cap). Returns { ok, metric, samples: [{ ts, value }] }. Stage 4 business logic: drain ProcMcpHandler.system_history VecDeque (1s tick push, 30s cap) + extract metric data points (ADR-0026 / ADR-0027 / TD-52)."
+        description = "Query sparkline history (last N seconds, default 30s, max 30s). Args: metric (\"cpu\" / \"memory\" / \"swap\"), seconds (optional, default 30, max 30 because system_history field is 30s cap). Returns { ok, metric, seconds, count, samples: [{ value }] } ordered oldest → newest. Stage 4 TD-52 business logic: drain ProcMcpHandler.system_history VecDeque (1s tick push, 30s cap) + extract metric data points (ADR-0026 / ADR-0027). Empty history (worker warm-up / Default path / no-default-features build) returns count=0 + samples=[]."
     )]
     fn proc_metrics_history(
         &self,
         Parameters(args): Parameters<MetricsHistoryArgs>,
     ) -> Result<CallToolResult, McpError> {
-        ok_result(observable::make_metrics_history_json(
-            &args.metric,
-            args.seconds,
-        ))
+        #[cfg(feature = "mcp-persistent-state")]
+        {
+            ok_result(observable::make_metrics_history_json(
+                &args.metric,
+                args.seconds,
+                &self.system_history,
+            ))
+        }
+        // --no-default-features 路径无 system_history 字段，返 stub 让 client 知道
+        // （observable::make_metrics_history_json_no_state 返 count=0 + note）
+        #[cfg(not(feature = "mcp-persistent-state"))]
+        {
+            ok_result(observable::make_metrics_history_json_no_state(
+                &args.metric,
+                args.seconds,
+            ))
+        }
     }
 }
 
@@ -998,6 +1083,13 @@ impl ServerHandler for ProcMcpHandler {
             protocol_version: Default::default(),
             capabilities: rmcp::model::ServerCapabilities {
                 tools: Some(rmcp::model::ToolsCapability::default()),
+                // v0.17 stage 4：暴露 resources capability 让 client 知道此 server
+                // 支持 resources/list + resources/read + resources/subscribe。
+                // subscribe = true（决策 5：接受请求但不 push，client 走 polling）。
+                resources: Some(rmcp::model::ResourcesCapability {
+                    subscribe: Some(true),
+                    list_changed: None,
+                }),
                 ..Default::default()
             },
             instructions: Some(
@@ -1008,6 +1100,91 @@ impl ServerHandler for ProcMcpHandler {
                     .into(),
             ),
         }
+    }
+
+    // ========================================================================
+    // v0.17 stage 4 Resource subscribe（3 URI 路由 + subscribe no-op）
+    //
+    // rmcp 0.11 ServerHandler trait 的 list_resources / read_resource / subscribe
+    // / unsubscribe 默认 impl 返空 / method_not_found。我们覆盖：
+    // - list_resources：返 3 个 proc:// URI 全列表（含 name / description / mime_type）
+    // - read_resource：路由到 ResourceRoute::route() 返 JSON snapshot
+    // - subscribe / unsubscribe：接受请求返 Ok（决策 5：不做实际 push，client 走 polling）
+    // ========================================================================
+
+    fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParam>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> impl Future<Output = Result<rmcp::model::ListResourcesResult, McpError>> + Send + '_ {
+        let resources: Vec<rmcp::model::Resource> = crate::mcp::resources::PROC_RESOURCE_URIS
+            .iter()
+            .map(|uri| {
+                let raw = rmcp::model::RawResource {
+                    uri: (*uri).to_string(),
+                    name: crate::mcp::resources::resource_name_for_uri(uri).to_string(),
+                    title: None,
+                    description: Some(
+                        crate::mcp::resources::resource_description_for_uri(uri).to_string(),
+                    ),
+                    mime_type: Some("application/json".to_string()),
+                    size: None,
+                    icons: None,
+                    meta: None,
+                };
+                rmcp::model::Annotated::new(raw, None)
+            })
+            .collect();
+        std::future::ready(Ok(rmcp::model::ListResourcesResult {
+            resources,
+            next_cursor: None,
+            meta: None,
+        }))
+    }
+
+    fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParam,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> impl Future<Output = Result<rmcp::model::ReadResourceResult, McpError>> + Send + '_ {
+        let uri_str = request.uri.as_str().to_string();
+        match crate::mcp::resources::ResourceRoute::route(self, &uri_str) {
+            Ok(value) => {
+                let text = value.to_string();
+                let result = rmcp::model::ReadResourceResult {
+                    contents: vec![rmcp::model::ResourceContents::TextResourceContents {
+                        uri: uri_str.clone(),
+                        mime_type: Some("application/json".to_string()),
+                        text,
+                        meta: None,
+                    }],
+                };
+                std::future::ready(Ok(result))
+            }
+            Err(msg) => std::future::ready(Err(rmcp::ErrorData::invalid_request(msg, None))),
+        }
+    }
+
+    /// v0.17 stage 4 决策 5：subscribe 接受请求但不 push。
+    ///
+    /// client 订阅后返 Ok(())，但 server 不主动发 `notifications/resources/updated`。
+    /// client 应通过 `resources/read` 主动 polling（与既有 `proc_metrics_system` tool
+    /// 一次性 query 同款语义）。v0.18+ cycle 评估 server 主动 push（需 Peer<RoleServer>
+    /// 句柄 + notification channel lifecycle 管理，与 SSE transport 同款复杂度）。
+    fn subscribe(
+        &self,
+        _request: rmcp::model::SubscribeRequestParam,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> impl Future<Output = Result<(), McpError>> + Send + '_ {
+        std::future::ready(Ok(()))
+    }
+
+    fn unsubscribe(
+        &self,
+        _request: rmcp::model::UnsubscribeRequestParam,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> impl Future<Output = Result<(), McpError>> + Send + '_ {
+        std::future::ready(Ok(()))
     }
 }
 
