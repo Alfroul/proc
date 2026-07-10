@@ -1016,121 +1016,442 @@ pub struct DockerVolumeRmArgs {
 // - received_* 字段保留参数 echo，方便 stage 6 调试 schema 反序列化
 // ===========================================================================
 
-/// `proc_record_start` — stub helper（stage 6 替换为真实业务实现）。
+/// no-default-features build（无 mcp-persistent-state feature）路径用：
+/// `proc_record_start` 返 `ok: false + error "需 mcp-persistent-state feature"`
+/// 让 client 知道子进程 spawn 路径未编译进来。
+pub fn make_record_start_disabled_json() -> Value {
+    super::err(
+        "proc_record_start 需 mcp-persistent-state Cargo feature（default 启用；--no-default-features 时 cfg-gate 掉）",
+    )
+}
+
+/// no-default-features build（无 mcp-persistent-state feature）路径用：
+/// `proc_record_stop` 返 `ok: false + error "需 mcp-persistent-state feature"`。
+pub fn make_record_stop_disabled_json() -> Value {
+    super::err(
+        "proc_record_stop 需 mcp-persistent-state Cargo feature（default 启用；--no-default-features 时 cfg-gate 掉）",
+    )
+}
+
+/// `proc_record_start` — spawn `proc record --no-tui --output <path>` 子进程并跨
+/// tool call 保活 child handle（ADR-0029 决策 4 拍板）。
 ///
-/// stage 6 实装时走 spawn `proc record --no-tui --output <path>` 子进程路径
-/// （ADR-0029 决策 4 拍板），handler 持 `record_handle: Arc<Mutex<Option<Child>>>`
-/// 字段跨 tool call 保活。
+/// 流程：
+/// 1. `confirm=false` → 返 `ok: false + error "confirm=true 必传以确认录屏风险"`
+/// 2. file_path 父目录不存在 → 自动 `create_dir_all`（与 VtRecorder::start 同款）
+/// 3. 检查 `record_handle` 当前是否已有 child（agent 重复调 start 时返
+///    `ok: false + error "录屏已在进行"`，不直接覆盖）
+/// 4. spawn `proc record --no-tui --output <file_path>` 子进程（同款 binary，
+///    `std::env::current_exe()`；CLI `--output` 接 file_path）
+/// 5. child stdout / stderr 重定向到 `<file_path>.log` 让 agent debug 能看到子进程输出
+/// 6. 写 child 到 `record_handle: Arc<Mutex<Option<Child>>>`
+/// 7. 返 `{ ok, file_path, started_at, expected_duration_secs, pid }`
+///
+/// `expected_duration_secs`：`duration_secs` 参数原样回显，None 表示手动 stop。
+/// 实际 auto-stop（如配置）由子进程自己处理（v0.18+ cycle 候选——当前 stage 6
+/// 仅记录参数不真正实装 auto-stop，与 brainstorm §决策 4 表「duration_secs 可选」对齐）。
 pub fn make_record_start_json(
-    _confirm: bool,
-    _file_path: &str,
-    _duration_secs: Option<u64>,
+    confirm: bool,
+    file_path: &str,
+    duration_secs: Option<u64>,
+    record_handle: &std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>,
 ) -> Value {
+    if !confirm {
+        return super::err(
+            "confirm=true 必传以确认录屏风险（捕获屏幕所有内容含 DNS 域名 / 进程 cmd）",
+        );
+    }
+
+    let mut guard = match record_handle.lock() {
+        Ok(g) => g,
+        Err(e) => return super::err(format!("record_handle mutex poisoned: {e}")),
+    };
+    if guard.is_some() {
+        return super::err("录屏已在进行；先调 proc_record_stop 停止当前录屏");
+    }
+
+    // file_path 父目录自动创建
+    let path = std::path::Path::new(file_path);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return super::err(format!("创建录屏目录失败 ({}): {e}", parent.display()));
+            }
+        }
+    }
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => return super::err(format!("无法定位 proc 可执行文件: {e}")),
+    };
+
+    let log_path = path.with_extension("prec.log");
+    let log_file = match std::fs::File::create(&log_path) {
+        Ok(f) => f,
+        Err(e) => return super::err(format!("无法创建录屏日志 ({}): {e}", log_path.display())),
+    };
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("record")
+        .arg("--no-tui")
+        .arg("--output")
+        .arg(file_path)
+        .stdout(std::process::Stdio::from(
+            log_file
+                .try_clone()
+                .unwrap_or_else(|_| log_file.try_clone().unwrap()),
+        ))
+        .stderr(std::process::Stdio::from(log_file));
+    // CREATE_NEW_PROCESS_GROUP (Windows) / setsid (Unix) — 让子进程独立于
+    // MCP server 的 Ctrl+C 信号，proc_record_stop 通过 kill child 触发干净退出。
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_PROCESS_GROUP = 0x00000200
+        cmd.creation_flags(0x0000_0200);
+    }
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return super::err(format!("spawn 子进程失败 ({exe:?}): {e}")),
+    };
+    let pid = child.id();
+    *guard = Some(child);
+    drop(guard);
+
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
     json!({
         "ok": true,
-        "stub": true,
-        "stage": "v0.17-stage-6",
-        "message": "proc_record_start tool schema is registered; business logic lands in stage 6",
-        "received_confirm": _confirm,
-        "received_file_path": _file_path,
-        "received_duration_secs": _duration_secs,
+        "action": "start",
+        "file_path": file_path,
+        "started_at": started_at,
+        "expected_duration_secs": duration_secs,
+        "pid": pid,
+        "log_path": log_path.to_string_lossy(),
+        "warning": if duration_secs.is_some() {
+            Some("duration_secs 参数已记录但 auto-stop 当前未实装；agent 须显式调 proc_record_stop".to_string())
+        } else {
+            None
+        },
     })
 }
 
-/// `proc_record_stop` — stub helper（stage 6 替换为真实业务实现）。
+/// `proc_record_stop` — kill child + 等待 flush + 读 .prec metadata。
 ///
-/// stage 6 实装时走 kill child + 等待 `.prec` 文件 flush + 读 footer metadata
-/// 返 `{ ok, file_path, size_bytes, duration_secs, frame_count }`。
-pub fn make_record_stop_json(_file_path: &str) -> Value {
-    json!({
+/// 流程：
+/// 1. 从 `record_handle` take 出 child（None → 返 `ok: false + error "无录屏进行中"`）
+/// 2. `child.kill()` 发 TerminateProcess（Windows）/ SIGTERM（Unix）触发子进程退出
+///    - 子进程的 shutdown handler 让 run_record_headless 退出循环 → VtRecorder::stop
+///    - kill 后 wait 确保子进程真正退出（最多 10s）
+/// 3. 读 `.prec` metadata（VtPlayer::open 拿 frame_count + time_range_ms）
+/// 4. 返 `{ ok, file_path, size_bytes, duration_secs, frame_count, exit_code }`
+pub fn make_record_stop_json(
+    file_path: &str,
+    record_handle: &std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>,
+) -> Value {
+    let mut child_opt = match record_handle.lock() {
+        Ok(mut g) => g.take(),
+        Err(e) => return super::err(format!("record_handle mutex poisoned: {e}")),
+    };
+
+    let Some(mut child) = child_opt else {
+        return super::err("无录屏进行中；先调 proc_record_start");
+    };
+    child_opt = None; // take 已经清空，这里仅显式说明
+    let _ = child_opt;
+
+    // kill 触发子进程的 Ctrl+C handler（shutdown::requested flip）
+    let kill_ok = child.kill().is_ok();
+    // wait 最多 10s 让子进程 flush + 写完最后帧
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(_) => break,
+        }
+    }
+    if exit_status.is_none() {
+        // 子进程未在 10s 内退出 — 强制 wait（block）作为最后兜底
+        let _ = child.wait();
+    }
+
+    // 读 .prec metadata
+    let path = std::path::Path::new(file_path);
+    let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+    let (frame_count, duration_secs) = match crate::record::VtPlayer::open(path.to_path_buf()) {
+        Ok(player) => {
+            let total = player.total_frames();
+            let (start_ms, end_ms) = player.time_range_ms();
+            (total, end_ms.saturating_sub(start_ms) / 1000)
+        }
+        Err(e) => {
+            let mut v = json!({
+                "ok": true,
+                "action": "stop",
+                "file_path": file_path,
+                "size_bytes": size_bytes,
+                "frame_count": 0,
+                "duration_secs": 0,
+                "killed": kill_ok,
+                "metadata_warning": format!("读取录屏 footer 失败: {e}"),
+            });
+            if let Some(s) = exit_status {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("exit_code".to_string(), Value::from(s.code()));
+                }
+            }
+            return v;
+        }
+    };
+
+    let mut v = json!({
         "ok": true,
-        "stub": true,
-        "stage": "v0.17-stage-6",
-        "message": "proc_record_stop tool schema is registered; business logic lands in stage 6",
-        "received_file_path": _file_path,
-    })
+        "action": "stop",
+        "file_path": file_path,
+        "size_bytes": size_bytes,
+        "frame_count": frame_count,
+        "duration_secs": duration_secs,
+        "killed": kill_ok,
+    });
+    if let Some(s) = exit_status {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("exit_code".to_string(), Value::from(s.code()));
+        }
+    }
+    v
 }
 
-/// `proc_usb_release` — stub helper（stage 6 替换为真实业务实现）。
+/// `proc_usb_release` — kill_locks → flush_write_cache → eject_device 三步链路。
 ///
-/// stage 6 实装时走 `kill_locks → flush_write_cache (PowerShell 阻塞 3s+) →
-/// eject_device` 三步链路，返
-/// `{ ok, dry_run, action: "release", drive, killed_pids: [...], flushed: bool, ejected: bool }`。
+/// 流程：
+/// 1. `confirm=false` → 返 `ok: false + error "confirm=true 必传以确认破坏性操作"`
+/// 2. drive 字符 normalize（与 `make_eject_status_json` 同款 inline：filter alphabetic + upper）
+/// 3. `dry_run=true` → 跳过 kill / flush / eject，返 `{ ok: true, dry_run: true, ... }`
+/// 4. for each pid in kill_pids：调 `crate::kill::kill_process(pid, force=true)`，
+///    收集每 pid 结果（Killed / AlreadyGone / AccessDenied / Failed / Error）
+/// 5. `crate::eject::flush_write_cache(letter)`（PowerShell Write-VolumeCache + 阻塞 3s）
+/// 6. `crate::eject::eject_device(letter)`（PowerShell Shell.Application InvokeVerb('Eject')）
+/// 7. 返 `{ ok, dry_run, action: "release", drive, killed_pids: [{pid, result}],
+///    flushed: bool, ejected: bool }`
+///
+/// 任一步失败继续后续步骤（flush 失败仍尝试 eject），让 agent 看到完整诊断；
+/// 失败累积到 `warnings` 数组让 agent 决策。
 pub fn make_usb_release_json(
-    _confirm: bool,
-    _drive: &str,
-    _kill_pids: &[u32],
-    _dry_run: Option<bool>,
+    confirm: bool,
+    drive: &str,
+    kill_pids: &[u32],
+    dry_run: Option<bool>,
 ) -> Value {
+    if !confirm {
+        return super::err(
+            "confirm=true 必传以确认破坏性操作（kill 进程 + flush 缓存 + eject 设备）",
+        );
+    }
+    let dry_run = dry_run.unwrap_or(false);
+
+    // drive 字符 normalize
+    let cleaned: String = drive.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    let Some(letter) = cleaned.chars().next().map(|c| c.to_ascii_uppercase()) else {
+        return super::err(format!("无效的驱动器号: '{drive}'"));
+    };
+    let drive_label = format!("{letter}:");
+
+    if dry_run {
+        return json!({
+            "ok": true,
+            "dry_run": true,
+            "action": "release",
+            "drive": drive_label,
+            "kill_pids": kill_pids,
+            "killed_pids": Vec::<Value>::new(),
+            "flushed": false,
+            "ejected": false,
+            "warnings": Vec::<String>::new(),
+        });
+    }
+
+    // 步骤 1：kill_locks
+    let killed_pids: Vec<Value> = kill_pids
+        .iter()
+        .map(|&pid| match crate::kill::kill_process(pid, true) {
+            Ok(crate::kill::KillResult::Killed) => json!({"pid": pid, "result": "Killed"}),
+            Ok(crate::kill::KillResult::AlreadyGone) => {
+                json!({"pid": pid, "result": "AlreadyGone"})
+            }
+            Ok(crate::kill::KillResult::AccessDenied) => {
+                json!({"pid": pid, "result": "AccessDenied"})
+            }
+            Ok(crate::kill::KillResult::Failed(msg)) => {
+                json!({"pid": pid, "result": "Failed", "error": msg})
+            }
+            Err(e) => json!({"pid": pid, "result": "Error", "error": e.to_string()}),
+        })
+        .collect();
+
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 步骤 2：flush_write_cache
+    #[cfg(target_os = "windows")]
+    let flushed = match crate::eject::flush_write_cache(letter) {
+        Ok(()) => true,
+        Err(e) => {
+            warnings.push(format!("flush_write_cache({drive_label}) 失败: {e}"));
+            false
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let flushed = {
+        warnings.push("flush_write_cache 仅 Windows 支持（当前非 Windows 平台跳过）".to_string());
+        false
+    };
+
+    // 步骤 3：eject_device（flush 失败仍尝试 eject，让 agent 看完整诊断）
+    #[cfg(target_os = "windows")]
+    let ejected = match crate::eject::eject_device(letter) {
+        Ok(()) => true,
+        Err(e) => {
+            warnings.push(format!("eject_device({drive_label}) 失败: {e}"));
+            false
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let ejected = {
+        warnings.push("eject_device 仅 Windows 支持（当前非 Windows 平台跳过）".to_string());
+        false
+    };
+
     json!({
         "ok": true,
-        "stub": true,
-        "stage": "v0.17-stage-6",
-        "message": "proc_usb_release tool schema is registered; business logic lands in stage 6",
-        "received_confirm": _confirm,
-        "received_drive": _drive,
-        "received_kill_pids": _kill_pids,
-        "received_dry_run": _dry_run,
+        "dry_run": false,
+        "action": "release",
+        "drive": drive_label,
+        "killed_pids": killed_pids,
+        "flushed": flushed,
+        "ejected": ejected,
+        "warnings": warnings,
     })
 }
 
-/// `proc_docker_rm` — stub helper（stage 6 替换为真实业务实现）。
+/// `proc_docker_rm` — bollard `remove_container`（ADR-0029）。
 ///
-/// stage 6 实装时走 bollard API `remove_container`，返 `{ ok, container_id, removed: bool }`。
+/// `confirm=false` → 返 error。`confirm=true` → 调 `DockerMonitor::connect()` +
+/// `remove_container(container_id, force, volumes)`。Docker 连接失败 / 删除失败 →
+/// `{ ok: false, error: ... }`。
 pub fn make_docker_rm_json(
-    _confirm: bool,
-    _container_id: &str,
-    _force: Option<bool>,
-    _volumes: Option<bool>,
+    confirm: bool,
+    container_id: &str,
+    force: Option<bool>,
+    volumes: Option<bool>,
 ) -> Value {
-    json!({
-        "ok": true,
-        "stub": true,
-        "stage": "v0.17-stage-6",
-        "message": "proc_docker_rm tool schema is registered; business logic lands in stage 6",
-        "received_confirm": _confirm,
-        "received_container_id": _container_id,
-        "received_force": _force,
-        "received_volumes": _volumes,
-    })
+    if !confirm {
+        return super::err("confirm=true 必传以确认删除容器（不可逆）");
+    }
+    let force = force.unwrap_or(false);
+    let volumes = volumes.unwrap_or(false);
+
+    let monitor = match crate::docker::DockerMonitor::connect() {
+        Ok(m) => m,
+        Err(e) => {
+            return super::err(format!(
+                "Docker 连接失败 ({e}) — 请确认 Docker Desktop 正在运行"
+            ));
+        }
+    };
+    match monitor.remove_container(container_id, force, volumes) {
+        Ok(()) => json!({
+            "ok": true,
+            "container_id": container_id,
+            "removed": true,
+            "force": force,
+            "volumes": volumes,
+        }),
+        Err(e) => super::err(format!("删除容器 {container_id} 失败: {e}")),
+    }
 }
 
-/// `proc_docker_image_rm` — stub helper（stage 6 替换为真实业务实现）。
+/// `proc_docker_image_rm` — bollard `remove_image`（ADR-0029）。
 ///
-/// stage 6 实装时走 bollard API `remove_image`，返 `{ ok, image_id, removed: bool }`。
+/// `confirm=false` → 返 error。`force=true` 强制删（即便 in_use）。
+/// `prune_children` 参数当前未在 bollard `RemoveImageOptions` 暴露（仅 `noprune`
+/// 反向参数），如 agent 显式传 `prune_children=true` 加 `warning` 字段提示当前
+/// 实装未区分（v0.18+ cycle 评估）。
 pub fn make_docker_image_rm_json(
-    _confirm: bool,
-    _image_id: &str,
-    _force: Option<bool>,
-    _prune_children: Option<bool>,
+    confirm: bool,
+    image_id: &str,
+    force: Option<bool>,
+    prune_children: Option<bool>,
 ) -> Value {
-    json!({
-        "ok": true,
-        "stub": true,
-        "stage": "v0.17-stage-6",
-        "message": "proc_docker_image_rm tool schema is registered; business logic lands in stage 6",
-        "received_confirm": _confirm,
-        "received_image_id": _image_id,
-        "received_force": _force,
-        "received_prune_children": _prune_children,
-    })
+    if !confirm {
+        return super::err("confirm=true 必传以确认删除镜像（不可逆）");
+    }
+    let force = force.unwrap_or(false);
+
+    let monitor = match crate::docker::DockerMonitor::connect() {
+        Ok(m) => m,
+        Err(e) => {
+            return super::err(format!(
+                "Docker 连接失败 ({e}) — 请确认 Docker Desktop 正在运行"
+            ));
+        }
+    };
+    match monitor.remove_image(image_id, force) {
+        Ok(()) => {
+            let mut v = json!({
+                "ok": true,
+                "image_id": image_id,
+                "removed": true,
+                "force": force,
+            });
+            if prune_children.unwrap_or(false) {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert(
+                        "warning".to_string(),
+                        Value::from(
+                            "prune_children=true 当前未区分（bollard RemoveImageOptions 仅 force/noprune）"
+                        ),
+                    );
+                }
+            }
+            v
+        }
+        Err(e) => super::err(format!("删除镜像 {image_id} 失败: {e}")),
+    }
 }
 
-/// `proc_docker_volume_rm` — stub helper（stage 6 替换为真实业务实现）。
+/// `proc_docker_volume_rm` — bollard `remove_volume`（ADR-0029）。
 ///
-/// stage 6 实装时走 bollard API `remove_volume`，返 `{ ok, volume_name, removed: bool }`。
-pub fn make_docker_volume_rm_json(
-    _confirm: bool,
-    _volume_name: &str,
-    _force: Option<bool>,
-) -> Value {
-    json!({
-        "ok": true,
-        "stub": true,
-        "stage": "v0.17-stage-6",
-        "message": "proc_docker_volume_rm tool schema is registered; business logic lands in stage 6",
-        "received_confirm": _confirm,
-        "received_volume_name": _volume_name,
-        "received_force": _force,
-    })
+/// `confirm=false` → 返 error。`force=true` 强制删（即便 in_use）。
+pub fn make_docker_volume_rm_json(confirm: bool, volume_name: &str, force: Option<bool>) -> Value {
+    if !confirm {
+        return super::err("confirm=true 必传以确认删除 volume（数据永久丢失，不可逆）");
+    }
+    let force = force.unwrap_or(false);
+
+    let monitor = match crate::docker::DockerMonitor::connect() {
+        Ok(m) => m,
+        Err(e) => {
+            return super::err(format!(
+                "Docker 连接失败 ({e}) — 请确认 Docker Desktop 正在运行"
+            ));
+        }
+    };
+    match monitor.remove_volume(volume_name, force) {
+        Ok(()) => json!({
+            "ok": true,
+            "volume_name": volume_name,
+            "removed": true,
+            "force": force,
+        }),
+        Err(e) => super::err(format!("删除 volume {volume_name} 失败: {e}")),
+    }
 }

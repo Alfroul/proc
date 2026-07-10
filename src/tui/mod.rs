@@ -427,7 +427,9 @@ fn format_duration(secs: u64) -> String {
     format!("{:02}:{:02}", m, s)
 }
 
-fn default_vt_recording_path() -> std::path::PathBuf {
+/// v0.17 stage 6：headless record 路径（src/cli/record.rs::run_record_headless）
+/// 复用此 helper 选择默认录屏文件路径（`~/.config/proc/recordings/recording_<unix>.prec`）。
+pub(crate) fn default_vt_recording_path() -> std::path::PathBuf {
     let dir = crate::dirs_config_dir().join("recordings");
     std::fs::create_dir_all(&dir).ok();
     let ts = std::time::SystemTime::now()

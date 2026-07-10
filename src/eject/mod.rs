@@ -10,6 +10,8 @@ pub mod cache;
 pub mod device;
 #[cfg(target_os = "windows")]
 pub mod locks;
+#[cfg(target_os = "windows")]
+pub mod shell_eject;
 
 use crate::error::{ProcError, Result};
 
@@ -131,6 +133,21 @@ mod windows_impl {
         Ok((killed, skipped, errors))
     }
 
+    /// v0.17 stage 6：物理弹出设备（PowerShell Shell.Application COM）。
+    ///
+    /// 详见 [`super::shell_eject::eject_device`]（实装 + 阻塞行为 + 失败模式）。
+    /// 与 [`super::cache::flush_write_cache`] 同款 PowerShell reduced-privileges
+    /// spawn 路径，避免 unsafe windows-sys + IOCTL_STORAGE_EJECT_MEDIA 复杂句柄管理。
+    pub fn eject_device(drive_letter: char) -> Result<()> {
+        super::shell_eject::eject_device(drive_letter)
+    }
+
+    /// v0.17 stage 6：re-export `flush_write_cache` 让 `crate::eject::flush_write_cache`
+    /// 路径可用（`proc_usb_release` tool 用）。实装见 [`super::cache::flush_write_cache`]。
+    pub fn flush_write_cache(drive_letter: char) -> Result<()> {
+        super::cache::flush_write_cache(drive_letter)
+    }
+
     /// CLI: 列出所有可移除设备
     pub fn cli_list_devices() -> Result<()> {
         let devices = scan_all_devices()?;
@@ -245,8 +262,8 @@ mod windows_impl {
 
 #[cfg(target_os = "windows")]
 pub use windows_impl::{
-    cli_check_drive, cli_list_devices, kill_safe_processes, scan_all_devices, scan_device_locks,
-    scan_device_locks_with_processes,
+    cli_check_drive, cli_list_devices, eject_device, flush_write_cache, kill_safe_processes,
+    scan_all_devices, scan_device_locks, scan_device_locks_with_processes,
 };
 
 fn parse_drive_letter(drive_str: &str) -> Result<char> {

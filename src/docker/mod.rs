@@ -265,6 +265,26 @@ impl DockerMonitor {
     pub fn remove_volume(&self, name: &str, force: bool) -> Result<()> {
         volumes::remove_volume(&self.runtime, &self.docker, name, force)
     }
+
+    /// v0.17 stage 6 — 删除容器（proc_docker_rm tool 用）。
+    ///
+    /// 与 [`Self::remove_image`] / [`Self::remove_volume`] 同款 `block_on` 模式。
+    /// `force=true` 强制删（即便容器在 running 状态，先 kill 再 rm）；
+    /// `volumes=true` 同时删除关联的匿名 volume（bollard 字段 `v`）。
+    pub fn remove_container(&self, id: &str, force: bool, volumes: bool) -> Result<()> {
+        use bollard::container::RemoveContainerOptions;
+
+        let options = RemoveContainerOptions {
+            force,
+            v: volumes,
+            link: false,
+        };
+
+        self.runtime
+            .block_on(async { self.docker.remove_container(id, Some(options)).await })
+            .map_err(|e| ProcError::docker_with(format!("删除容器 {id} 失败"), e))?;
+        Ok(())
+    }
 }
 
 fn format_ports(ports: &Option<Vec<bollard::models::Port>>) -> String {

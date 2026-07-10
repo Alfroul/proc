@@ -954,28 +954,50 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_record_start",
-        description = "Start a recording subprocess (headless, no TUI). Args: confirm (must be true to acknowledge recording captures screen content including DNS names / process cmd), file_path (output .prec file path), duration_secs (optional, auto-stop after N seconds). Returns { ok, file_path, started_at, expected_duration_secs }. confirm=false → ok=false + error. Stage 6 business logic: spawn `proc record --no-tui --output <path>` subprocess, handler holds record_handle across tool calls (ADR-0029)."
+        description = "Start a recording subprocess (headless, no TUI). Args: confirm (must be true to acknowledge recording captures screen content including DNS names / process cmd), file_path (output .prec file path), duration_secs (optional, auto-stop after N seconds). Returns { ok, file_path, started_at, expected_duration_secs, pid }. confirm=false → ok=false + error. Stage 6 business logic: spawn `proc record --no-tui --output <path>` subprocess, handler holds record_handle across tool calls (ADR-0029)."
     )]
     fn proc_record_start(
         &self,
         Parameters(args): Parameters<RecordStartArgs>,
     ) -> Result<CallToolResult, McpError> {
-        ok_result(record::make_record_start_json(
-            args.confirm,
-            &args.file_path,
-            args.duration_secs,
-        ))
+        // v0.17 stage 6：传 &self.record_handle 让 helper 跨 tool call 保活 child。
+        // no-default-features build 无此字段，走 stub 路径返「未实装」错误。
+        #[cfg(feature = "mcp-persistent-state")]
+        {
+            ok_result(record::make_record_start_json(
+                args.confirm,
+                &args.file_path,
+                args.duration_secs,
+                &self.record_handle,
+            ))
+        }
+        #[cfg(not(feature = "mcp-persistent-state"))]
+        {
+            let _ = (args.confirm, args.file_path, args.duration_secs);
+            ok_result(record::make_record_start_disabled_json())
+        }
     }
 
     #[tool(
         name = "proc_record_stop",
-        description = "Stop a recording subprocess and wait for .prec file flush. Args: file_path (must match proc_record_start file_path). Returns { ok, file_path, size_bytes, duration_secs, frame_count }. Stage 6 business logic: kill child + wait flush + read footer metadata (ADR-0029)."
+        description = "Stop a recording subprocess and wait for .prec file flush. Args: file_path (must match proc_record_start file_path). Returns { ok, file_path, size_bytes, duration_secs, frame_count, killed, exit_code? }. Stage 6 business logic: kill child + wait flush + read footer metadata (ADR-0029)."
     )]
     fn proc_record_stop(
         &self,
         Parameters(args): Parameters<RecordStopArgs>,
     ) -> Result<CallToolResult, McpError> {
-        ok_result(record::make_record_stop_json(&args.file_path))
+        #[cfg(feature = "mcp-persistent-state")]
+        {
+            ok_result(record::make_record_stop_json(
+                &args.file_path,
+                &self.record_handle,
+            ))
+        }
+        #[cfg(not(feature = "mcp-persistent-state"))]
+        {
+            let _ = args.file_path;
+            ok_result(record::make_record_stop_disabled_json())
+        }
     }
 
     #[tool(

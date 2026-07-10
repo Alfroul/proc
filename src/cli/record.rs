@@ -2,25 +2,27 @@
 //!
 //! v0.14 stage 1：UiFrame 录制升级到 v3（按需加载 + footer + v1/v2 sidecar）。
 //! `proc replay recording.prec --info` 不开 TUI 输出 footer 元数据。
+//!
+//! v0.17 stage 6：`--no-tui` flag 让 `proc record` 走 headless 路径（与 v0.6 落地的
+//! `R` 键 TUI 路径并行），用 ratatui `TestBackend` 在内存中渲染（不 attach 实际
+//! terminal），让 MCP `proc_record_start` 能 spawn `proc record --no-tui` 子进程
+//! 在 stdio 无 TTY 环境下录屏（ADR-0029）。
 
 use std::path::Path;
 
 use colored::Colorize;
 
 use crate::app;
-use crate::record::vt100::{VtPlayer, is_vt100_file};
+use crate::record::vt100::{VtPlayer, VtRecorder, is_vt100_file};
 use crate::tui;
 
-pub fn run_record(_output: &Option<std::path::PathBuf>, no_tui: bool) {
-    // v0.17 stage 1 Spike：--no-tui flag 已注册但 headless 路径尚未落地。
-    // stage 6 Slice 实装 spawn 子进程 + recorder + bookmark + anomaly detection
-    // 复用 v0.6 落地的 R 键 TUI 路径业务逻辑（绕过 TUI attach）。
+pub fn run_record(output: &Option<std::path::PathBuf>, no_tui: bool) {
     if no_tui {
-        eprintln!(
-            "{} v0.17-stage-6 未实装：--no-tui flag 已注册但 headless 路径尚未落地",
-            "错误:".red()
-        );
-        std::process::exit(1);
+        if let Err(e) = run_record_headless(output) {
+            eprintln!("{} {}", "错误:".red(), e);
+            std::process::exit(1);
+        }
+        return;
     }
 
     let mut app = match app::App::new() {
@@ -46,6 +48,80 @@ pub fn run_record(_output: &Option<std::path::PathBuf>, no_tui: bool) {
     if let Err(e) = result {
         eprintln!("{} {}", "错误:".red(), e);
     }
+}
+
+/// v0.17 stage 6：`proc record --no-tui` headless 路径（ADR-0029）。
+///
+/// 与 `tui::run_app` 业务逻辑等价（App + VtRecorder + 5 FPS tick + 干净退出 flush），
+/// 但用 ratatui `TestBackend` 在内存中渲染（不 attach 实际 terminal），让 MCP
+/// `proc_record_start` 能 spawn `proc record --no-tui` 子进程在 stdio 无 TTY
+/// 环境下录屏。
+///
+/// 流程：
+/// 1. shutdown::init() — Ctrl+C / SIGTERM handler（让 proc_record_stop kill child
+///    后子进程能优雅退出 + VtRecorder::stop flush 写盘 + flush_recording_bookmarks）
+/// 2. App::new() + 启用 recording_wanted + VtRecorder::start
+/// 3. TestBackend + Terminal（不依赖 stdout / TTY）
+/// 4. 5 FPS tick 循环（与 VtRecorder::MIN_CAPTURE_MS = 200ms 对齐）：
+///    - shutdown::requested() 真 → break
+///    - app.tick() → 刷新进程 / 系统 / docker 状态
+///    - terminal.draw(|f| layout::draw(f, app)) → 渲染到 TestBackend buffer
+///    - vt_recorder.try_capture(buffer, area) → 序列化 VtFrame + 写盘
+///    - app.set_recording_frame_count / set_recording_elapsed 更新 sidebar 状态
+/// 5. vt_recorder.stop() + app.flush_recording_bookmarks() 干净退出
+///
+/// 录屏文件路径：`output` 参数优先；None 走 `default_vt_recording_path()`（与
+/// TUI 路径同款默认 `~/.config/proc/recordings/recording_<unix>.prec`）。
+fn run_record_headless(output: &Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use crate::tui::layout;
+
+    // 1. Ctrl+C handler（让 proc_record_stop kill 子进程后能触发干净退出）
+    crate::shutdown::init();
+
+    // 2. App + VtRecorder
+    let mut app = app::App::new()?;
+    app.set_recording_wanted(true);
+
+    let path = output
+        .clone()
+        .unwrap_or_else(crate::tui::default_vt_recording_path);
+
+    // headless 模式默认 120x40（与 mcp-inspector 默认终端尺寸接近，replay 视觉合理）
+    let (width, height) = (120u16, 40u16);
+    let mut vt_recorder = VtRecorder::start(path, width, height)?;
+    app.set_recording_path(vt_recorder.path().clone());
+
+    // 3. TestBackend（不依赖 stdout / TTY）
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend)?;
+
+    // 4. 5 FPS tick 循环
+    let frame_time = std::time::Duration::from_millis(200);
+
+    while !crate::shutdown::requested() {
+        let start = std::time::Instant::now();
+
+        app.tick();
+
+        let completed = terminal.draw(|f| layout::draw(f, &app))?;
+        vt_recorder.try_capture(completed.buffer, completed.area);
+
+        app.set_recording_frame_count(vt_recorder.frame_count());
+        app.set_recording_elapsed(vt_recorder.elapsed_secs());
+
+        let elapsed = start.elapsed();
+        if let Some(remain) = frame_time.checked_sub(elapsed) {
+            std::thread::sleep(remain);
+        }
+    }
+
+    // 5. 干净退出（与 tui::run_app 末段同款 flush 流程）
+    vt_recorder.stop().ok();
+    app.flush_recording_bookmarks();
+    Ok(())
 }
 
 pub fn run_replay(file: &Path, info: bool) {

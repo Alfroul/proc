@@ -706,3 +706,454 @@ fn test_sse_transport_config_new_sets_port() {
     assert_eq!(config.port, 9123);
     assert_eq!(config.bind_addr, "0.0.0.0");
 }
+
+// ===========================================================================
+// v0.17 stage 6：record 暴露 + USB release + docker-rm 写操作（5 tool 业务逻辑）
+//
+// 测试策略（与 v0.16 cycle stage 3 同款）：
+// - confirm=false gate：5 个 tool 都返 ok=false + error（schema 契约核心）
+// - dry_run 预演路径：proc_usb_release dry_run=true 返 flushed=false / ejected=false
+// - drive normalize：proc_usb_release 接受 "E" / "E:" / "E:\\" 多种格式 → "E:"
+// - record_start/stop lifecycle：handler 持 record_handle 跨 tool call 保活
+// - docker_rm/image_rm/volume_rm error path：Docker 未运行时返 ok=false +
+//   error（不真正测试 docker engine，避免测试依赖外部服务）
+// - eject_device 跨平台 cfg-gate：Windows 路径用 PowerShell COM，非 Windows
+//   path 跳过 + warning
+// ===========================================================================
+
+#[test]
+fn test_proc_record_start_confirm_false_returns_error() {
+    use proc::mcp::handler::record::make_record_start_json;
+    use std::sync::{Arc, Mutex};
+
+    let handle: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
+    let out = make_record_start_json(false, "/tmp/x.prec", None, &handle);
+    let obj = out.as_object().expect("object");
+    assert_eq!(
+        obj.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "confirm=false → ok=false"
+    );
+    let err = obj
+        .get("error")
+        .and_then(|v| v.as_str())
+        .expect("error string");
+    assert!(
+        err.contains("confirm=true 必传"),
+        "error should explain confirm required, got: {err}"
+    );
+    assert!(
+        handle.lock().unwrap().is_none(),
+        "confirm=false path must NOT spawn child"
+    );
+}
+
+#[test]
+fn test_proc_record_start_no_state_when_handle_occupied() {
+    // agent 重复调 start：record_handle 已有 child → 返 ok=false + error
+    use proc::mcp::handler::record::make_record_start_json;
+    use std::sync::{Arc, Mutex};
+
+    // 用一个不会真正 spawn 的 dummy Child 占位 — 这里改用真正 spawn 一个 sleep
+    // 让 child 不会立即退出，验证「已占用」分支
+    let dummy = std::process::Command::new("cmd")
+        .args(["/c", "timeout", "/t", "300"])
+        .spawn()
+        .expect("spawn dummy");
+
+    let handle: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(Some(dummy)));
+    let out = make_record_start_json(true, "/tmp/x.prec", None, &handle);
+    let obj = out.as_object().expect("object");
+    assert_eq!(
+        obj.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "已占用 handle → ok=false"
+    );
+    let err = obj
+        .get("error")
+        .and_then(|v| v.as_str())
+        .expect("error string");
+    assert!(
+        err.contains("录屏已在进行"),
+        "error should mention recording in progress, got: {err}"
+    );
+
+    // 清理：kill dummy 让 windows 不留僵尸进程
+    if let Some(mut c) = handle.lock().unwrap().take() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+}
+
+#[test]
+fn test_proc_record_stop_no_active_recording_returns_error() {
+    use proc::mcp::handler::record::make_record_stop_json;
+    use std::sync::{Arc, Mutex};
+
+    let handle: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
+    let out = make_record_stop_json("/tmp/x.prec", &handle);
+    let obj = out.as_object().expect("object");
+    assert_eq!(
+        obj.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "no active recording → ok=false"
+    );
+    assert!(
+        obj.get("error")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.contains("无录屏进行中")),
+        "error should mention no active recording"
+    );
+}
+
+#[test]
+fn test_proc_usb_release_confirm_false_returns_error() {
+    use proc::mcp::handler::record::make_usb_release_json;
+
+    let out = make_usb_release_json(false, "E", &[1234], None);
+    let obj = out.as_object().expect("object");
+    assert_eq!(
+        obj.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "confirm=false → ok=false"
+    );
+    assert!(
+        obj.get("error")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.contains("confirm=true 必传")),
+        "error should require confirm"
+    );
+}
+
+#[test]
+fn test_proc_usb_release_dry_run_preview_path() {
+    use proc::mcp::handler::record::make_usb_release_json;
+
+    let out = make_usb_release_json(true, "E:", &[123, 456], Some(true));
+    let obj = out.as_object().expect("object");
+    assert_eq!(
+        obj.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "dry_run path → ok=true"
+    );
+    assert_eq!(
+        obj.get("dry_run").and_then(|v| v.as_bool()),
+        Some(true),
+        "dry_run echoed"
+    );
+    assert_eq!(
+        obj.get("action").and_then(|v| v.as_str()),
+        Some("release"),
+        "action field"
+    );
+    assert_eq!(
+        obj.get("drive").and_then(|v| v.as_str()),
+        Some("E:"),
+        "drive normalized to 'E:'"
+    );
+    assert_eq!(
+        obj.get("flushed").and_then(|v| v.as_bool()),
+        Some(false),
+        "dry_run path does not actually flush"
+    );
+    assert_eq!(
+        obj.get("ejected").and_then(|v| v.as_bool()),
+        Some(false),
+        "dry_run path does not actually eject"
+    );
+}
+
+#[test]
+fn test_proc_usb_release_drive_normalize_variants() {
+    // 接受 "E" / "E:" / "E:\\" / "e：" 等多种格式
+    use proc::mcp::handler::record::make_usb_release_json;
+
+    for input in ["E", "E:", "E:\\", "e"] {
+        let out = make_usb_release_json(true, input, &[], Some(true));
+        let obj = out.as_object().expect("object");
+        assert_eq!(
+            obj.get("drive").and_then(|v| v.as_str()),
+            Some("E:"),
+            "input '{input}' should normalize to 'E:'"
+        );
+    }
+}
+
+#[test]
+fn test_proc_usb_release_invalid_drive_returns_error() {
+    use proc::mcp::handler::record::make_usb_release_json;
+
+    let out = make_usb_release_json(true, ":", &[], Some(true));
+    let obj = out.as_object().expect("object");
+    assert_eq!(
+        obj.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "invalid drive → ok=false"
+    );
+    assert!(
+        obj.get("error")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.contains("无效的驱动器号")),
+        "error should mention invalid drive"
+    );
+}
+
+#[test]
+fn test_proc_docker_rm_confirm_false_returns_error() {
+    use proc::mcp::handler::record::make_docker_rm_json;
+
+    let out = make_docker_rm_json(false, "abc123", None, None);
+    let obj = out.as_object().expect("object");
+    assert_eq!(
+        obj.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "confirm=false → ok=false"
+    );
+    assert!(
+        obj.get("error")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.contains("confirm=true 必传")),
+        "error should require confirm"
+    );
+}
+
+#[test]
+fn test_proc_docker_rm_docker_not_running_returns_error() {
+    // Docker 未运行 → connect 失败 → ok=false（不真正删，避免破坏性测试）
+    // 此测试仅在 Docker 不可用时验证 error 路径；Docker 可用时 skip 检查
+    use proc::mcp::handler::record::make_docker_rm_json;
+
+    let out = make_docker_rm_json(true, "fake_id_does_not_exist_xyz", None, None);
+    let obj = out.as_object().expect("object");
+    if obj.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        // Docker 不可用 → ok=false + error 提示 Docker Desktop
+        let err = obj
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("error string");
+        assert!(
+            err.contains("Docker") || err.contains("容器"),
+            "error should mention Docker or container, got: {err}"
+        );
+    }
+    // Docker 可用时跳过断言（不在 CI 测试中真删容器）
+}
+
+#[test]
+fn test_proc_docker_image_rm_confirm_false_returns_error() {
+    use proc::mcp::handler::record::make_docker_image_rm_json;
+
+    let out = make_docker_image_rm_json(false, "img-id", None, None);
+    let obj = out.as_object().expect("object");
+    assert_eq!(
+        obj.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "confirm=false → ok=false"
+    );
+}
+
+#[test]
+fn test_proc_docker_volume_rm_confirm_false_returns_error() {
+    use proc::mcp::handler::record::make_docker_volume_rm_json;
+
+    let out = make_docker_volume_rm_json(false, "vol-name", None);
+    let obj = out.as_object().expect("object");
+    assert_eq!(
+        obj.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "confirm=false → ok=false"
+    );
+}
+
+#[test]
+fn test_proc_docker_image_rm_docker_not_running_returns_error() {
+    use proc::mcp::handler::record::make_docker_image_rm_json;
+
+    let out = make_docker_image_rm_json(true, "fake_image_id", None, None);
+    let obj = out.as_object().expect("object");
+    if obj.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        let err = obj
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("error string");
+        assert!(
+            err.contains("Docker") || err.contains("镜像"),
+            "error should mention Docker or image, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn test_proc_docker_volume_rm_docker_not_running_returns_error() {
+    use proc::mcp::handler::record::make_docker_volume_rm_json;
+
+    let out = make_docker_volume_rm_json(true, "fake_vol_name", None);
+    let obj = out.as_object().expect("object");
+    if obj.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        let err = obj
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("error string");
+        assert!(
+            err.contains("Docker") || err.contains("volume"),
+            "error should mention Docker or volume, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn test_record_start_disabled_json_no_state_path() {
+    // no-default-features build 时调用方走 disabled stub
+    use proc::mcp::handler::record::make_record_start_disabled_json;
+    let out = make_record_start_disabled_json();
+    let obj = out.as_object().expect("object");
+    assert_eq!(
+        obj.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "disabled path → ok=false"
+    );
+    assert!(
+        obj.get("error")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.contains("mcp-persistent-state")),
+        "error should mention mcp-persistent-state feature"
+    );
+}
+
+#[test]
+fn test_record_stop_disabled_json_no_state_path() {
+    use proc::mcp::handler::record::make_record_stop_disabled_json;
+    let out = make_record_stop_disabled_json();
+    let obj = out.as_object().expect("object");
+    assert_eq!(
+        obj.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "disabled path → ok=false"
+    );
+    assert!(
+        obj.get("error")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.contains("mcp-persistent-state")),
+        "error should mention mcp-persistent-state feature"
+    );
+}
+
+#[test]
+fn test_record_handle_field_present_in_handler() {
+    // ProcMcpHandler 字段 record_handle 存在（cfg-gate 到 mcp-persistent-state）
+    let _h = ProcMcpHandler::default();
+    #[cfg(feature = "mcp-persistent-state")]
+    {
+        let guard = _h
+            .record_handle
+            .lock()
+            .expect("record_handle mutex not poisoned");
+        assert!(
+            guard.is_none(),
+            "Default handler record_handle should be None"
+        );
+    }
+}
+
+#[test]
+fn test_record_handle_arc_shared_across_clones() {
+    // rmcp 内部每次 tool call clone handler，Arc::clone 应共享同一 record_handle 实例
+    let h1 = ProcMcpHandler::default();
+    let h2 = h1.clone();
+    #[cfg(feature = "mcp-persistent-state")]
+    {
+        assert!(
+            std::sync::Arc::ptr_eq(&h1.record_handle, &h2.record_handle),
+            "Cloned handlers must share record_handle Arc"
+        );
+    }
+    let _ = (h1, h2);
+}
+
+#[test]
+fn test_record_handle_take_and_set_via_lock() {
+    // 模拟 make_record_start_json / make_record_stop_json 内部的 take + set 模式
+    use std::sync::{Arc, Mutex};
+    let handle: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+    {
+        let mut g = handle.lock().unwrap();
+        assert!(g.is_none(), "default state None");
+        *g = Some(42);
+    }
+    {
+        let mut g = handle.lock().unwrap();
+        let taken = g.take();
+        assert_eq!(taken, Some(42), "take returns what was set");
+        assert!(g.is_none(), "after take, value is None");
+    }
+}
+
+#[test]
+fn test_no_tui_flag_in_cli_def_record_command() {
+    // 静态断言 CLI 定义含 --no-tui flag（避免误删）
+    let source = std::fs::read_to_string("src/cli/def.rs").expect("def.rs source readable");
+    assert!(
+        source.contains("no-tui") && source.contains("no_tui"),
+        "Record command must define --no-tui flag"
+    );
+}
+
+#[test]
+fn test_run_record_headless_function_exists() {
+    // 静态断言 src/cli/record.rs 含 run_record_headless 函数
+    let source = std::fs::read_to_string("src/cli/record.rs").expect("record.rs source readable");
+    assert!(
+        source.contains("fn run_record_headless"),
+        "run_record_headless must exist for --no-tui path"
+    );
+    assert!(
+        source.contains("TestBackend"),
+        "headless path must use TestBackend (ratatui memory backend)"
+    );
+    assert!(
+        source.contains("shutdown::requested"),
+        "headless path must check shutdown signal for clean exit"
+    );
+}
+
+#[test]
+fn test_eject_device_module_present() {
+    // 静态断言 eject_device 实装（Windows 路径，shell_eject.rs 文件名避免 module_inception lint）
+    let source = std::fs::read_to_string("src/eject/shell_eject.rs")
+        .expect("shell_eject.rs source readable");
+    assert!(
+        source.contains("fn eject_device"),
+        "eject_device function must exist"
+    );
+    assert!(
+        source.contains("InvokeVerb"),
+        "eject_device must use Shell.Application InvokeVerb('Eject')"
+    );
+}
+
+#[test]
+fn test_docker_monitor_remove_container_method_exists() {
+    // 静态断言 DockerMonitor 含 remove_container 方法
+    let source = std::fs::read_to_string("src/docker/mod.rs").expect("docker/mod.rs readable");
+    assert!(
+        source.contains("pub fn remove_container"),
+        "DockerMonitor must expose remove_container for proc_docker_rm tool"
+    );
+    assert!(
+        source.contains("RemoveContainerOptions"),
+        "remove_container must use bollard RemoveContainerOptions"
+    );
+}
+
+#[test]
+fn test_record_start_stop_signatures_carry_record_handle() {
+    // 静态断言 make_record_start_json / make_record_stop_json 接受 record_handle 参数
+    let source =
+        std::fs::read_to_string("src/mcp/handler/record.rs").expect("record.rs source readable");
+    assert!(
+        source.contains(
+            "record_handle: &std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>"
+        ),
+        "record_start/stop helpers must accept record_handle Arc<Mutex<Option<Child>>> param"
+    );
+}
