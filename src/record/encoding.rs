@@ -28,34 +28,41 @@
 //! 与 `bincode::serialize` / `bincode::deserialize` 默认配置字节级等价（bincode 1.x
 //! 默认就是 fixint + little-endian + no_limit）。既有 `.prec` 文件零迁移。
 //!
-//! ## 演进路径
+//! ## 演进路径（v0.18 cycle 项 2 落地）
 //!
-//! v0.18+ cycle 评估切换 varint 时（如果远程 agent / Web dashboard 场景出现）：
+//! **v0.18 stage 1 Spike**：加 `version >= 4` 分支 stub（**暂仍走 fixint**），
+//! 让 stage 2 切 varint 时只需替换 stage 1 Spike 标记的分支。当前实现：
 //!
 //! ```ignore
 //! pub fn options_for_version(version: u16) -> impl Options {
 //!     let base = bincode::DefaultOptions::new().with_no_limit().with_little_endian();
 //!     if version >= 4 {
-//!         base.with_varint_encoding()
+//!         // v0.18 stage 1 Spike stub：暂仍走 fixint，stage 2 切到 varint
+//!         // base.with_varint_encoding()
+//!         base.with_fixint_encoding()
 //!     } else {
 //!         base.with_fixint_encoding()
 //!     }
 //! }
 //! ```
 //!
-//! 同时 bump `RECORDING_VERSION` 3 → 4，writer 写新文件用 varint，reader 按
-//! `header.version` 选 config（旧 v1/v2/v3 走 fixint 兼容层）。
+//! **v0.18 stage 2 实装**：bump `RECORDING_VERSION` 3 → 4 + writer 写新文件用
+//! varint（替换 stage 1 Spike 标记的分支为 `base.with_varint_encoding()`）+
+//! reader 按 `header.version` 选 config（旧 v1/v2/v3 走 fixint 兼容层，新 v4+
+//! 走 varint）。详见 ADR-0027 § Migration path + REVIEW-v0.17 §1 Findings P2-A1。
 
 use bincode::Options;
 
 /// 返回指定文件版本对应的 bincode 配置。
 ///
-/// 当前所有版本（v1 / v2 / v3）返 fixint 配置（与 `bincode::serialize` 默认等价）。
-/// v0.18+ cycle 切 varint 时只需改本函数 + bump `RECORDING_VERSION`。
+/// 当前所有版本（v1 / v2 / v3 / v4+ stub）返 fixint 配置（与 `bincode::serialize`
+/// 默认等价）。**v0.18 stage 1 Spike 加 `version >= 4` 分支 stub 暂仍走 fixint**，
+/// stage 2 实装时切换为 varint（bump `RECORDING_VERSION` 3 → 4 + writer 写新文件
+/// varint + reader 按 `header.version` 选 config）。
 ///
 /// # Parameters
 ///
-/// - `version`：`RecordingHeader.version` 字段值（v1 / v2 / v3）
+/// - `version`：`RecordingHeader.version` 字段值（v1 / v2 / v3 / v4+ stub）
 ///
 /// # Returns
 ///
@@ -69,11 +76,19 @@ use bincode::Options;
 /// 显式 `.with_fixint_encoding()` 确保 v1/v2/v3 文件用 fixint 编码，与既有
 /// `.prec` 文件字节级等价。
 #[must_use]
-pub fn options_for_version(_version: u16) -> impl Options {
-    bincode::DefaultOptions::new()
+pub fn options_for_version(version: u16) -> impl Options {
+    let base = bincode::DefaultOptions::new()
         .with_no_limit()
-        .with_little_endian()
-        .with_fixint_encoding()
+        .with_little_endian();
+    if version >= 4 {
+        // v0.18 stage 1 Spike stub：version >= 4 分支暂仍走 fixint，stage 2 切换为
+        // `base.with_varint_encoding()` 让新文件 size 更小（30 min × 30 FPS × 1000
+        // 进程录屏 ~10-15% size 下降）。详见 REVIEW-v0.17 §1 Findings P2-A1 +
+        // 本文件 doc comment §演进路径。
+        base.with_fixint_encoding()
+    } else {
+        base.with_fixint_encoding()
+    }
 }
 
 #[cfg(test)]
@@ -135,5 +150,45 @@ mod tests {
             let bytes_default = bincode::serialize(&header).expect("default serialize");
             assert_eq!(bytes_via_opts, bytes_default, "v{v} bytes mismatch");
         }
+    }
+
+    #[test]
+    fn options_for_version_v4_stub_still_uses_fixint() {
+        // v0.18 stage 1 Spike：version >= 4 分支暂仍走 fixint（与 bincode::serialize
+        // 默认字节级等价）。stage 2 切换为 varint 后本测试改为对比 varint 字节流。
+        let header = RecordingHeader {
+            magic: *RECORDING_MAGIC,
+            version: 4, // v0.18 stage 1 Spike 占位版本号（RECORDING_VERSION 仍为 3）
+            start_time: 1_700_000_000,
+            hostname: "v4-stub".to_string(),
+        };
+        let bytes_via_opts = options_for_version(4)
+            .serialize(&header)
+            .expect("serialize via opts");
+        let bytes_default = bincode::serialize(&header).expect("default serialize");
+        assert_eq!(
+            bytes_via_opts, bytes_default,
+            "v4 stage 1 Spike stub 应与 fixint 默认字节级等价"
+        );
+    }
+
+    #[test]
+    fn options_for_version_v4_stub_round_trip() {
+        // v0.18 stage 1 Spike：version 4 stub round-trip 验证（stage 2 切 varint
+        // 后此测试需保留——varint round-trip 也是合法的，只是字节流不同）。
+        let header = RecordingHeader {
+            magic: *RECORDING_MAGIC,
+            version: 4,
+            start_time: 1_700_000_000,
+            hostname: "v4-stub-round-trip".to_string(),
+        };
+        let bytes = options_for_version(4)
+            .serialize(&header)
+            .expect("serialize");
+        let back: RecordingHeader = options_for_version(4)
+            .deserialize(&bytes)
+            .expect("deserialize");
+        assert_eq!(back.version, header.version);
+        assert_eq!(back.hostname, header.hostname);
     }
 }

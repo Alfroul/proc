@@ -8,14 +8,20 @@
 //! - [`transport`]：SSE transport 容器（`proc mcp serve --transport sse --port 8080`）
 //! - [`resources`]：rmcp 0.11 Resource subscribe 路由（`proc://metrics/system` 等 URI）
 //!
+//! **v0.18 cycle 项 3 subscribe-push**（stage 1 Spike 落地骨架，stage 2 Slice 填业务）：
+//! - [`subscribe_worker`]：subscribe-push worker lifecycle 容器
+//!   （stage 1 Spike 仅声明 struct + 注册表 stub；stage 2 实装三步 lifecycle）
+//!
 //! - 入口：[`run_mcp_serve`]（main.rs 调）
 //! - 实现：[`handler::ProcMcpHandler`]（`#[tool_router(server_handler)]` 自动生成 ServerHandler impl）
 
 pub mod handler;
 pub mod resources;
+pub mod subscribe_worker;
 pub mod transport;
 
 pub use resources::{PROC_RESOURCE_URIS, ResourceRoute};
+pub use subscribe_worker::{SubscribePushWorker, SubscriberId};
 pub use transport::{SseTransportConfig, serve_sse};
 
 use std::io::{self, IsTerminal};

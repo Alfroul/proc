@@ -14,6 +14,15 @@
 //! subscribe-push（client 订阅后 server 主动推）。但 stage 4 决策 5：subscribe
 //! 接受请求但不 push（与 SSE transport partial 落地配套），client 走 polling
 //! `resources/read` 拿数据。
+//!
+//! **v0.18 stage 1 Spike 扩**：trait 加 `subscribe` / `unsubscribe` 方法签名
+//! （stub 返 Err "v0.18-stage-2 未实装"，与 brainstorm 项 3 决策对齐）。stage 2
+//! 实装真正的 subscribe-push worker lifecycle（[`crate::mcp::subscribe_worker`]）：
+//! client subscribe → worker 持 Peer 句柄注册到 `subscribers` HashMap → 1s tick
+//! 调 `peer.notify_resource_updated` push 增量 → client 断开自动清理。详见
+//! ADR-0027 §关键设计点 5（v0.18 stage 1 Spike 调研结论：rmcp 0.11 `ServerHandler`
+//! trait 不暴露 `subscribe_resource` 方法，server 主动 push 走 `Peer::notify_resource_updated`
+//! notification 路径，自建 worker lifecycle 必要）。
 
 use serde_json::Value;
 
@@ -70,8 +79,14 @@ pub fn resource_description_for_uri(uri: &str) -> &'static str {
 ///
 /// 与既有 tool 互补——tool 是 request-response / Resource 是 subscribe-push
 /// （stage 4 实装 polling-push 配套，详见决策 5）。
+///
+/// **v0.18 stage 1 Spike 扩**：加 `subscribe` / `unsubscribe` 方法签名（stub 返
+/// Err "v0.18-stage-2 未实装"）。stage 2 实装真正的 subscribe-push worker
+/// lifecycle——subscribe 时把 client Peer 句柄注册到
+/// [`crate::mcp::subscribe_worker::SubscribePushWorker`] / 1s tick 调
+/// `peer.notify_resource_updated` push 增量 / unsubscribe 或 client 断开自动清理。
 pub trait ResourceRoute {
-    /// 路由资源 URI 到 JSON 响应。
+    /// 路由资源 URI 到 JSON 响应（polling-push 路径，client 走 `resources/read`）。
     ///
     /// 按 URI 分支返对应 JSON snapshot：
     /// - `proc://metrics/system` → drain `snapshot` 字段（fallback 现场 new）返
@@ -80,6 +95,32 @@ pub trait ResourceRoute {
     /// - `proc://docker/events` → docker events JSON（recent 50 events）
     /// - 其他 URI → Err 含 valid URI 列表
     fn route(&self, uri: &str) -> Result<Value, String>;
+
+    /// subscribe-push 路径注册（v0.18 stage 1 Spike stub）。
+    ///
+    /// client 调 `resources/subscribe` → 本方法把 client Peer 句柄注册到
+    /// [`crate::mcp::subscribe_worker::SubscribePushWorker`] → worker 1s tick
+    /// 调 `peer.notify_resource_updated` push 增量。
+    ///
+    /// **当前 stage 1 Spike 仅返 Err "v0.18-stage-2 未实装"**——stage 2 实装时
+    /// 替换为：worker 注册表 add + 返 Ok 含 SubscriberId 让 client 后续 unsubscribe。
+    /// 与 ADR-0027 §关键设计点 5 + brainstorm 决策 3 拍板对齐。
+    fn subscribe(&self, uri: &str, subscriber_id: u64) -> Result<(), String> {
+        // stage 1 Spike stub：保留签名让 stage 2 直接填充业务逻辑
+        let _ = (uri, subscriber_id);
+        Err("v0.18-stage-2 未实装：subscribe-push worker lifecycle 留 stage 2 Slice".to_string())
+    }
+
+    /// subscribe-push 路径注销（v0.18 stage 1 Spike stub）。
+    ///
+    /// client 调 `resources/unsubscribe` 或网络断开 → 本方法从 worker 注册表移除。
+    /// **当前 stage 1 Spike 仅返 Err "v0.18-stage-2 未实装"**——stage 2 实装时
+    /// 替换为：worker 注册表 remove + 返 Ok。
+    fn unsubscribe(&self, subscriber_id: u64) -> Result<(), String> {
+        // stage 1 Spike stub：保留签名让 stage 2 直接填充业务逻辑
+        let _ = subscriber_id;
+        Err("v0.18-stage-2 未实装：subscribe-push worker lifecycle 留 stage 2 Slice".to_string())
+    }
 }
 
 impl ResourceRoute for ProcMcpHandler {
@@ -128,4 +169,7 @@ impl ResourceRoute for ProcMcpHandler {
             )),
         }
     }
+
+    // subscribe / unsubscribe 用 trait 默认实现（stage 1 Spike stub），
+    // stage 2 实装时在 impl 块内 override 替换为业务逻辑。
 }

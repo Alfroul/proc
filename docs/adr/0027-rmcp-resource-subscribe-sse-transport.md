@@ -1,7 +1,7 @@
 # ADR-0027：rmcp 0.11 Resource subscribe + SSE transport 设计
 
-**Status**：Accepted
-**Date**：2026-07-07（v0.17.0 阶段 1 落地决策）
+**Status**：Accepted（**v0.17 stage 4 partial 落地 polling-push；v0.18 stage 2 补全 subscribe-push**，详见 §关键设计点 5 + Migration path）
+**Date**：2026-07-07（v0.17.0 阶段 1 落地决策）/ 2026-07-10 扩 §5 subscribe-push lifecycle（v0.18 stage 1 Spike 决策）
 **Related**：ADR-0009（v0.7 MCP server 设计）、ADR-0024（v0.15 handler 子 module 拆分）、ADR-0026（MCP handler 持久字段策略）、v0.15 TD-52 归档（sparkline 30s 历史不暴露）
 
 ## 背景（Context）
@@ -86,6 +86,43 @@ agent 视角：tool 适合「现在 cpu 多少」/ Resource 适合「cpu 飙升�
 
 `VecDeque<SystemSnapshot>` 长度上限 30（1s tick × 30s = 30 个 snapshot），与 brainstorm §主题 B + TD-52 同款决策。`proc_metrics_history` tool 的 `seconds` 参数上限 30（与 `system_history` 字段 30s cap 对齐）。
 
+### 5. subscribe-push worker lifecycle（v0.18 stage 2 落地，stage 1 Spike 完成 rmcp 0.11 API 调研）
+
+**stage 4 落地的是 polling-push**（client 走 `resources/read` 主动拉）——`ProcMcpHandler` impl `ResourceRoute::route(uri) -> Result<Value, String>` 返一次性 snapshot，client 每次调 `resources/read` 拉一次。这与本 ADR §1 描述「subscribe-push」语义有差距（REVIEW-v0.17 §2 Findings P2-B1）。
+
+**v0.18 stage 1 Spike 调研结论（context7 rmcp 0.11 docs 验证，2026-07-10）**：
+
+| 维度 | rmcp 0.11 原生 API | 结论 |
+|---|---|---|
+| server 端 capability 声明 | `ServerCapabilitiesBuilder::enable_resources_subscribe()` 让 server 声明支持 resources_subscribe | 复用，server 启动时调一次 |
+| client 端发起订阅 | `ServerSink::subscribe(SubscribeRequestParams)` / `unsubscribe(...)` — client 角色的方法 | 不暴露给 server handler |
+| server 端 subscribe hook | **`ServerHandler` trait 不暴露 `subscribe_resource` 方法**——client `resources/subscribe` 请求 SDK 内部自动 ACK，不传到 user handler | 自建 worker lifecycle 必要 |
+| server 主动 push | `Peer::notify_resource_updated(ResourceUpdatedNotificationParam)` — server 通过 Peer 句柄给 client 发 notification | 复用，worker 1s tick 调此 API |
+| client 接收 push | `ClientHandler::on_resource_updated(ResourceUpdatedNotificationParam, ...)` — client 角色的 handler | 自动接收，server 无需关心 |
+
+**关键结论**：rmcp 0.11 没有「server 持注册表 + 1s tick push」的原生 helper，需 proc 自建 worker lifecycle（brainstorm 决策 3 拍板）。
+
+**v0.18 stage 2 实装路径**（stage 1 Spike 设计，stage 2 实装）：
+
+```rust
+// src/mcp/subscribe_worker.rs（v0.18 stage 1 Spike 落地骨架，stage 2 实装业务逻辑）
+pub struct SubscribePushWorker {
+    /// 注册表：SubscriberId → Peer 句柄（client 连接时 add / 断开时 remove）
+    /// stage 2 实装时 Peer 句柄通过 RequestContext::extensions 拿到（具体 API stage 2 调研）
+    subscribers: Arc<Mutex<HashMap<SubscriberId, Peer<RoleServer>>>>,
+    /// 1s tick 通知 worker 遍历注册表 push（spawn 一个 tokio task）
+    shutdown_tx: Option<oneshot::Sender<()>>,
+}
+```
+
+**lifecycle 三步**：
+
+1. **subscribe**：client 调 `resources/subscribe`（rmcp SDK 自动 ACK）→ proc 通过自定义 hook（stage 2 调研具体路径，候选：`ServerHandler::read_resource` 时检测 `extensions` / `RequestContext` 中携带的订阅标记，或自定义 tool `proc_subscribe`）→ worker 持 `Peer` 句柄 + 记 `SubscriberId` 到注册表
+2. **push**：worker 1s tick 遍历注册表 → 对每个 subscriber 调 `peer.notify_resource_updated(ResourceUpdatedNotificationParam { uri })` → client 通过 `ClientHandler::on_resource_updated` 接收
+3. **unsubscribe / 断开**：client 主动 `resources/unsubscribe` 或网络断开 → worker 检测 `peer.notify_resource_updated(...)` 返 `Err(ServiceError)` → 从注册表移除（drop Sender 让 push task 退出，与 brainstorm 决策 3 描述对齐）
+
+**与 brainstorm 决策 3「自建 worker lifecycle」对齐**：rmcp 0.11 不提供原生 worker lifecycle helper，proc 自建「注册表 + 1s tick push + client 断开自动清理」三步管理。
+
 ## 备选方案（Alternatives）
 
 ### (a) 仅 tool，无 Resource subscribe
@@ -115,8 +152,10 @@ agent 视角：tool 适合「现在 cpu 多少」/ Resource 适合「cpu 飙升�
 ## Migration path
 
 - **v0.17 stage 1 Spike**（本 ADR 落地）：3 个骨架文件（resources.rs / transport.rs / observable.rs）+ stub helper
-- **v0.17 stage 4 Slice**：ResourceRoute trait impl + SSE transport 入口 + TD-52 sparkline worker + `proc_metrics_history` tool 业务逻辑填充
-- **v0.18+ cycle**：评估 WebSocket transport（如 rmcp 0.12+ 支持）/ 评估 Resource subscribe 推送频率可配置（如 5s / 10s tick 替代 1s tick）
+- **v0.17 stage 4 Slice**：ResourceRoute trait impl + SSE transport 入口 + TD-52 sparkline worker + `proc_metrics_history` tool 业务逻辑填充（**polling-push partial 落地**——client 走 `resources/read` 主动拉）
+- **v0.18 stage 1 Spike**：扩 §5 subscribe-push worker lifecycle + stage 1 调研 rmcp 0.11 API（已确认无原生 `ServerHandler::subscribe_resource`，自建 worker lifecycle 必要）+ `src/mcp/subscribe_worker.rs`（新）骨架 + `ResourceRoute` trait 加 `subscribe` / `unsubscribe` stub
+- **v0.18 stage 2 Slice**：subscribe-push worker lifecycle 业务逻辑填充（注册表 + 1s tick `peer.notify_resource_updated` push + client 断开自动清理）+ ADR-0027 Status 备注 「subscribe-push 已补全」
+- **v0.19+ cycle**：评估 WebSocket transport（如 rmcp 0.12+ 支持）/ 评估 Resource subscribe 推送频率可配置（如 5s / 10s tick 替代 1s tick）
 
 ## 相关 ADR / 文档
 

@@ -7,6 +7,11 @@
 //! `R` 键 TUI 路径并行），用 ratatui `TestBackend` 在内存中渲染（不 attach 实际
 //! terminal），让 MCP `proc_record_start` 能 spawn `proc record --no-tui` 子进程
 //! 在 stdio 无 TTY 环境下录屏（ADR-0029）。
+//!
+//! v0.18 stage 1 Spike：加 `--duration <secs>` flag stub（ADR-0029 §关键设计点 6
+//! 落地）。当前 stage 1 仅解析 flag 暂存不真正实装 timer thread，stage 2 实装
+//! `run_record_headless` 内 timer thread（`std::thread::spawn(move || { sleep N
+//! secs; shutdown::request(); })` + 主循环检 `shutdown::requested()` 退出）。
 
 use std::path::Path;
 
@@ -16,9 +21,9 @@ use crate::app;
 use crate::record::vt100::{VtPlayer, VtRecorder, is_vt100_file};
 use crate::tui;
 
-pub fn run_record(output: &Option<std::path::PathBuf>, no_tui: bool) {
+pub fn run_record(output: &Option<std::path::PathBuf>, no_tui: bool, duration: Option<u64>) {
     if no_tui {
-        if let Err(e) = run_record_headless(output) {
+        if let Err(e) = run_record_headless(output, duration) {
             eprintln!("{} {}", "错误:".red(), e);
             std::process::exit(1);
         }
@@ -72,7 +77,15 @@ pub fn run_record(output: &Option<std::path::PathBuf>, no_tui: bool) {
 ///
 /// 录屏文件路径：`output` 参数优先；None 走 `default_vt_recording_path()`（与
 /// TUI 路径同款默认 `~/.config/proc/recordings/recording_<unix>.prec`）。
-fn run_record_headless(output: &Option<std::path::PathBuf>) -> anyhow::Result<()> {
+///
+/// **v0.18 stage 1 Spike**：`duration: Option<u64>` 参数当前仅记录不真正 auto-stop
+/// （stage 2 实装 timer thread：spawn `std::thread::spawn(move || { sleep N secs;
+/// shutdown::request(); })` + 主循环检 `shutdown::requested()` 退出）。详见
+/// ADR-0029 §关键设计点 6 + brainstorm 决策 4 拍板。
+fn run_record_headless(
+    output: &Option<std::path::PathBuf>,
+    _duration: Option<u64>,
+) -> anyhow::Result<()> {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -80,6 +93,17 @@ fn run_record_headless(output: &Option<std::path::PathBuf>) -> anyhow::Result<()
 
     // 1. Ctrl+C handler（让 proc_record_stop kill 子进程后能触发干净退出）
     crate::shutdown::init();
+
+    // v0.18 stage 1 Spike：duration 参数当前仅记录不真正实装 timer thread。
+    // stage 2 实装时此处插入：
+    //   if let Some(secs) = _duration {
+    //       std::thread::spawn(move || {
+    //           std::thread::sleep(std::time::Duration::from_secs(secs));
+    //           crate::shutdown::request();
+    //       });
+    //   }
+    // 与 ADR-0029 §关键设计点 6 + brainstorm 决策 4 拍板对齐（子进程 timer 随
+    // child 退出自动终止，无 zombie timer）。
 
     // 2. App + VtRecorder
     let mut app = app::App::new()?;

@@ -70,7 +70,11 @@ pub fn run_subcommand(cmd: &Command) {
             json,
             filter,
         } => flows::run_flows(limit, *json, filter.as_deref()),
-        Command::Record { output, no_tui } => record::run_record(output, *no_tui),
+        Command::Record {
+            output,
+            no_tui,
+            duration,
+        } => record::run_record(output, *no_tui, *duration),
         Command::Replay { file, info } => record::run_replay(file, *info),
         Command::Export {
             format,

@@ -216,6 +216,15 @@ pub enum Command {
         /// 传 `--no-tui` 会返 "v0.17-stage-6 未实装" 错误。
         #[arg(long = "no-tui")]
         no_tui: bool,
+
+        /// v0.18 stage 1 Spike 落地：auto-stop 时长（秒）。
+        /// `proc_record_start` spawn 子进程时传 `--duration <secs>` flag，
+        /// 子进程内 timer thread（`run_record_headless`）sleep N secs 后调
+        /// `shutdown::request()` 触发干净退出。**当前 stage 1 Spike 仅解析
+        /// flag 暂存不真正实装 timer thread**（stage 2 实装，与 ADR-0029
+        /// §关键设计点 6 + brainstorm 决策 4 拍板对齐）。
+        #[arg(long = "duration")]
+        duration: Option<u64>,
     },
 
     /// 回放录制文件

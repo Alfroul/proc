@@ -1,7 +1,7 @@
 # ADR-0029：record 暴露 + 写操作 confirm 机制
 
-**Status**：Accepted
-**Date**：2026-07-07（v0.17.0 阶段 1 落地决策，brainstorm 决策 4 + 5 拍板）
+**Status**：Accepted（**v0.17 stage 6 partial 落地 duration_secs 仅记录参数；v0.18 stage 2 补全 auto-stop**，详见 §关键设计点 6 + Migration path）
+**Date**：2026-07-07（v0.17.0 阶段 1 落地决策，brainstorm 决策 4 + 5 拍板）/ 2026-07-10 扩 §6 auto-stop（v0.18 stage 1 Spike 决策）
 **Related**：ADR-0009（v0.7 MCP server 设计）、ADR-0025b（v0.16 cycle 决策不暴露 record）、ADR-0026（MCP handler 持久字段策略）、v0.6 落地的 pending_record_confirm TUI 路径、v0.7 proc_kill / v0.15 proc_monitor_add dry_run 契约
 
 ## 背景（Context）
@@ -77,6 +77,33 @@ v0.6 落地的 `pending_record_confirm` TUI 路径：用户按 `R` 弹确认（�
 
 stage 1 Spike 加 flag 声明 + stub 分支（返 "v0.17-stage-6 未实装" 错误）。stage 6 实装 headless 路径 ~50 行（让 record 走 `Recorder::submit_frame` 路径绕过 `tui::setup_terminal() + tui::run_app()`），与 v0.6 落地的 `R` 键 TUI 路径并行。
 
+### 6. record auto-stop 子进程 `--duration` flag（v0.18 stage 2 落地，stage 1 Spike 落地 flag stub）
+
+**v0.17 stage 6 落地的 `duration_secs` 参数仅记录不真正 auto-stop**——`make_record_start_json` 把 `duration_secs` 原样回显 `expected_duration_secs`，warning 字段透出「agent 须显式调 proc_record_stop」（`src/mcp/handler/record.rs:1135-1139`）。这与本 ADR §1 决策 1 「record 暴露方案 (a) spawn 子进程」描述「`duration_secs: Option<u64>`」可推断 auto-stop 应自动生效有差距（REVIEW-v0.17 §4 Findings P2-R2）。
+
+**v0.18 stage 1 Spike 落地**（flag 声明 + 解析 stub）：
+
+| 修改点 | 范围 | stage |
+|---|---|---|
+| `src/cli/def.rs` `Command::Record` 加 `duration: Option<u64>` 字段 | flag 声明 + clap 解析 | 1 Spike |
+| `src/cli/record.rs` `run_record` / `run_record_headless` 接受 duration 参数 | 参数传递（stub：暂存不真正实装 timer thread，stage 2 实装） | 1 Spike |
+| `src/mcp/handler/record.rs` `make_record_start_json` spawn 时传 `--duration <secs>` | spawn 路径加 flag（stub：stage 2 实装）+ 移除 warning 字段 | 2 Slice |
+
+**v0.18 stage 2 实装路径**（stage 1 Spike 设计，stage 2 实装）：
+
+1. **CLI 加 `--duration` flag**：`src/cli/def.rs` `Command::Record` 加 `duration: Option<u64>` 字段（已 stage 1 落地）
+2. **`run_record_headless` 内 timer thread**：spawn `std::thread::spawn(move || { sleep N secs; shutdown::request(); })` + 主循环检 `shutdown::requested()` 退出
+3. **MCP handler spawn 时传 flag**：`make_record_start_json` spawn 时加 `.arg("--duration").arg(secs.to_string())`（如 `duration_secs` Some）+ 移除 warning 字段
+
+**与 ADR-0029 决策 4「spawn 子进程复用 v0.6 业务逻辑 + 子进程崩溃隔离」对齐**：
+
+- 子进程 timer 随 child 退出自动终止，无 zombie timer（vs MCP handler timer 需手动 cancel）
+- MCP handler 不持 timer 状态（与 §关键设计点 2「MCP handler 不持 worker 状态」对齐）
+- 复用 v0.6 落地的 `shutdown::requested()` 干净退出路径（与 `--no-tui` headless 路径同款）
+- 子进程崩溃时 timer 也随之终止（vs MCP handler timer 需独立检测 child 退出）
+
+**与 brainstorm 决策 4 拍板「子进程 `--duration` flag」对齐**：v0.18 cycle 不用 MCP handler timer 方案（备选 (b) 已否决），与 ADR-0029 决策 4 spawn 子进程模式延续。
+
 ## 备选方案（Alternatives）
 
 ### record 暴露方案
@@ -107,6 +134,20 @@ stage 1 Spike 加 flag 声明 + stub 分支（返 "v0.17-stage-6 未实装" 错�
 
 **否决**：agent 视角不明确（description 字段写警告但 agent 仍可调，无法强制 confirm）。需显式 `confirm=true` 让 agent 显式确认风险。
 
+### record auto-stop 位置方案（v0.18 cycle 拍板）
+
+#### (a) 子进程 `--duration` flag（**v0.18 cycle 选此**，brainstorm 决策 4 拍板）
+
+**接受**：与 ADR-0029 §决策 1「spawn 子进程复用 v0.6 业务逻辑 + 子进程崩溃隔离」对齐——子进程 timer 随 child 退出自动终止无 zombie timer / MCP handler 不持 timer 状态（与 §关键设计点 2「MCP handler 不持 worker 状态」对齐）/ 复用 v0.6 落地的 `shutdown::requested()` 干净退出路径（与 `--no-tui` headless 路径同款）。
+
+#### (b) MCP handler 启 timer 线程
+
+**否决**：MCP handler 持 timer 状态——child 退出时需独立检测并 cancel timer（lifecycle 管理复杂）/ client 异常断开时 timer 持续运行（zombie timer 占内存 + CPU）/ 与 §关键设计点 2「MCP handler 不持 worker 状态」决策冲突。
+
+#### (c) 推迟到 v0.19+ cycle
+
+**否决**：v0.18 cycle 是 v0.17 残留项补全 cycle，duration_secs warning 字段透出已一个 cycle 不补全影响 agent 体验（agent 必须显式调 proc_record_stop 才能停止，违反 `duration_secs: Option<u64>` 参数语义）。
+
 ## 结果（Consequences）
 
 - **stage 1 Spike 落地**：5 个新 Args struct（RecordStartArgs / RecordStopArgs / UsbReleaseArgs / DockerRmArgs / DockerImageRmArgs / DockerVolumeRmArgs）+ 5 个 stub helper（返 placeholder JSON 含 `received_confirm` 字段）+ `src/cli/record.rs` 加 `--no-tui` flag stub + `src/cli/def.rs` `Command::Record` 加 `no_tui: bool` 字段
@@ -122,8 +163,10 @@ stage 1 Spike 加 flag 声明 + stub 分支（返 "v0.17-stage-6 未实装" 错�
 ## Migration path
 
 - **v0.17 stage 1 Spike**（本 ADR 落地）：5 个 Args struct + 5 个 stub helper + `--no-tui` flag stub + `mcp-persistent-state` feature flag（`record_handle` 字段 cfg-gate）
-- **v0.17 stage 6 Slice**：spawn 子进程路径 + `--no-tui` headless 路径 + 5 个 tool 业务逻辑填充 + `proc_record_start` / `proc_record_stop` 跨 tool call 保活 child handle
-- **v0.18+ cycle**：评估 record 暴露方案 (b) worker 持续采样路径（如 spawn 子进程开销可感）/ 评估 confirm 机制方案 B 两次调用 token（如 agent 反馈单参数 confirm 不够安全）
+- **v0.17 stage 6 Slice**：spawn 子进程路径 + `--no-tui` headless 路径 + 5 个 tool 业务逻辑填充 + `proc_record_start` / `proc_record_stop` 跨 tool call 保活 child handle（**`duration_secs` 仅记录参数不真正 auto-stop**，warning 字段透出）
+- **v0.18 stage 1 Spike**：扩 §6 auto-stop 段 + stage 1 落地 `--duration` flag 声明 stub（`src/cli/def.rs` Command::Record 加 `duration: Option<u64>` 字段 + `src/cli/record.rs` 解析 stub 暂存不真正实装 timer thread）
+- **v0.18 stage 2 Slice**：`run_record_headless` 内 timer thread（spawn thread sleep N secs → `shutdown::request()`）+ MCP handler `make_record_start_json` spawn 时传 `--duration <secs>` flag + 移除 warning 字段（auto-stop 已实装）+ ADR-0029 Status 备注 「auto-stop 已补全」
+- **v0.19+ cycle**：评估 record 暴露方案 (b) worker 持续采样路径（如 spawn 子进程开销可感）/ 评估 confirm 机制方案 B 两次调用 token（如 agent 反馈单参数 confirm 不够安全）
 
 ## 相关 ADR / 文档
 
