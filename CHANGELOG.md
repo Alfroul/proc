@@ -5,7 +5,34 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.17.0] - 2026-07-10
+
+### v0.17.0 cycle 完结 — 5 主题大 cycle（性能 + 可观测性 + VT100 + record + 写操作）
+
+v0.17 cycle 是 proc 历史上最大 cycle（5 主题合并，~5540 行业务代码 + 测试 + ADR/doc）。7 stage 全部 ✅（1 Spike + 5 Slice + 1 Review+收尾合并段），MCP tool 总数 39 → 46（+7 tool：`proc_metrics_history` / `proc_record_start` / `proc_record_stop` / `proc_usb_release` / `proc_docker_rm` / `proc_docker_image_rm` / `proc_docker_volume_rm`），4 份新 ADR（[ADR-0026](docs/adr/0026-mcp-handler-persistent-fields.md) MCP handler 持久字段 / [ADR-0027](docs/adr/0027-resource-subscribe-and-sse-transport.md) Resource subscribe + SSE / [ADR-0028](docs/adr/0028-vt100-to-uiframe-converter.md) VT100 转码 / [ADR-0029](docs/adr/0029-record-exposure-and-confirm-mechanism.md) record + confirm）。全量回归 1401 passed / 0 failed / 4 ignored，fmt / clippy / build（含 --no-default-features）/ bench --no-run 全过。详见 [REVIEW-v0.17](docs/reviews/REVIEW-v0.17.md)（P0 0 / P1 2 / P2 8，不触发拆分）。
+
+**5 主题落地范围**：
+
+- **主题 A 性能优化**（stage 2 + stage 3）：TD-47 `parent_chain: Vec<(u32, Arc<str>)>` 零 heap alloc + TD-54 MCP handler 持久 `snapshot: Arc<Mutex<Option<SystemSnapshot>>>` 字段 1s tick refresh + TD-44 `format_bytes` / `format_speed` B 档走 itoa + TD-45 `bincode::Options` + `options_for_version(header.version)` 兼容层 + TD-50 `proc_smart` 标 Status Deprecated
+- **主题 B 可观测性**（stage 4）：rmcp 0.11 `ResourceRoute` trait 暴露 3 个资源 URI（`proc://metrics/system` / `proc://processes/list` / `proc://docker/events`，client polling `resources/read`）+ SSE transport 结构化 stub（full 实装推迟 v0.18+ cycle）+ TD-52 sparkline `system_history: Arc<Mutex<VecDeque<MetricsSample>>>` 字段 30s cap + `proc_metrics_history` tool
+- **主题 F VT100 replay**（stage 5）：`Vt100ToUiFrameConverter::convert_frame(&VtFrame) -> UiFrame` 1:1 映射（澄清 ADR-0028 misreading，工作量从 ~1100 行收缩到 ~700 行）+ 透明转码路径（CLI replay / MCP `proc_replay_info` / `proc_replay_search` 双路径）+ RAII `TranscodedTempFile` 三种生命周期管理 + `extract_process_names_from_rle` 启发式提取
+- **record 暴露**（stage 6）：spawn `proc record --no-tui` 子进程 + `run_record_headless` 用 ratatui `TestBackend` 内存渲染 + `record_handle: Arc<Mutex<Option<Child>>>` 跨 tool call 保活 + CREATE_NEW_PROCESS_GROUP Windows / setsid Unix 隔离 + `confirm: bool` 必传 gate（5 个 tool）
+- **USB release + docker-rm 写操作**（stage 6）：`eject_device` PowerShell Shell.Application COM + `proc_usb_release` 三步链路（kill_locks → flush_write_cache → eject_device + warnings 累积）+ `DockerMonitor::remove_container` bollard API + `proc_docker_rm` / `proc_docker_image_rm` / `proc_docker_volume_rm` 三 tool
+
+**关键数字**：
+
+| 指标 | v0.16.0 基线 | v0.17.0 落地 |
+|---|---|---|
+| 全量回归 | 1317 passed / 0 failed / 3 ignored | **1401 passed / 0 failed / 4 ignored**（+84 新测试）|
+| MCP tool 总数 | 39 | **46**（+7 tool：proc_metrics_history + record 2 + usb_release 1 + docker-rm 3）|
+| handler 子 module | 5 文件（mod / cli / inspect / metrics / record）| **6 文件**（+ observable.rs 主题 B 容器）|
+| ADR | 0025a + 0025b | **+ 0026 / 0027 / 0028 / 0029**（4 份新 ADR）|
+| 写操作 confirm gate | 0 | **5**（record_start / usb_release / docker_rm / image_rm / volume_rm；record_stop 是 lifecycle 不需 confirm）|
+| Resource subscribe | 0 | **3 URI**（polling-push，subscribe-push 推迟 v0.18+ cycle）|
+| SSE transport | 0 | **结构化 stub**（full 实装推迟 v0.18+ cycle）|
+| VT100 录屏 search / 倒放 / 书签 | 不支持 | **支持**（透明转码到 v3 + RAII 临时文件）|
+
+**v0.18+ 候选方向**（详细评估留 v0.18 cycle brainstorm）：主题 C 跨平台扩展（Linux/macOS 重新支持评估）/ 主题 E 插件系统（inspector tab / worker / scoring rule 扩展）/ 主题 G 分布式采集（多机 proc 联合分析）/ v0.17 残留项（record worker 持续采样 / VT100 永久转码 CLI / bollard prune_children / proc_record_start auto-stop / Resource subscribe-push / SSE transport full 实装 / TD-45 varint 启用 / P1-R1 代码质量清理）。
 
 ### v0.17.0 阶段 6 — record 暴露 + USB release + docker-rm 写操作
 

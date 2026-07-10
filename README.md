@@ -2,7 +2,9 @@
 
 Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中。**Windows-only 应用**（Windows 10 1809+ / Windows 11 x64，详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。
 
-> **v0.16.0（2026-07-07）— MCP 全功能暴露 cycle 第二弹（录屏 v2 + 操作类）**：把 proc v0.14 落地的录屏 v2 4 大能力（v3 footer / 书签 / 时间轴搜索 / 倒放）+ v0.7 落地的 USB 弹盘业务模块透出给 LLM agent——(1) **录屏元数据 / 内容查询 2 tool**（`proc_replay_info` 双路径 v3 + VT100 footer 字段 / `proc_replay_search` FilterExpr 5 维度 + substring + limit 截断，agent 视角按 cpu/mem/name/anomaly 过滤命中帧）；(2) **书签 CRUD 4 tool**（`proc_bookmarks_list/add/edit/delete` 操作 `.prec.bookmarks.json` sidecar，`sidecar_present` + `source_healthy` 双字段三态区分）；(3) **USB 弹盘状态查询 1 tool**（`proc_eject_status` 4 档 suggestion 决策树，**解决「U 盘异常 kill 进程后不知道是否成功」痛点**——agent 走 `proc_eject_status → proc_kill → proc_eject_status` 三步反馈循环）；(4) **MCP handler 子 module 扩第 5 个文件 record.rs**（v0.15 4 子 module → 5 子 module，[ADR-0024](docs/adr/0024-mcp-handler-module-split.md) Strategy A 延续）；(5) **录屏 record 决策不暴露**（[ADR-0025b](docs/adr/0025b-mcp-record-not-exposed.md) TTY 限制 + worker 持续采样成本 + confirm 机制待评估）。MCP tool 总数 **32 → 39**（agent 视角录屏 v2 + USB status 缺口补完，写操作 docker-rm / record 留 v0.17+）。cycle 4 stage 全交付（~810 行业务代码 + 36 新集成测试 + REVIEW-v0.16 P0 0 / P1 1 / P2 0）。详见 [CHANGELOG](CHANGELOG.md)。
+> **v0.17.0（2026-07-10）— 5 主题大 cycle（性能 + 可观测性 + VT100 + record + 写操作）**：proc 历史上最大 cycle（~5540 行业务代码 + 测试 + ADR/doc），5 主题合并全交付——(1) **主题 A 性能优化**（TD-47 `parent_chain: Vec<(u32, Arc<str>)>` 零 heap alloc + TD-54 MCP handler 持久 `snapshot` 字段 1s tick refresh + TD-44 itoa + TD-45 bincode encoding 选项层 + TD-50 `proc_smart` deprecated）；(2) **主题 B 可观测性**（rmcp 0.11 `ResourceRoute` trait 暴露 3 资源 URI + SSE transport 结构化 stub + TD-52 sparkline `proc_metrics_history` tool 30s 历史采样）；(3) **主题 F VT100 replay**（`Vt100ToUiFrameConverter` 1:1 映射澄清 ADR-0028 misreading + 透明转码路径 + RAII 临时文件，VT100 录屏现享受 search / 倒放 / 书签全部能力）；(4) **record 暴露**（spawn `proc record --no-tui` 子进程 + `record_handle` 跨 tool call 保活 + `confirm: bool` 必传 gate，[ADR-0029](docs/adr/0029-record-exposure-and-confirm-mechanism.md) 翻盘 ADR-0025b）；(5) **USB release + docker-rm 写操作**（`proc_usb_release` 三步链路 kill + flush + eject + `proc_docker_rm` / `image_rm` / `volume_rm` bollard API）。MCP tool 总数 **39 → 46**（+7 tool）。cycle 7 stage 全交付（5 主题 + 4 份新 ADR 0026~0029 + REVIEW-v0.17 P0 0 / P1 2 / P2 8，不触发拆分）。详见 [CHANGELOG](CHANGELOG.md)。
+
+
 
 > **v0.15.0（2026-07-06）— MCP 全功能暴露 cycle（查询类）**：把 proc 已落地但 MCP 未暴露的查询类能力全部透出给 LLM agent——(1) **MCP 模块骨架重构**（`handler.rs` 单文件 1156 行 → `handler/{mod, cli, inspect, metrics}.rs` 4 子 module，[ADR-0024](docs/adr/0024-mcp-handler-module-split.md)）；(2) **CLI 命令 9 tool 直接暴露**（`proc_flows` / `proc_throttle` / `proc_export` / `proc_docker_inspect` / `proc_docker_images` / `proc_docker_volumes` / `proc_docker_events` / `proc_monitor_add` / `proc_monitor_remove`）；(3) **详情页 6 Tab 合并 1 个 `proc_inspect(pid, tab=...)` tool**（[ADR-0023](docs/adr/0023-mcp-inspect-tool-merge.md)，schema 自描述，与 v0.7 既有 `proc_handles` 互补）；(4) **系统级 metrics 5 tool**（`proc_metrics_system` / `gpu` / `disk_io` / `smart` / `thermal`，让 agent 看到系统全貌）。MCP tool 总数 **17 → 32**（agent 视角最大价值缺口补完，写操作 + 录屏类留 v0.16）。cycle 4 stage 全交付（~1700 行业务代码 + 39 新集成测试 + REVIEW-v0.15 P0 0 / P1 3 / P2 5，TD-50~54 归档）。详见 [CHANGELOG](CHANGELOG.md)。
 
@@ -263,11 +265,12 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 | `proc record` / `proc replay <file>` | VT100 录屏 |
 | `proc export --format json\|csv [-o file] [--sort] [--limit]` | 进程数据导出（含 ISO-8601 本地时间戳） |
 | `proc docker ps / inspect / top / logs / images / volumes / image-rm / volume-rm / compose / events / exec`<sup>v0.5.0</sup> | Docker 11 子命令 |
-| `proc mcp serve`<sup>v0.7.0</sup> | 启动 MCP server（stdio transport），把上述 32 个子命令 / 详情页 Tab / 系统指标 / 录屏 v2 / USB 状态暴露为 `proc_*` MCP tools 供 Claude Desktop / Cursor 等 LLM agent 调用（v0.7 落地 17 tool，v0.15 扩到 32 tool，v0.16 扩到 39 tool） |
+| `proc mcp serve`<sup>v0.7.0</sup> | 启动 MCP server（stdio transport，默认），把上述 32 个子命令 / 详情页 Tab / 系统指标 / 录屏 v2 / USB 状态暴露为 `proc_*` MCP tools 供 Claude Desktop / Cursor 等 LLM agent 调用（v0.7 落地 17 tool，v0.15 扩到 32 tool，v0.16 扩到 39 tool，v0.17 扩到 46 tool）|
+| `proc mcp serve --transport sse --port 8080`<sup>v0.17.0</sup> | 启动 MCP server（SSE transport，**当前为结构化 stub**，full 实装推迟 v0.18+ cycle — 详见 ADR-0027；agent 暂用 stdio + polling via `resources/read` 或 `proc_metrics_history` 替代）|
 
-### MCP server（LLM agent 接入）<sup>v0.7.0 · 扩 v0.15.0 · 扩 v0.16.0</sup>
+### MCP server（LLM agent 接入）<sup>v0.7.0 · 扩 v0.15.0 · 扩 v0.16.0 · 扩 v0.17.0</sup>
 
-`proc mcp serve` 把 proc 的进程 / 网络 / DNS / Docker / 详情页 Tab / 系统指标 / 录屏 v2 / USB 状态能力暴露为 [MCP](https://modelcontextprotocol.io/) tools，让 Claude Code / Cursor / Windsurf 等客户端直接调用。详见 [`docs/adr/0009-mcp-server.md`](docs/adr/0009-mcp-server.md)（v0.7 设计）+ [`docs/adr/0023-mcp-inspect-tool-merge.md`](docs/adr/0023-mcp-inspect-tool-merge.md)（v0.15 详情页 6 Tab 合并）+ [`docs/adr/0024-mcp-handler-module-split.md`](docs/adr/0024-mcp-handler-module-split.md)（v0.15 子 module 拆分）+ [`docs/adr/0025a-mcp-replay-search-agent-schema.md`](docs/adr/0025a-mcp-replay-search-agent-schema.md)（v0.16 replay_search schema）+ [`docs/adr/0025b-mcp-record-not-exposed.md`](docs/adr/0025b-mcp-record-not-exposed.md)（v0.16 record 不暴露决策）。
+`proc mcp serve` 把 proc 的进程 / 网络 / DNS / Docker / 详情页 Tab / 系统指标 / 录屏 v2 / USB 状态 / record 暴露 / USB release / docker-rm 写操作能力暴露为 [MCP](https://modelcontextprotocol.io/) tools，让 Claude Code / Cursor / Windsurf 等客户端直接调用。详见 [`docs/adr/0009-mcp-server.md`](docs/adr/0009-mcp-server.md)（v0.7 设计）+ [`docs/adr/0023-mcp-inspect-tool-merge.md`](docs/adr/0023-mcp-inspect-tool-merge.md)（v0.15 详情页 6 Tab 合并）+ [`docs/adr/0024-mcp-handler-module-split.md`](docs/adr/0024-mcp-handler-module-split.md)（v0.15 子 module 拆分）+ [`docs/adr/0025a-mcp-replay-search-agent-schema.md`](docs/adr/0025a-mcp-replay-search-agent-schema.md)（v0.16 replay_search schema）+ [`docs/adr/0025b-mcp-record-not-exposed.md`](docs/adr/0025b-mcp-record-not-exposed.md)（v0.16 record 不暴露决策，v0.17 ADR-0029 翻盘）+ [`docs/adr/0026-mcp-handler-persistent-fields.md`](docs/adr/0026-mcp-handler-persistent-fields.md)（v0.17 MCP handler 持久字段）+ [`docs/adr/0027-resource-subscribe-and-sse-transport.md`](docs/adr/0027-resource-subscribe-and-sse-transport.md)（v0.17 Resource subscribe + SSE transport）+ [`docs/adr/0028-vt100-to-uiframe-converter.md`](docs/adr/0028-vt100-to-uiframe-converter.md)（v0.17 VT100 转码）+ [`docs/adr/0029-record-exposure-and-confirm-mechanism.md`](docs/adr/0029-record-exposure-and-confirm-mechanism.md)（v0.17 record 暴露 + confirm 机制）。
 
 **Claude Desktop 配置**（macOS：`~/Library/Application Support/Claude/claude_desktop_config.json`；Windows：`%APPDATA%\Claude\claude_desktop_config.json`）：
 
@@ -286,7 +289,7 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 
 **手动调试**：`npx mcp-inspector proc mcp serve` 在浏览器里看 schema、试调用。
 
-**可用 tool**（**39 个**，v0.7 落地 17 + v0.15 新增 15 + v0.16 新增 7）：
+**可用 tool**（**46 个**，v0.7 落地 17 + v0.15 新增 15 + v0.16 新增 7 + v0.17 新增 7）：
 
 ##### 类别 0 — v0.7 既有 17 tool（列表视角）
 
@@ -364,9 +367,48 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 |---|---|---|
 | `proc_eject_status` | `drive: String`（"E" / "E:" / "E:\\" 都接受，与 `proc_eject` 同款 normalize）| `{ ok, drive, device, ejectable, lock_count, locks[], suggestion }`（suggestion 4 档：`eject_now` lock_count=0 可直接弹 / `kill_locks` lock_count>0 需先 kill / `unknown_drive` drive 字符无效 / `unavailable` 非 Windows 或 scan 失败；agent 走 `proc_eject_status → proc_kill → proc_eject_status` 三步反馈循环）|
 
-未暴露（留 v0.17+ cycle — brainstorm §决策 1/9 + ADR-0025b）：`proc_record_start/stop`（TTY 限制 + worker 持续采样成本 + confirm 机制待评估）/ `proc_usb_release(drive, kill_pids, dry_run=false)` 一次完成 kill + flush + eject（用户设计偏好）/ `proc_docker_rm` 系列（agent 低频推迟）。
+##### 类别 6 — v0.17 新增 6 tool（可观测性 + record 暴露 + USB release + docker-rm 写操作）
 
-**字段裁剪**：`proc_ls` 不返回 `exe` / `cwd` / `user_id`，避免 LLM 上下文泄漏敏感路径（列表视角，详见 ADR-0009）；`proc_inspect(summary)` 是**详情页视角**，返完整 cmd/exe/cwd 真值（agent 主动查单个进程 = 已同意看真值，与列表视角互补不冲突，详见 ADR-0023）；`proc_inspect(env)` 默认 mask secret 12 关键字（与 v0.6 env_reveal 同款契约，`reveal=true` opt-in 显示真值）；写操作（`proc_kill` / `proc_pkill` / `proc_monitor_add` / `proc_monitor_remove` / `proc_bookmarks_add` / `proc_bookmarks_edit` / `proc_bookmarks_delete`）`dry_run=false` 默认（与 v0.7 契约一致，`dry_run=true` opt-in 预演）；sidecar 写失败兜底（`sidecar_written: false + warning`，brainstorm §决策 7）。
+**类别 6a — 可观测性 sparkline（1 tool，TD-52 30s 历史采样）**：
+
+| Tool | 入参 | 返回 JSON |
+|---|---|---|
+| `proc_metrics_history` | `metric: "cpu"\|"memory"\|"swap", seconds: Option<u8>`（默认 30s，上限 30 因 `system_history` 字段 30s cap）| `{ ok, metric, seconds, count, samples: [{ ts, value }] }` ordered oldest → newest（空 history 返 count=0 + samples=[] worker warm-up 期间 / Default 路径 / no-default-features build）|
+
+**类别 6b — record 暴露（2 tool，spawn 子进程 + confirm gate，ADR-0029）**：
+
+| Tool | 入参 | 返回 JSON |
+|---|---|---|
+| `proc_record_start` | `confirm: bool`（必传 true 以确认录屏风险——捕获屏幕所有内容含 DNS 域名 / 进程 cmd）/ `file_path: String` / `duration_secs: Option<u64>`（可选，当前仅记录不真正 auto-stop，warning 字段透出）| `{ ok, action: "start", file_path, started_at, expected_duration_secs, pid, log_path, warning? }`（confirm=false → ok=false + error；record_handle 已有 child → ok=false + error "录屏已在进行"）|
+| `proc_record_stop` | `file_path: String`（须匹配 proc_record_start 的 file_path）| `{ ok, action: "stop", file_path, size_bytes, frame_count, duration_secs, killed, exit_code?, metadata_warning? }`（无录屏进行中 → ok=false + error；kill child + wait 10s 超时强 wait + 读 .prec metadata；metadata_warning 字段在 .prec 损坏时透出）|
+
+**类别 6c — USB release 三步链路（1 tool，kill + flush + eject，ADR-0029）**：
+
+| Tool | 入参 | 返回 JSON |
+|---|---|---|
+| `proc_usb_release` | `confirm: bool`（必传）/ `drive: String`（"E" / "E:" / "E:\\" 都接受，与 `proc_eject_status` 同款 normalize）/ `kill_pids: Vec<u32>`（agent 通常从 `proc_eject_status` locks[].pid 拿）/ `dry_run: Option<bool>`（默认 false，true 跳过执行返预演）| `{ ok, dry_run, action: "release", drive, killed_pids: [{ pid, result: "Killed"\|"AlreadyGone"\|"AccessDenied"\|"Failed"\|"Error", error? }], flushed: bool, ejected: bool, warnings: [...] }`（flush 失败仍尝试 eject，warnings 数组累积三步诊断）|
+
+**类别 6d — docker-rm 写操作（3 tool，bollard API，ADR-0029）**：
+
+| Tool | 入参 | 返回 JSON |
+|---|---|---|
+| `proc_docker_rm` | `confirm: bool`（必传）/ `container_id: String` / `force: Option<bool>`（默认 false）/ `volumes: Option<bool>`（默认 false，同时删关联匿名 volume）| `{ ok, container_id, removed: bool, force, volumes }`（Docker 未运行 → ok=false + error）|
+| `proc_docker_image_rm` | `confirm: bool`（必传）/ `image_id: String` / `force: Option<bool>` / `prune_children: Option<bool>`（当前未区分，bollard API 限制，warning 字段透出）| `{ ok, image_id, removed: bool, force, warning? }`|
+| `proc_docker_volume_rm` | `confirm: bool`（必传，数据永久丢失不可逆）/ `volume_name: String` / `force: Option<bool>`| `{ ok, volume_name, removed: bool, force }`|
+
+##### Resource subscribe + SSE transport（v0.17.0）
+
+**Resource subscribe**（rmcp 0.11 `ResourceRoute` trait，ADR-0027）：`ProcMcpHandler` 暴露 3 个资源 URI，client 通过 `resources/read` polling 拿 snapshot（subscribe-push 推迟 v0.18+ cycle）：
+
+| URI | 返回 JSON |
+|---|---|
+| `proc://metrics/system` | 与 `proc_metrics_system` tool 同款 schema（drain 持久 `snapshot` 字段，fallback 现场 new）|
+| `proc://processes/list` | 与 `proc_ls --sort cpu --limit 50` 同款 schema（top 50 by cpu_usage）|
+| `proc://docker/events` | 与 `proc_docker_events` tool 同款 schema（recent 50 events，500ms 短超时 drain）|
+
+**SSE transport**（`proc mcp serve --transport sse --port 8080`，ADR-0027）：v0.17 落地结构化 stub，full 实装推迟 v0.18+ cycle。理由：(1) rmcp 0.11 `streamable_http_server` 模块需 Cargo feature `transport-streamable-http-server-tower` + axum / tower / http / futures deps；(2) 当前 `run_mcp_serve` 用 `tokio::runtime::Builder::new_current_thread()`（避免与 DockerMonitor 内部 block_on 抢线程），SSE server 多 client 并发需 `new_multi_thread()` runtime 重构；(3) subscribe-push 机制需 handler 持 `Peer<RoleServer>` 句柄 + worker lifecycle 管理（client 断开后 worker 不能继续 push）。**Workaround**：用 stdio transport（默认）+ client-side polling via `resources/read` 或 `proc_metrics_history` tool。
+
+**字段裁剪**：`proc_ls` 不返回 `exe` / `cwd` / `user_id`，避免 LLM 上下文泄漏敏感路径（列表视角，详见 ADR-0009）；`proc_inspect(summary)` 是**详情页视角**，返完整 cmd/exe/cwd 真值（agent 主动查单个进程 = 已同意看真值，与列表视角互补不冲突，详见 ADR-0023）；`proc_inspect(env)` 默认 mask secret 12 关键字（与 v0.6 env_reveal 同款契约，`reveal=true` opt-in 显示真值）；写操作（`proc_kill` / `proc_pkill` / `proc_monitor_add` / `proc_monitor_remove` / `proc_bookmarks_add` / `proc_bookmarks_edit` / `proc_bookmarks_delete`）`dry_run=false` 默认（与 v0.7 契约一致，`dry_run=true` opt-in 预演）；**不可逆破坏性操作**（`proc_record_start` / `proc_usb_release` / `proc_docker_rm` / `proc_docker_image_rm` / `proc_docker_volume_rm`）`confirm: bool` 必传（ADR-0029 决策 5，与 `dry_run` 互补——dry_run 是「不真正执行」/ confirm 是「确认风险后再执行」）；sidecar 写失败兜底（`sidecar_written: false + warning`，brainstorm §决策 7）。
 
 ### 主题与持久化
 
