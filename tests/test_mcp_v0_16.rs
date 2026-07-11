@@ -142,7 +142,10 @@ fn test_replay_info_v3_recording_returns_uiframe_format() {
     let out = record::make_replay_info_json(path.to_str().unwrap());
     assert_eq!(out["ok"], serde_json::json!(true), "out: {out}");
     assert_eq!(out["format"], serde_json::json!("uiframe"));
-    assert_eq!(out["version"], serde_json::json!(proc::record::frame::RECORDING_VERSION));
+    assert_eq!(
+        out["version"],
+        serde_json::json!(proc::record::frame::RECORDING_VERSION)
+    );
     assert_eq!(out["frame_count"], serde_json::json!(3));
     // v3 路径含 hostname + anomaly_count + max_cpu + max_mem 字段
     assert!(out["hostname"].is_string(), "hostname missing: {out}");

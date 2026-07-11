@@ -5,6 +5,88 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.18.0] - 2026-07-11
+
+### v0.18.0 cycle 完结 — v0.17 残留项补全 cycle（代码清理 + varint + auto-stop + subscribe-push）
+
+v0.18 cycle 是 proc 历史上较小 cycle（~820 行总改动，与 v0.13 cycle ~500 行同款轻量 cycle，vs v0.17 cycle ~5540 行的 15% 量级）。3 stage 全部 ✅（1 Spike + 1 Slice + 1 Review+收尾合并段，与 v0.15/v0.16/v0.17 cycle 同款合并模式延续），MCP tool 总数 46 → 46（不变——4 项都是已有 tool 的补全），0 份新 ADR + 2 份扩段（[ADR-0027](docs/adr/0027-resource-subscribe-and-sse-transport.md) §5 subscribe-push lifecycle / [ADR-0029](docs/adr/0029-record-exposure-and-confirm-mechanism.md) §6 record auto-stop）。全量回归 1425 passed / 0 failed / 3 ignored，fmt / clippy / build（含 --no-default-features）/ bench --no-run 全过。详见 [REVIEW-v0.18](docs/reviews/REVIEW-v0.18.md)（P0 0 / P1 0 / P2 5，不触发拆分）。
+
+**4 项残留补全落地范围**：
+
+- **项 1 P1-R1 + P2-R1 代码清理**（stage 2）：`make_record_stop_json` `let mut child_opt` → `let child_opt` + 删 `child_opt = None; let _ = child_opt;` 两行冗余 / `make_record_start_json` `log_file.try_clone().unwrap_or_else(|_| log_file.try_clone().unwrap())` 双重 fallback 简化为单次 `try_clone` + `expect("try_clone log_file 失败（fd 耗尽？）")`（stage 2 决策 1 拍板 expect 而非 fallback inherit——inherit 子进程 stdout 会污染 MCP stdio transport，比 panic 更糟）
+- **项 2 TD-45 varint 配置层启用**（stage 2）：bump `RECORDING_VERSION` 3 → 4 + 加 `serialize_with_version` / `deserialize_with_version` 两个 helper 函数把 dispatch 收敛到函数内部（bincode 1.x `Options` trait 有 `Sized` bound 不 object-safe，无法 `Box<dyn Options>`）+ `options_for_version` 保留为 fixint-only 兼容函数（vt100/sidecar 等 fixint-only 路径继续用）+ writer/reader 改用新 helper 自动适配 + header 永远 fixint（reader 先拿 version 再分支）+ 6 个 encoding unit test（legacy v1/v2/v3 fixint 等价性 + v4 varint 字节流不同 + v4 varint round-trip + v4 varint 占用 byte 少 + v3 fixint round-trip）
+- **项 4 record auto-stop**（stage 2）：`shutdown::request()` 函数让 timer thread 主动 flip flag（与 Ctrl+C handler 走同一 flag）+ `run_record_headless` 内 `std::thread::spawn(move || { sleep N secs; shutdown::request(); })` timer thread（子进程退出自动终止，无 zombie timer）+ `make_record_start_json` spawn 时传 `--duration <secs>` flag + 移除 v0.17 stage 6 warning 字段（auto-stop 已实装）+ `test_auto_stop_timer_thread_requests_shutdown` 新增测试
+- **项 3 Resource subscribe-push**（stage 2）：`SubscribePushWorker` 注册表 value `()` → `Peer<RoleServer>` + subscribe/unsubscribe/spawn_push_task 业务逻辑实装（lazy spawn 第一次 subscribe 时 + 1s tick 调 `peer.notify_resource_updated` + peer 断开自动清理）+ `ProcMcpHandler` 加 `subscribe_push_worker` 字段（不 cfg-gate）+ `ServerHandler::subscribe`/`unsubscribe` 从 stage 4 no-op 改为真实注册 / 注销 + `ResourceRoute` trait `subscribe`/`unsubscribe` 签名调整（uri + Peer<RoleServer>）+ 6 个 unit test
+
+**关键数字**：
+
+| 指标 | v0.17.0 基线 | v0.18.0 落地 |
+|---|---|---|
+| 全量回归 | 1401 passed / 0 failed / 4 ignored | **1425 passed / 0 failed / 3 ignored**（+24 新测试）|
+| MCP tool 总数 | 46 | **46**（不变，v0.18 cycle 不新增 tool——4 项都是补全）|
+| RECORDING_VERSION | 3 | **4**（v4 varint，旧 v1/v2/v3 fixint 兼容层）|
+| subscribe-push | polling-push（client 走 `resources/read` 主动拉）| **subscribe-push 真正落地**（client 订阅后 server 主动 push 增量）|
+| record auto-stop | warning 字段透出（duration_secs 仅记录）| **auto-stop 实装**（子进程 `--duration` flag + timer thread）|
+| 代码质量清理 | P1-R1 + P2-R1（record 路径冗余）| **清理完毕**（child_opt 冗余 + try_clone 双重 fallback）|
+| ADR | 0026 / 0027 / 0028 / 0029 | **0 新 ADR + 2 扩段**（0027 §5 subscribe-push lifecycle / 0029 §6 record auto-stop）|
+
+**v0.19+ 候选方向**（详细评估留 v0.19 cycle brainstorm）：SSE transport full 实装（推迟 v0.19+ cycle，~500+ 行大工程）/ bollard prune_children 真正字段 / record 暴露方案 (b) worker 持续采样路径评估 / VT100 永久转码 CLI 子命令 / SSE multi-client subscribe-push 升级（注册表 value `Peer` → `Vec<Peer>`）/ 主题 C 跨平台扩展 / 主题 E 插件系统 / 主题 G 分布式采集。
+
+### v0.18.0 阶段 2 — 4 项业务实装（代码清理 + varint + auto-stop + subscribe-push）
+
+v0.18.0 cycle stage 2 Slice 落地（4 项业务实装）：在 stage 1 Spike 落地的 4 项 stub + ADR 扩段基础上填充真实业务逻辑。stage 2 调研结论（rmcp 0.11 源码 + context7 docs 验证）：`RequestContext<RoleServer>::peer` 是 `pub` 字段，直接 `context.peer.clone()` 拿到 `Peer<RoleServer>` 句柄；`SubscribeRequestParam { pub uri: String }` 只有 uri 字段无 subscriber_id，注册表 key 用 uri；`Peer::notify_resource_updated(ResourceUpdatedNotificationParam)` 是 server 主动 push API。既有 1401 测试零回归。
+
+- **Changed**: `src/record/encoding.rs`（替换 stage 1 Spike stub + 重写测试 ~293 行：(a) `options_for_version` 改为 fixint-only 兼容函数（vt100 / sidecar 等 fixint-only 路径继续用，不再按 version 分支）；(b) 新增 `serialize_with_version<S: Serialize>(version, value) -> Result<Vec<u8>, bincode::Error>` helper 函数把 dispatch 收敛到函数内部（version >= 4 走 varint / < 4 走 fixint 兼容层）；(c) 新增 `deserialize_with_version<D: DeserializeOwned>(version, bytes) -> Result<D, bincode::Error>` 同款 helper；(d) 6 个 unit test 覆盖 legacy v1/v2/v3 fixint 等价性 + v4 varint 字节流不同 + v4 varint round-trip + v4 varint 占用 byte 少 + v3 fixint round-trip + options_for_version fixint 兼容）。
+- **Changed**: `src/record/frame.rs`（`RECORDING_VERSION: u16 = 3` → `4`，让新文件走 varint）。
+- **Changed**: `src/record/{writer.rs, reader.rs}`（writer 用 `serialize_with_version(version, ...)` 写 frame/footer，reader 用 `deserialize_with_version(version, ...)` 读 frame/footer，按 header.version 自动分支；header 永远走 `bincode::serialize` / `bincode::deserialize` fixint）。
+- **Changed**: `src/shutdown.rs`（加 +19 行 = `pub fn request()` 函数让 timer thread 主动 flip flag：`if let Some(flag) = FLAG.get() { flag.store(true, Ordering::SeqCst); }`，与 Ctrl+C handler 走同一 flag；未 `init()` 时 no-op 与 `requested()` 在 FLAG 未初始化时返 false 一致）。
+- **Changed**: `src/cli/record.rs`（`run_record_headless` 去 `_duration` 下划线前缀 + 实装 timer thread：`if let Some(secs) = duration { std::thread::spawn(move || { sleep N secs; shutdown::request(); }); }`，主循环检 `shutdown::requested()` 退出）。
+- **Changed**: `src/mcp/handler/record.rs`（项 1 P1-R1+P2-R1 代码清理 + 项 4 auto-stop：(a) `make_record_stop_json` `let mut child_opt` → `let child_opt`（take 已清空无需 mut）+ 删 `child_opt = None; let _ = child_opt;` 两行冗余；(b) `make_record_start_json` `try_clone` 简化为单次 + `expect("try_clone log_file 失败（fd 耗尽？）")` + spawn cmd 加 `.arg("--duration").arg(secs.to_string())`（如 `duration_secs` Some）+ 移除 v0.17 stage 6 `warning` 字段（auto-stop 已实装））。
+- **Changed**: `src/mcp/subscribe_worker.rs`（替换 stage 1 Spike stub + 重写测试 +294 / -138 行：(a) 注册表 value 类型 `()` → `Peer<RoleServer>` + key 类型 `SubscriberId` → `String`（uri）；(b) 加 `task_spawned: Arc<Mutex<bool>>` 字段防重复 spawn；(c) `subscribe(uri, peer)` 业务逻辑（注册到 subscribers + lazy spawn push task）；(d) `unsubscribe(uri)` 业务逻辑（从 subscribers remove）；(e) `spawn_push_task()` 实装（`TokioHandle::try_current()` 检查 runtime + `handle.spawn(async move { ... })` 1s tick 遍历调 `peer.notify_resource_updated(ResourceUpdatedNotificationParam { uri })` + peer 断开从注册表移除自动清理）；(f) `subscriber_count()` 返真实数量；(g) 6 个 unit test 改写 + 新增 `spawn_push_task_returns_err_without_tokio_runtime`）。
+- **Changed**: `src/mcp/resources.rs`（`ResourceRoute` trait `subscribe`/`unsubscribe` 签名调整：stage 1 Spike `subscribe(uri, subscriber_id: u64)` → stage 2 `subscribe(uri, peer: Peer<RoleServer>)` / `unsubscribe(uri)`，默认实现仍返 Err 让 ProcMcpHandler override）。
+- **Changed**: `src/mcp/handler/mod.rs`（+60 / -10 行 = `ProcMcpHandler` struct 加 `pub subscribe_push_worker: SubscribePushWorker` 字段（不 cfg-gate，Default 返空 worker）+ Clone / Default / new() 初始化 + `ServerHandler::subscribe` impl 改为真实业务：从 `request.uri` + `context.peer.clone()` 调 `ResourceRoute::subscribe(self, uri, peer)` / `ServerHandler::unsubscribe` impl 改为真实业务：从 `request.uri` 调 `ResourceRoute::unsubscribe(self, uri)`）。
+- **Changed**: `tests/test_mcp_v0_16.rs`（回归修复：`test_replay_info_v3_recording` 改用 `RECORDING_VERSION` 常量替代硬编码 3）。
+- **Changed**: `tests/test_record.rs`（回归修复：`v3_footer_trailer_persisted_at_file_end` 改用 `deserialize_with_version` 读 footer（footer 跟随文件 version 走 varint））。
+- **Changed**: `tests/test_mcp_v0_18.rs`（替换 stage 1 Spike 4 项 stub 测试 + 改写为真实业务测试 +287 / -130 行：subscribe-push lifecycle / varint 等价性 + v3 fixint 兼容 / auto-stop timer thread / spawn_push_task 无 runtime 返 Err）。
+- **Docs**: `docs/stages/v0.18-stage-2.md`（新建 ~363 行 = stage 2 任务清单 + 7 设计决策 + 6 任务 + 5 已知风险 + 阶段完成报告模板）；`docs/stages/v0.18-brainstorm.md` 3 stage 总览表 stage 2 ⬜ → ✅。
+
+**关键数字**：
+
+| 指标 | v0.18.0 stage 1 基线 | v0.18.0 stage 2 落地 |
+|---|---|---|
+| 全量回归 | 1401 passed / 0 failed / 4 ignored | **1425 passed / 0 failed / 3 ignored**（+24 新 stage 2 测试）|
+| MCP tool 总数 | 46（stage 1 仅加 stub 不增 tool）| **46**（不变，4 项都是已有 tool 的补全）|
+| RECORDING_VERSION | 3 | **4**（v4 varint）|
+| subscribe-push | stage 4 polling-push（保留）+ stage 1 stub subscribe_worker | **业务逻辑落地**（注册表 value Peer<RoleServer> + 1s tick push + peer 断开自动清理）|
+| record auto-stop | stage 6 warning 字段（保留）+ stage 1 `--duration` flag stub | **auto-stop 实装**（timer thread + shutdown::request() + spawn 传 flag + 移除 warning）|
+| ResourceRoute trait | stage 1 `subscribe(uri, subscriber_id)` stub 返 Err | **签名调整为 `subscribe(uri, peer)`** + ProcMcpHandler impl 真实业务 |
+
+**设计要点**：(1) **varint 接口设计（stage 2 决策 2）**：bincode 1.x `Options` trait 有 `Sized` bound 不 object-safe，无法 `Box<dyn Options>` 让 `options_for_version` 返 `impl Options` 在两分支不同类型时编译失败——加 `serialize_with_version` / `deserialize_with_version` 两个 helper 函数把 dispatch 收敛到函数内部，header 永远 fixint 让 reader 拿到 `header.version` 后再分支；(2) **auto-stop `expect` 而非 fallback inherit（stage 2 决策 1）**：try_clone 失败时 inherit 子进程 stdout 会污染 MCP stdio transport（agent 解析 JSON-RPC 失败），比 panic 更糟；expect 让真失败时 server 重启，与原 `unwrap_or_else(unwrap)` 行为等价但去掉双重 fallback 冗余；(3) **subscribe-push lazy spawn + 单 task 多 subscriber（stage 2 决策 6 + 7）**：第一次 subscribe 时 lazy spawn push task（避免无 subscriber 时空跑）+ 一个 push task 遍历所有 subscriber（不每个 subscribe spawn 一个 task），减少 lock contention；(4) **peer 断开自动清理**：`peer.notify_resource_updated(params).await.is_err()` 时从注册表 `g.remove(&uri)`（drop Arc<Peer> 让 Arc 引用计数减 1）；(5) **subscribe_push_worker 字段不 cfg-gate**：`SubscribePushWorker::new()` 不持运行时状态（仅 `Arc::new(Mutex::new(HashMap::new()))` + `Arc::new(Mutex::new(false))`），测试路径安全（spawn push task 才需 tokio runtime，subscribe/unsubscribe 业务路径不需要）；(6) **stdio 单 client 假设**：注册表 key 用 uri（同 URI 单 client 订阅）；SSE transport 多 client 待 v0.19+ cycle 升级为 `HashMap<String, Vec<Peer>>`。
+
+### v0.18.0 阶段 1 — ADR-0027/0029 扩段 + CONTEXT 术语 + 4 项 stub
+
+v0.18.0 cycle stage 1 Spike 落地（4 项 stub + ADR 扩段 + CONTEXT 术语）：cycle 基础设施——把 4 项的 stub + ADR 扩段 + CONTEXT 术语一次落地，让 stage 2 Slice 直接填业务逻辑。stage 1 Spike 调研结论（context7 rmcp 0.11 docs 验证，2026-07-10）：rmcp 0.11 `ServerHandler` trait 不暴露 `subscribe_resource` 方法（client `resources/subscribe` 请求 SDK 内部自动 ACK 不传到 user handler），server 主动 push 走 `Peer::notify_resource_updated(ResourceUpdatedNotificationParam)` notification 路径——proc 需自建 worker lifecycle（brainstorm 决策 3 拍板）。既有 1401 测试零回归（stage 1 仅加 stub + 骨架，不动业务代码）。
+
+- **Changed**: `docs/adr/0027-rmcp-resource-subscribe-sse-transport.md`（扩 §关键设计点 加第 5 项 subscribe-push worker lifecycle + Status 加备注「v0.17 stage 4 partial 落地 polling-push，v0.18 stage 2 补全 subscribe-push」+ Migration path 加 v0.18 stage 1/2 行）。
+- **Changed**: `docs/adr/0029-record-exposure-and-confirm-mechanism.md`（扩 §关键设计点 加第 6 项 record auto-stop + Status 加备注「v0.17 stage 6 partial 落地 duration_secs 仅记录，v0.18 stage 2 补全 auto-stop」+ 备选方案段加 record auto-stop 位置方案 (a)/(b)/(c)（(a) 子进程 flag 选定与 brainstorm 决策 4 拍板对齐）+ Migration path 加 v0.18 stage 1/2 行）。
+- **Changed**: `src/cli/def.rs`（`Command::Record` 加 `duration: Option<u64>` 字段 + `src/cli/mod.rs` dispatch 传参 + `src/cli/record.rs::run_record` 签名加 `duration: Option<u64>` 参数 stub 占位）。
+- **Changed**: `src/mcp/resources.rs`（`ResourceRoute` trait 加 `subscribe` / `unsubscribe` 方法签名 stub + ProcMcpHandler impl 这两方法返 Err "v0.18-stage-2 未实装"）。
+- **Added**: `src/mcp/subscribe_worker.rs`（新建 ~80 行 = `SubscribePushWorker` struct + `SubscriberId = u64` type alias + `subscribers: Arc<Mutex<HashMap<SubscriberId, ()>>>` 注册表 stub + `new/spawn_push_task/subscribe/unsubscribe` 方法签名 stub + 模块 doc comment）+ `src/mcp/mod.rs` 加 `pub mod subscribe_worker;` + re-export。
+- **Changed**: `src/record/encoding.rs`（`options_for_version` 加 `version >= 4` 分支 stub 暂仍返 fixint + 注释标明 stage 1 stub）。
+- **Added**: `tests/test_mcp_v0_18.rs`（新建 ~60 行 = 4 项 stub 测试骨架 subscribe / unsubscribe / auto-stop / varint 等价性 placeholder，每项 1-2 个 `#[test]` 函数 + `// TODO v0.18-stage-2` 注释）。
+- **Docs**: `docs/stages/v0.18-stage-1.md`（新建 ~XXX 行 = stage 1 任务清单 + 决策段 + 验收标准 + commit 模板 + 启动指令包）；`docs/stages/v0.18-brainstorm.md`（3 stage 总览表 stage 1 ⬜ → ✅）。
+
+**关键数字**：
+
+| 指标 | v0.17.0 基线 | v0.18.0 stage 1 落地 |
+|---|---|---|
+| 全量回归 | 1401 passed / 0 failed / 4 ignored | **1401 passed / 0 failed / 4 ignored**（基线不变——stage 1 仅加 stub + 骨架，不动业务代码）|
+| MCP tool 总数 | 46 | **46**（不变，stage 1 仅加 stub 不增 tool）|
+| ADR | 0026 / 0027 / 0028 / 0029 | **0 新 ADR + 2 扩段**（0027 §关键设计点 5 subscribe-push lifecycle / 0029 §关键设计点 6 record auto-stop）|
+| CONTEXT 术语 | — | **+4 术语**（SubscribePushWorker / SubscriberId / DurationFlag / VarintEncoding）|
+
+**设计要点**：(1) **3 stage 节奏（brainstorm 决策 1）**：1 Spike + 1 Slice + Review+收尾合并段（与 v0.15/v0.16/v0.17 cycle 同款合并模式延续）；(2) **4 项排序 stage 2 内（brainstorm 决策 2）**：项 1 代码清理 → 项 2 varint → 项 4 auto-stop → 项 3 subscribe-push（项 3 最复杂放最后，如上下文快满触发 Checkpoint 接力）；(3) **项 3 自建 worker lifecycle（brainstorm 决策 3）**：context7 rmcp 0.11 调研确认无原生 subscribe helper；(4) **项 4 子进程 `--duration` flag（brainstorm 决策 4）**：与 ADR-0029 决策 4 spawn 子进程对齐；(5) **ADR 编号 (b) 扩 ADR-0027 + 扩 ADR-0029（brainstorm 决策 5）**：补全已有 ADR 避免重复，项 1+2 不扩 ADR（代码清理 + 配置切换非架构决策）。
+
 ## [0.17.0] - 2026-07-10
 
 ### v0.17.0 cycle 完结 — 5 主题大 cycle（性能 + 可观测性 + VT100 + record + 写操作）
