@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const RECORDING_MAGIC: &[u8; 4] = b"PREC";
-pub const RECORDING_VERSION: u16 = 3;
+pub const RECORDING_VERSION: u16 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingHeader {

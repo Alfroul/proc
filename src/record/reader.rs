@@ -22,8 +22,6 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use bincode::Options;
-
 use super::frame::{
     FOOTER_MAGIC, FOOTER_TRAILER_LEN, LegacySystemFrame, RECORDING_MAGIC, RecordingFooter,
     RecordingHeader, UiFrame,
@@ -72,8 +70,10 @@ impl Player {
             anyhow::bail!("无效的录制文件: 魔数不匹配");
         }
 
-        // 选中本文件用的 bincode 配置（按 header.version 决定；当前所有版本 fixint）。
-        let opts = super::encoding::options_for_version(header.version);
+        // v0.18 stage 2：header.version 决定后续 frame/footer 走 fixint（v1/v2/v3 兼容层）
+        // 还是 varint（v4+ 新文件）。footer 反序列化在下方按 header.version 分支调
+        // `deserialize_with_version`。
+        let version = header.version;
 
         let header_total = 8 + header_len as u64;
 
@@ -93,7 +93,8 @@ impl Player {
                     file.seek(SeekFrom::Start(footer_start))?;
                     let mut footer_bytes = vec![0u8; footer_len];
                     file.read_exact(&mut footer_bytes)?;
-                    let footer: RecordingFooter = opts.deserialize(&footer_bytes)?;
+                    let footer: RecordingFooter =
+                        super::encoding::deserialize_with_version(version, &footer_bytes)?;
                     (footer, file)
                 } else {
                     // 不是 v3 trailer，老文件路径
@@ -159,14 +160,18 @@ impl Player {
         }
 
         // Try V2 first, fall back to V1
-        // v0.17 stage 3 TD-45：用 options_for_version(self.header.version) 选 bincode
-        // 配置（当前所有版本 fixint，与 stage 3 前行为完全等价）。
-        let opts = super::encoding::options_for_version(self.header.version);
+        // v0.18 stage 2：用 deserialize_with_version 按 header.version 选 bincode 配置
+        // （v1/v2/v3 走 fixint 兼容层 / v4+ 走 varint）。
         let frame = if self.header.version >= 2 {
-            opts.deserialize::<UiFrame>(&frame_buf).ok()?
+            super::encoding::deserialize_with_version::<UiFrame>(self.header.version, &frame_buf)
+                .ok()?
         } else {
             // V1: upgrade legacy frame to UiFrame
-            let legacy = opts.deserialize::<LegacySystemFrame>(&frame_buf).ok()?;
+            let legacy = super::encoding::deserialize_with_version::<LegacySystemFrame>(
+                self.header.version,
+                &frame_buf,
+            )
+            .ok()?;
             legacy_to_v2(legacy)
         };
 
@@ -284,11 +289,11 @@ fn open_legacy(
         }
 
         // 解析帧提取元数据（v2 走 UiFrame；v1 走 LegacySystemFrame）
-        // v0.17 stage 3 TD-45：用 options_for_version 选 bincode 配置（每次创建新实例，
-        // impl Options 不是 Copy 不能跨 loop 持有）。
+        // v0.18 stage 2：用 deserialize_with_version 按 header.version 选 bincode 配置
+        // （v1/v2/v3 fixint 兼容层 / v4+ varint）。
         if header.version >= 2 {
-            if let Ok(frame) = super::encoding::options_for_version(header.version)
-                .deserialize::<UiFrame>(&frame_buf)
+            if let Ok(frame) =
+                super::encoding::deserialize_with_version::<UiFrame>(header.version, &frame_buf)
             {
                 first_frame_ts.get_or_insert(frame.timestamp);
                 end_time = frame.timestamp;
@@ -303,9 +308,10 @@ fn open_legacy(
                 }
                 frame_count += 1;
             }
-        } else if let Ok(legacy) = super::encoding::options_for_version(header.version)
-            .deserialize::<LegacySystemFrame>(&frame_buf)
-        {
+        } else if let Ok(legacy) = super::encoding::deserialize_with_version::<LegacySystemFrame>(
+            header.version,
+            &frame_buf,
+        ) {
             first_frame_ts.get_or_insert(legacy.timestamp);
             end_time = legacy.timestamp;
             if legacy.cpu_usage > max_cpu {

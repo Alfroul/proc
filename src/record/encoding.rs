@@ -1,93 +1,117 @@
-//! v0.17 stage 3 TD-45：record 模块 bincode 选项层。
+//! record 模块 bincode 序列化 helper（v0.18 stage 2 切 varint 后的统一入口）。
 //!
-//! ## 背景
+//! ## 历史
 //!
-//! brainstorm 决策 3 用户拍板 TD-45 全实装「bincode varint vs fixint 切换 + 旧
-//! `.prec` 文件兼容层」。stage 3 落地评估后发现 varint 切换 ROI 极低（详见
-//! `docs/stages/v0.17-stage-3.md` 决策 4 段）：
+//! - **v0.17 stage 3 TD-45 落地**：加 `options_for_version(version) -> impl Options`
+//!   函数让 record 模块的所有 bincode serialize/deserialize 调用走统一配置层。
+//!   当时所有版本走 fixint（与 `bincode::serialize` 默认等价），评估 varint ROI
+//!   极低（详见 `docs/stages/v0.17-stage-3.md` 决策 4 段）。
+//! - **v0.18 stage 1 Spike**：加 `version >= 4` 分支 stub（暂仍走 fixint），
+//!   让 stage 2 切 varint 时只需替换 stub 标记的分支。
+//! - **v0.18 stage 2**：bump `RECORDING_VERSION` 3 → 4 + `version >= 4` 走 varint
+//!   （新文件 size 更小 ~10-15%）+ 旧文件 v1/v2/v3 走 fixint 兼容层。**接口变更**：
+//!   `options_for_version` 返回 `impl Options` 在两分支不同类型时编译失败
+//!   （bincode 1.x `Options` trait 有 `Sized` bound 不 object-safe，无法
+//!   `Box<dyn Options>`），改为 `serialize_with_version` / `deserialize_with_version`
+//!   两个 helper 函数把 dispatch 收敛到函数内部。
 //!
-//! - **replay 偶发触发**，165 µs 单帧 seek 完全无感（PERF-BASELINE-v0.13 §4 实测）；
-//!   30 min × 30 FPS × 1000 进程连续 seek 才有感知（agent 实际场景罕见）
-//! - **varint vs fixint 性能差异**：varint 让小数字占少 byte（u64=1 vs 8 byte），
-//!   但 parse 时需 condition branch（每 byte 检查 high bit）；fixint 直接 memcpy。
-//!   bincode 1.x varint 实测比 fixint 慢 1.5-2x（serialize + deserialize 都慢）
-//! - **影响 stage 5 VT100 转码**：v0.17 stage 5 落地 VT100 → UiFrame 转换器
-//!   写入 v3 文件（fixint），如 stage 3 bump 到 v4 varint，stage 5 需协调版本号
-//! - **breaking change**：v0.17 写的 v4 varint 文件 v0.16 proc 读不了
+//! ## 行为
 //!
-//! ## 决策：选项层 + 评估文档化（**不切 varint**）
+//! | version | header | frame/footer |
+//! |---|---|---|
+//! | 1 / 2 / 3 | fixint | fixint（兼容层，旧文件可读）|
+//! | 4+（v0.18+ 新文件）| fixint | varint（新文件 size 更小）|
 //!
-//! 当前所有版本（v1 / v2 / v3）返 fixint 配置（与 `bincode::serialize` 默认等价）。
-//! record 模块的所有 `bincode::serialize` / `bincode::deserialize` 调用改走
-//! [`options_for_version`]，让未来 v0.18+ cycle 评估「网络传输录屏文件」场景时
-//! （如远程 agent / Web dashboard），只需改本文件 + bump `RECORDING_VERSION` 即可。
+//! **关键**：header 永远走 fixint（reader.rs:69 `bincode::deserialize(&header_buf)`
+//! 不走本 helper），让 reader 拿到 `header.version` 后再分支选 config。
+//! `RecordingFooter::header_version` 字段镜像 header.version 用于 sanity check。
 //!
-//! ## 行为等价性
+//! ## 行为等价性（旧文件）
 //!
 //! `bincode::DefaultOptions::new().with_no_limit().with_little_endian().with_fixint_encoding()`
 //! 与 `bincode::serialize` / `bincode::deserialize` 默认配置字节级等价（bincode 1.x
-//! 默认就是 fixint + little-endian + no_limit）。既有 `.prec` 文件零迁移。
-//!
-//! ## 演进路径（v0.18 cycle 项 2 落地）
-//!
-//! **v0.18 stage 1 Spike**：加 `version >= 4` 分支 stub（**暂仍走 fixint**），
-//! 让 stage 2 切 varint 时只需替换 stage 1 Spike 标记的分支。当前实现：
-//!
-//! ```ignore
-//! pub fn options_for_version(version: u16) -> impl Options {
-//!     let base = bincode::DefaultOptions::new().with_no_limit().with_little_endian();
-//!     if version >= 4 {
-//!         // v0.18 stage 1 Spike stub：暂仍走 fixint，stage 2 切到 varint
-//!         // base.with_varint_encoding()
-//!         base.with_fixint_encoding()
-//!     } else {
-//!         base.with_fixint_encoding()
-//!     }
-//! }
-//! ```
-//!
-//! **v0.18 stage 2 实装**：bump `RECORDING_VERSION` 3 → 4 + writer 写新文件用
-//! varint（替换 stage 1 Spike 标记的分支为 `base.with_varint_encoding()`）+
-//! reader 按 `header.version` 选 config（旧 v1/v2/v3 走 fixint 兼容层，新 v4+
-//! 走 varint）。详见 ADR-0027 § Migration path + REVIEW-v0.17 §1 Findings P2-A1。
+//! 默认就是 fixint + little-endian + no_limit）。既有 v1/v2/v3 `.prec` 文件零迁移。
 
 use bincode::Options;
+use serde::{Serialize, de::DeserializeOwned};
 
-/// 返回指定文件版本对应的 bincode 配置。
+/// bincode base 配置（no_limit + little_endian），varint/fixint 分支共用。
+fn base_options() -> impl Options {
+    bincode::DefaultOptions::new()
+        .with_no_limit()
+        .with_little_endian()
+}
+
+/// 返回 fixint 配置（v0.17 stage 3 接口，v0.18 stage 2 保留兼容）。
 ///
-/// 当前所有版本（v1 / v2 / v3 / v4+ stub）返 fixint 配置（与 `bincode::serialize`
-/// 默认等价）。**v0.18 stage 1 Spike 加 `version >= 4` 分支 stub 暂仍走 fixint**，
-/// stage 2 实装时切换为 varint（bump `RECORDING_VERSION` 3 → 4 + writer 写新文件
-/// varint + reader 按 `header.version` 选 config）。
+/// **v0.18 stage 2 起**：record v3/v4 文件改走 [`serialize_with_version`] /
+/// [`deserialize_with_version`] 按 version 分支选 varint/fixint。本函数仅返
+/// fixint 配置，供 vt100 / sidecar 等**不参与 version 分支**的模块继续使用
+/// （VT100 是 v2 fixint / sidecar 是 v1 fixint，都不切 varint）。
+///
+/// 既有 `tests/test_mcp_v0_17.rs` 也用本函数验证 v0.17 stage 3 落地的 fixint
+/// 兼容层（与本函数语义一致：所有版本走 fixint）。
 ///
 /// # Parameters
 ///
-/// - `version`：`RecordingHeader.version` 字段值（v1 / v2 / v3 / v4+ stub）
+/// - `version`：仅用于文档化，函数内不分支（永远 fixint）
 ///
 /// # Returns
 ///
-/// `impl bincode::Options`（具体类型由 bincode 派生的 wrapper chain，编译期已知；
-/// bincode config wrapper 都 `Copy + Clone`，但 `impl Options` opaque type 编译器
-/// 不自动推断 Copy——调用方在 loop 中需每次调本函数创建新实例，或用 `&opts` + ref
-/// 调用）。
-///
-/// **关键**：bincode 1.3.3 的 `DefaultOptions::new()` 默认是 **varint** 编码
-/// （不是 fixint！），与 `bincode::serialize` 默认 fixint 行为**不一致**。本函数
-/// 显式 `.with_fixint_encoding()` 确保 v1/v2/v3 文件用 fixint 编码，与既有
-/// `.prec` 文件字节级等价。
+/// `impl bincode::Options`（fixint + little-endian + no_limit，与 `bincode::serialize`
+/// 默认字节级等价）。
 #[must_use]
-pub fn options_for_version(version: u16) -> impl Options {
-    let base = bincode::DefaultOptions::new()
-        .with_no_limit()
-        .with_little_endian();
+pub fn options_for_version(_version: u16) -> impl Options {
+    base_options().with_fixint_encoding()
+}
+
+/// 按 version 序列化（v0.18 stage 2 切 varint 后的统一入口）。
+///
+/// - `version >= 4`：varint 编码（小数字占 byte 少，u64=1 vs 8），新文件 size 更小 ~10-15%
+/// - `version <= 3`：fixint 编码（与 `bincode::serialize` 默认等价，旧文件零迁移）
+///
+/// # Parameters
+///
+/// - `version`：`RecordingHeader.version` 字段值（v1 / v2 / v3 / v4+）
+/// - `value`：要序列化的 serde::Serialize 对象
+///
+/// # Errors
+///
+/// bincode 序列化失败时返 `bincode::Error`（如 IO 错误 / 序列化错误）。
+pub fn serialize_with_version<S: Serialize>(
+    version: u16,
+    value: &S,
+) -> Result<Vec<u8>, bincode::Error> {
+    let base = base_options();
     if version >= 4 {
-        // v0.18 stage 1 Spike stub：version >= 4 分支暂仍走 fixint，stage 2 切换为
-        // `base.with_varint_encoding()` 让新文件 size 更小（30 min × 30 FPS × 1000
-        // 进程录屏 ~10-15% size 下降）。详见 REVIEW-v0.17 §1 Findings P2-A1 +
-        // 本文件 doc comment §演进路径。
-        base.with_fixint_encoding()
+        base.with_varint_encoding().serialize(value)
     } else {
-        base.with_fixint_encoding()
+        base.with_fixint_encoding().serialize(value)
+    }
+}
+
+/// 按 version 反序列化（v0.18 stage 2 切 varint 后的统一入口）。
+///
+/// - `version >= 4`：varint 解码
+/// - `version <= 3`：fixint 解码（与 `bincode::deserialize` 默认等价）
+///
+/// # Parameters
+///
+/// - `version`：`RecordingHeader.version` 字段值（v1 / v2 / v3 / v4+）
+/// - `bytes`：要反序列化的字节切片
+///
+/// # Errors
+///
+/// bincode 反序列化失败时返 `bincode::Error`（如字节流损坏 / 类型不匹配）。
+pub fn deserialize_with_version<D: DeserializeOwned>(
+    version: u16,
+    bytes: &[u8],
+) -> Result<D, bincode::Error> {
+    let base = base_options();
+    if version >= 4 {
+        base.with_varint_encoding().deserialize(bytes)
+    } else {
+        base.with_fixint_encoding().deserialize(bytes)
     }
 }
 
@@ -95,99 +119,110 @@ pub fn options_for_version(version: u16) -> impl Options {
 mod tests {
     use super::*;
     use crate::record::frame::{RECORDING_MAGIC, RECORDING_VERSION, RecordingHeader};
-    use bincode::Options;
 
     #[test]
-    fn options_for_version_3_equivalent_to_default_serialize() {
-        // v3 文件 options_for_version 与 bincode::serialize 默认配置字节级等价
-        let header = RecordingHeader {
-            magic: *RECORDING_MAGIC,
-            version: RECORDING_VERSION,
-            start_time: 1_700_000_000,
-            hostname: "test-host".to_string(),
-        };
-        let bytes_via_opts = options_for_version(RECORDING_VERSION)
-            .serialize(&header)
-            .expect("serialize via opts");
-        let bytes_default = bincode::serialize(&header).expect("default serialize");
-        assert_eq!(bytes_via_opts, bytes_default, "v3 bytes mismatch");
-    }
-
-    #[test]
-    fn options_for_version_round_trip_v3() {
-        let header = RecordingHeader {
-            magic: *RECORDING_MAGIC,
-            version: RECORDING_VERSION,
-            start_time: 1_700_000_000,
-            hostname: "round-trip-test".to_string(),
-        };
-        // impl Options 不是 Copy，每次调用创建新实例
-        let bytes = options_for_version(RECORDING_VERSION)
-            .serialize(&header)
-            .expect("serialize");
-        let back: RecordingHeader = options_for_version(RECORDING_VERSION)
-            .deserialize(&bytes)
-            .expect("deserialize");
-        assert_eq!(back.magic, header.magic);
-        assert_eq!(back.version, header.version);
-        assert_eq!(back.start_time, header.start_time);
-        assert_eq!(back.hostname, header.hostname);
-    }
-
-    #[test]
-    fn options_for_version_legacy_v1_v2_equivalent_to_default() {
-        // v1 / v2 旧文件也走 fixint 默认配置（与 stage 3 前行为一致）
-        for v in [1_u16, 2_u16] {
+    fn legacy_v1_v2_v3_equivalent_to_default_serialize() {
+        // v1 / v2 / v3 旧文件走 fixint 默认配置（兼容层，与 bincode::serialize 字节级等价）
+        for v in [1_u16, 2_u16, 3_u16] {
             let header = RecordingHeader {
                 magic: *RECORDING_MAGIC,
                 version: v,
                 start_time: 1_700_000_000,
                 hostname: format!("legacy-v{v}"),
             };
-            let bytes_via_opts = options_for_version(v)
-                .serialize(&header)
-                .expect("serialize via opts");
+            let bytes_via_helper =
+                serialize_with_version(v, &header).expect("serialize via helper");
             let bytes_default = bincode::serialize(&header).expect("default serialize");
-            assert_eq!(bytes_via_opts, bytes_default, "v{v} bytes mismatch");
+            assert_eq!(bytes_via_helper, bytes_default, "v{v} bytes mismatch");
         }
     }
 
     #[test]
-    fn options_for_version_v4_stub_still_uses_fixint() {
-        // v0.18 stage 1 Spike：version >= 4 分支暂仍走 fixint（与 bincode::serialize
-        // 默认字节级等价）。stage 2 切换为 varint 后本测试改为对比 varint 字节流。
+    fn options_for_version_returns_fixint_for_compat() {
+        // v0.18 stage 2：options_for_version 保留为 fixint-only 兼容函数
+        // （vt100 / sidecar / v0.17 test 继续用，不参与 version 分支）
         let header = RecordingHeader {
             magic: *RECORDING_MAGIC,
-            version: 4, // v0.18 stage 1 Spike 占位版本号（RECORDING_VERSION 仍为 3）
+            version: 3,
             start_time: 1_700_000_000,
-            hostname: "v4-stub".to_string(),
+            hostname: "compat".to_string(),
         };
-        let bytes_via_opts = options_for_version(4)
+        let bytes_via_opts = options_for_version(3)
             .serialize(&header)
             .expect("serialize via opts");
         let bytes_default = bincode::serialize(&header).expect("default serialize");
         assert_eq!(
             bytes_via_opts, bytes_default,
-            "v4 stage 1 Spike stub 应与 fixint 默认字节级等价"
+            "options_for_version 应返 fixint"
         );
     }
 
     #[test]
-    fn options_for_version_v4_stub_round_trip() {
-        // v0.18 stage 1 Spike：version 4 stub round-trip 验证（stage 2 切 varint
-        // 后此测试需保留——varint round-trip 也是合法的，只是字节流不同）。
+    fn v4_uses_varint() {
+        // v0.18 stage 2：version >= 4 走 varint，与 bincode::serialize 默认 fixint
+        // 字节流不同（同 RecordingHeader round-trip 字段一致但字节流不同）
         let header = RecordingHeader {
             magic: *RECORDING_MAGIC,
-            version: 4,
+            version: RECORDING_VERSION, // = 4（v0.18 stage 2 bump）
             start_time: 1_700_000_000,
-            hostname: "v4-stub-round-trip".to_string(),
+            hostname: "v4-varint".to_string(),
         };
-        let bytes = options_for_version(4)
-            .serialize(&header)
-            .expect("serialize");
-        let back: RecordingHeader = options_for_version(4)
-            .deserialize(&bytes)
-            .expect("deserialize");
+        let bytes_via_helper =
+            serialize_with_version(RECORDING_VERSION, &header).expect("serialize via helper");
+        let bytes_default_fixint = bincode::serialize(&header).expect("default serialize");
+        assert_ne!(
+            bytes_via_helper, bytes_default_fixint,
+            "v4 varint 字节流应与 fixint 默认不同"
+        );
+    }
+
+    #[test]
+    fn v4_varint_round_trip() {
+        // v0.18 stage 2：v4 varint round-trip 验证（字段一致但字节流与 v3 fixint 不同）
+        let header = RecordingHeader {
+            magic: *RECORDING_MAGIC,
+            version: RECORDING_VERSION,
+            start_time: 1_700_000_000,
+            hostname: "v4-varint-round-trip".to_string(),
+        };
+        let bytes = serialize_with_version(RECORDING_VERSION, &header).expect("serialize");
+        let back: RecordingHeader =
+            deserialize_with_version(RECORDING_VERSION, &bytes).expect("deserialize");
+        assert_eq!(back.version, header.version);
+        assert_eq!(back.hostname, header.hostname);
+    }
+
+    #[test]
+    fn v4_varint_smaller_than_fixint_for_small_numbers() {
+        // v0.18 stage 2：varint 对小数字占 byte 少（u64=1 byte vs fixint 8 byte）
+        let header_small = RecordingHeader {
+            magic: *RECORDING_MAGIC,
+            version: RECORDING_VERSION,
+            start_time: 100, // 小数字 → varint 占 1 byte / fixint 占 8 byte
+            hostname: "small".to_string(),
+        };
+        let bytes_varint =
+            serialize_with_version(RECORDING_VERSION, &header_small).expect("varint serialize");
+        let bytes_fixint = bincode::serialize(&header_small).expect("fixint serialize");
+        assert!(
+            bytes_varint.len() < bytes_fixint.len(),
+            "varint ({}) 应比 fixint ({}) 短",
+            bytes_varint.len(),
+            bytes_fixint.len()
+        );
+    }
+
+    #[test]
+    fn v3_fixint_round_trip() {
+        // v3 旧文件 fixint round-trip 验证（与 v4 varint 字节流不同但 round-trip 一致）
+        let header = RecordingHeader {
+            magic: *RECORDING_MAGIC,
+            version: 3,
+            start_time: 1_700_000_000,
+            hostname: "v3-fixint-round-trip".to_string(),
+        };
+        let bytes = serialize_with_version(3, &header).expect("serialize");
+        let back: RecordingHeader = deserialize_with_version(3, &bytes).expect("deserialize");
         assert_eq!(back.version, header.version);
         assert_eq!(back.hostname, header.hostname);
     }

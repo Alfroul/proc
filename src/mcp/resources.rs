@@ -24,6 +24,8 @@
 //! trait 不暴露 `subscribe_resource` 方法，server 主动 push 走 `Peer::notify_resource_updated`
 //! notification 路径，自建 worker lifecycle 必要）。
 
+use rmcp::Peer;
+use rmcp::service::RoleServer;
 use serde_json::Value;
 
 use crate::mcp::handler::ProcMcpHandler;
@@ -80,11 +82,11 @@ pub fn resource_description_for_uri(uri: &str) -> &'static str {
 /// 与既有 tool 互补——tool 是 request-response / Resource 是 subscribe-push
 /// （stage 4 实装 polling-push 配套，详见决策 5）。
 ///
-/// **v0.18 stage 1 Spike 扩**：加 `subscribe` / `unsubscribe` 方法签名（stub 返
-/// Err "v0.18-stage-2 未实装"）。stage 2 实装真正的 subscribe-push worker
-/// lifecycle——subscribe 时把 client Peer 句柄注册到
-/// [`crate::mcp::subscribe_worker::SubscribePushWorker`] / 1s tick 调
-/// `peer.notify_resource_updated` push 增量 / unsubscribe 或 client 断开自动清理。
+/// **v0.18 stage 2 实装**：`subscribe` / `unsubscribe` 方法签名从 stage 1 Spike
+/// stub（`(uri, subscriber_id)`）改为 `(uri, peer)` — rmcp 0.11 `SubscribeRequestParam`
+/// 只有 `uri` 字段无 subscriber_id（client 不传 ID），server 用 uri 作 key +
+/// 从 `RequestContext::peer` 拿 `Peer<RoleServer>` 句柄。`ProcMcpHandler` impl
+/// 这两方法 override trait 默认实现，调 `self.subscribe_push_worker` 业务逻辑。
 pub trait ResourceRoute {
     /// 路由资源 URI 到 JSON 响应（polling-push 路径，client 走 `resources/read`）。
     ///
@@ -96,30 +98,37 @@ pub trait ResourceRoute {
     /// - 其他 URI → Err 含 valid URI 列表
     fn route(&self, uri: &str) -> Result<Value, String>;
 
-    /// subscribe-push 路径注册（v0.18 stage 1 Spike stub）。
+    /// subscribe-push 路径注册（v0.18 stage 2 实装）。
     ///
-    /// client 调 `resources/subscribe` → 本方法把 client Peer 句柄注册到
-    /// [`crate::mcp::subscribe_worker::SubscribePushWorker`] → worker 1s tick
-    /// 调 `peer.notify_resource_updated` push 增量。
+    /// client 调 `resources/subscribe { uri }` → `ServerHandler::subscribe` impl
+    /// 从 `context.peer` 拿 `Peer<RoleServer>` 句柄 → 调本方法 → worker 把
+    /// `(uri, peer)` 注册到 `subscribers` HashMap + lazy spawn push task。
     ///
-    /// **当前 stage 1 Spike 仅返 Err "v0.18-stage-2 未实装"**——stage 2 实装时
-    /// 替换为：worker 注册表 add + 返 Ok 含 SubscriberId 让 client 后续 unsubscribe。
-    /// 与 ADR-0027 §关键设计点 5 + brainstorm 决策 3 拍板对齐。
-    fn subscribe(&self, uri: &str, subscriber_id: u64) -> Result<(), String> {
-        // stage 1 Spike stub：保留签名让 stage 2 直接填充业务逻辑
-        let _ = (uri, subscriber_id);
-        Err("v0.18-stage-2 未实装：subscribe-push worker lifecycle 留 stage 2 Slice".to_string())
+    /// **默认实现返 Err** "v0.18-stage-2 未实装"（让 trait 用户可 opt-in），
+    /// `ProcMcpHandler` impl override 替换为真实业务逻辑。
+    ///
+    /// # Errors
+    ///
+    /// 默认实现永远返 Err。`ProcMcpHandler` impl 后返 worker.subscribe(uri, peer)
+    /// 的结果（注册表 mutex poisoned 或 spawn_push_task 失败时返 Err）。
+    fn subscribe(&self, uri: &str, peer: Peer<RoleServer>) -> Result<(), String> {
+        let _ = (uri, peer);
+        Err("v0.18-stage-2: ProcMcpHandler 未 impl subscribe（trait 默认实现）".to_string())
     }
 
-    /// subscribe-push 路径注销（v0.18 stage 1 Spike stub）。
+    /// subscribe-push 路径注销（v0.18 stage 2 实装）。
     ///
-    /// client 调 `resources/unsubscribe` 或网络断开 → 本方法从 worker 注册表移除。
-    /// **当前 stage 1 Spike 仅返 Err "v0.18-stage-2 未实装"**——stage 2 实装时
-    /// 替换为：worker 注册表 remove + 返 Ok。
-    fn unsubscribe(&self, subscriber_id: u64) -> Result<(), String> {
-        // stage 1 Spike stub：保留签名让 stage 2 直接填充业务逻辑
-        let _ = subscriber_id;
-        Err("v0.18-stage-2 未实装：subscribe-push worker lifecycle 留 stage 2 Slice".to_string())
+    /// client 调 `resources/unsubscribe { uri }` → `ServerHandler::unsubscribe` impl
+    /// 调本方法 → worker 从 `subscribers` 注册表 remove(uri)。
+    ///
+    /// **默认实现返 Err**，`ProcMcpHandler` impl override 替换为真实业务逻辑。
+    ///
+    /// # Errors
+    ///
+    /// 默认实现永远返 Err。`ProcMcpHandler` impl 后返 worker.unsubscribe(uri) 的结果。
+    fn unsubscribe(&self, uri: &str) -> Result<(), String> {
+        let _ = uri;
+        Err("v0.18-stage-2: ProcMcpHandler 未 impl unsubscribe（trait 默认实现）".to_string())
     }
 }
 
@@ -170,6 +179,14 @@ impl ResourceRoute for ProcMcpHandler {
         }
     }
 
-    // subscribe / unsubscribe 用 trait 默认实现（stage 1 Spike stub），
-    // stage 2 实装时在 impl 块内 override 替换为业务逻辑。
+    // v0.18 stage 2 项 3：override trait 默认实现，调 SubscribePushWorker 业务逻辑。
+    // subscribe 时把 (uri, peer) 注册到 worker → lazy spawn 1s tick push task。
+    // 详见 src/mcp/subscribe_worker.rs + ADR-0027 §关键设计点 5。
+    fn subscribe(&self, uri: &str, peer: Peer<RoleServer>) -> Result<(), String> {
+        self.subscribe_push_worker.subscribe(uri, peer)
+    }
+
+    fn unsubscribe(&self, uri: &str) -> Result<(), String> {
+        self.subscribe_push_worker.unsubscribe(uri)
+    }
 }

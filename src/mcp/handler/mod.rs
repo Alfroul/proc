@@ -46,6 +46,7 @@ use serde_json::{Value, json};
 use crate::collect::SystemSnapshot;
 use crate::collect::{self, SortField};
 use crate::dns_log::DnsLogCollector;
+use crate::mcp::subscribe_worker::SubscribePushWorker;
 
 /// v0.17 stage 4 TD-52：sparkline 单个采样点（轻量 Copy struct）。
 ///
@@ -166,6 +167,18 @@ pub struct ProcMcpHandler {
     /// call 保活 child handle（ADR-0026 / ADR-0029）。
     #[cfg(feature = "mcp-persistent-state")]
     pub record_handle: Arc<Mutex<Option<std::process::Child>>>,
+
+    /// v0.18 stage 2 项 3 落地：subscribe-push worker lifecycle 容器。
+    /// 持 `subscribers: Arc<Mutex<HashMap<String, Peer<RoleServer>>>>` 注册表 +
+    /// lazy spawn 1s tick push task。client 调 `resources/subscribe { uri }` →
+    /// `ServerHandler::subscribe` impl 从 `context.peer` 拿 Peer 句柄 → 调
+    /// `self.subscribe_push_worker.subscribe(uri, peer)` 注册到注册表 + lazy
+    /// spawn push task。push task 1s tick 遍历注册表调 `peer.notify_resource_updated`。
+    ///
+    /// **不 cfg-gate**：SubscribePushWorker 不依赖 SystemSnapshot 等重型资源，
+    /// Default 返空 worker（注册表为空，push task 未 spawn），测试路径无副作用。
+    /// 详见 ADR-0027 §关键设计点 5 + brainstorm 决策 3。
+    pub subscribe_push_worker: SubscribePushWorker,
 }
 
 impl Clone for ProcMcpHandler {
@@ -178,6 +191,10 @@ impl Clone for ProcMcpHandler {
             system_history: Arc::clone(&self.system_history),
             #[cfg(feature = "mcp-persistent-state")]
             record_handle: Arc::clone(&self.record_handle),
+            // v0.18 stage 2：SubscribePushWorker 内部 Arc<Mutex<...>>，
+            // Clone 共享同一注册表 + task_spawned flag（client clone handler 时
+            // 共享同一 worker 实例，与 dns_collector 同款语义）。
+            subscribe_push_worker: SubscribePushWorker::new(),
         }
     }
 }
@@ -189,6 +206,8 @@ impl Default for ProcMcpHandler {
         // v0.17 持久字段（snapshot / system_history / record_handle）Default 也
         // 返 None / 空 VecDeque——stage 3/4/6 各 Slice 实装 worker spawn 逻辑后
         // 才在 [`ProcMcpHandler::new`] 生产路径填充。
+        // v0.18 stage 2 项 3：subscribe_push_worker Default 返空 worker
+        // （注册表为空，push task 未 spawn），测试路径无副作用。
         Self {
             dns_collector: Arc::new(Mutex::new(None)),
             #[cfg(feature = "mcp-persistent-state")]
@@ -197,6 +216,7 @@ impl Default for ProcMcpHandler {
             system_history: Arc::new(Mutex::new(VecDeque::new())),
             #[cfg(feature = "mcp-persistent-state")]
             record_handle: Arc::new(Mutex::new(None)),
+            subscribe_push_worker: SubscribePushWorker::new(),
         }
     }
 }
@@ -244,6 +264,7 @@ impl ProcMcpHandler {
             system_history,
             #[cfg(feature = "mcp-persistent-state")]
             record_handle: Arc::new(Mutex::new(None)),
+            subscribe_push_worker: SubscribePushWorker::new(),
         }
     }
 }
@@ -1187,26 +1208,45 @@ impl ServerHandler for ProcMcpHandler {
         }
     }
 
-    /// v0.17 stage 4 决策 5：subscribe 接受请求但不 push。
+    /// v0.18 stage 2 项 3：subscribe 注册 client Peer 到 worker + lazy spawn push task。
     ///
-    /// client 订阅后返 Ok(())，但 server 不主动发 `notifications/resources/updated`。
-    /// client 应通过 `resources/read` 主动 polling（与既有 `proc_metrics_system` tool
-    /// 一次性 query 同款语义）。v0.18+ cycle 评估 server 主动 push（需 Peer<RoleServer>
-    /// 句柄 + notification channel lifecycle 管理，与 SSE transport 同款复杂度）。
+    /// client 调 `resources/subscribe { uri }` → 本方法从 `context.peer` 拿
+    /// `Peer<RoleServer>` 句柄 → 调 `ResourceRoute::subscribe(self, &uri, peer)` →
+    /// worker 把 `(uri, peer)` 注册到 `subscribers` HashMap + lazy spawn 1s tick
+    /// push task。push task 遍历注册表调 `peer.notify_resource_updated(uri)` 给
+    /// client 推送 `notifications/resources/updated` notification。
+    ///
+    /// **stage 1 Spike → stage 2 演进**：stage 4 落地的是 no-op（`Ok(())`），
+    /// v0.18 stage 2 替换为真实业务（与 ADR-0027 §关键设计点 5 + brainstorm
+    /// 决策 3 拍板对齐）。
     fn subscribe(
         &self,
-        _request: rmcp::model::SubscribeRequestParam,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        request: rmcp::model::SubscribeRequestParam,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> impl Future<Output = Result<(), McpError>> + Send + '_ {
-        std::future::ready(Ok(()))
+        let uri = request.uri;
+        let peer = context.peer.clone();
+        match crate::mcp::resources::ResourceRoute::subscribe(self, &uri, peer) {
+            Ok(()) => std::future::ready(Ok(())),
+            Err(msg) => std::future::ready(Err(rmcp::ErrorData::internal_error(msg, None))),
+        }
     }
 
+    /// v0.18 stage 2 项 3：unsubscribe 从 worker 注册表移除 subscriber。
+    ///
+    /// client 调 `resources/unsubscribe { uri }` → 本方法调
+    /// `ResourceRoute::unsubscribe(self, &uri)` → worker 从 `subscribers` 注册表
+    /// remove(uri)，drop Peer 让 push task 下 tick 不再调该 subscriber。
     fn unsubscribe(
         &self,
-        _request: rmcp::model::UnsubscribeRequestParam,
+        request: rmcp::model::UnsubscribeRequestParam,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> impl Future<Output = Result<(), McpError>> + Send + '_ {
-        std::future::ready(Ok(()))
+        let uri = request.uri;
+        match crate::mcp::resources::ResourceRoute::unsubscribe(self, &uri) {
+            Ok(()) => std::future::ready(Ok(())),
+            Err(msg) => std::future::ready(Err(rmcp::ErrorData::internal_error(msg, None))),
+        }
     }
 }
 

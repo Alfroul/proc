@@ -327,8 +327,11 @@ fn v3_footer_trailer_persisted_at_file_end() {
     len_buf.copy_from_slice(&bytes[n - 16..n - 8]);
     let footer_len = u64::from_le_bytes(len_buf) as usize;
     let footer_start = n - 16 - footer_len;
-    let footer: RecordingFooter =
-        bincode::deserialize(&bytes[footer_start..footer_start + footer_len]).unwrap();
+    let footer: RecordingFooter = proc::record::encoding::deserialize_with_version(
+        RECORDING_VERSION,
+        &bytes[footer_start..footer_start + footer_len],
+    )
+    .unwrap();
     assert_eq!(footer.frame_count, 3);
 }
 

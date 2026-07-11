@@ -1048,8 +1048,9 @@ pub fn make_record_stop_disabled_json() -> Value {
 /// 7. 返 `{ ok, file_path, started_at, expected_duration_secs, pid }`
 ///
 /// `expected_duration_secs`：`duration_secs` 参数原样回显，None 表示手动 stop。
-/// 实际 auto-stop（如配置）由子进程自己处理（v0.18+ cycle 候选——当前 stage 6
-/// 仅记录参数不真正实装 auto-stop，与 brainstorm §决策 4 表「duration_secs 可选」对齐）。
+/// v0.18 stage 2 落地：Some(secs) 时 spawn 子进程传 `--duration <secs>` flag，
+/// 子进程 `run_record_headless` 内 timer thread sleep N secs 后调
+/// `shutdown::request()` 触发干净退出（auto-stop 已实装，不再透 warning 字段）。
 pub fn make_record_start_json(
     confirm: bool,
     file_path: &str,
@@ -1091,16 +1092,21 @@ pub fn make_record_start_json(
         Err(e) => return super::err(format!("无法创建录屏日志 ({}): {e}", log_path.display())),
     };
 
+    let stdout_log = log_file
+        .try_clone()
+        .expect("try_clone log_file 失败（fd 耗尽？）");
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("record")
         .arg("--no-tui")
         .arg("--output")
-        .arg(file_path)
-        .stdout(std::process::Stdio::from(
-            log_file
-                .try_clone()
-                .unwrap_or_else(|_| log_file.try_clone().unwrap()),
-        ))
+        .arg(file_path);
+    // v0.18 stage 2 项 4：auto-stop flag 传给子进程，让 run_record_headless 内
+    // timer thread sleep N secs 后调 shutdown::request() 触发干净退出（与
+    // ADR-0029 §关键设计点 6 + brainstorm 决策 4 拍板对齐）。
+    if let Some(secs) = duration_secs {
+        cmd.arg("--duration").arg(secs.to_string());
+    }
+    cmd.stdout(std::process::Stdio::from(stdout_log))
         .stderr(std::process::Stdio::from(log_file));
     // CREATE_NEW_PROCESS_GROUP (Windows) / setsid (Unix) — 让子进程独立于
     // MCP server 的 Ctrl+C 信号，proc_record_stop 通过 kill child 触发干净退出。
@@ -1132,11 +1138,6 @@ pub fn make_record_start_json(
         "expected_duration_secs": duration_secs,
         "pid": pid,
         "log_path": log_path.to_string_lossy(),
-        "warning": if duration_secs.is_some() {
-            Some("duration_secs 参数已记录但 auto-stop 当前未实装；agent 须显式调 proc_record_stop".to_string())
-        } else {
-            None
-        },
     })
 }
 
@@ -1153,7 +1154,7 @@ pub fn make_record_stop_json(
     file_path: &str,
     record_handle: &std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>,
 ) -> Value {
-    let mut child_opt = match record_handle.lock() {
+    let child_opt = match record_handle.lock() {
         Ok(mut g) => g.take(),
         Err(e) => return super::err(format!("record_handle mutex poisoned: {e}")),
     };
@@ -1161,8 +1162,6 @@ pub fn make_record_stop_json(
     let Some(mut child) = child_opt else {
         return super::err("无录屏进行中；先调 proc_record_start");
     };
-    child_opt = None; // take 已经清空，这里仅显式说明
-    let _ = child_opt;
 
     // kill 触发子进程的 Ctrl+C handler（shutdown::requested flip）
     let kill_ok = child.kill().is_ok();
