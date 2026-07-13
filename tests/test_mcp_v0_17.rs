@@ -661,32 +661,31 @@ fn test_server_handler_impl_uses_procedure_resource_uris_constant() {
 }
 
 // ===========================================================================
-// v0.17 stage 4：SSE transport 结构化 stub
+// v0.17 stage 4 + v0.19 stage 2：SSE transport 入口
 // ===========================================================================
 
 #[test]
-fn test_serve_sse_returns_v0_19_stage_1_hint_error() {
-    // v0.19 stage 1 Spike：serve_sse 改返 v0.19 stage 1 Spike 标记错误
-    // （v0.17 stage 4 stub 升级到 v0.19 stage 1 Spike stub，含 3 项调研结论摘要）
-    use proc::mcp::transport::{SseTransportConfig, serve_sse};
-    let config = SseTransportConfig::default();
-    let result = serve_sse(&config);
+fn test_serve_sse_uses_real_streamable_http_service_in_stage_2() {
+    // v0.19 stage 2：serve_sse 从 stage 1 Spike stub 改为真实 axum + tower
+    // StreamableHttpService 路径。本测试静态断言 source 含关键 API（运行时
+    // 集成测试见 tests/test_sse_transport.rs，stage 2 item 3 加）。
+    let source =
+        std::fs::read_to_string("src/mcp/transport.rs").expect("transport.rs source readable");
     assert!(
-        result.is_err(),
-        "serve_sse stub should return Err (structured stub)"
-    );
-    let err = result.expect_err("error message");
-    assert!(
-        err.contains("v0.19 stage 1 Spike"),
-        "error should mention v0.19 stage 1 Spike stub, got: {err}"
+        source.contains("StreamableHttpService::new"),
+        "stage 2 serve_sse 应调 StreamableHttpService::new（context7 docs API）"
     );
     assert!(
-        err.contains("transport-streamable-http-server"),
-        "error should mention rmcp streamable_http_server Cargo feature, got: {err}"
+        source.contains("TcpListener::bind"),
+        "stage 2 serve_sse 应调 TcpListener::bind 绑定 (bind_addr, port)"
     );
     assert!(
-        err.contains("Cargo feature") || err.contains("session submodule"),
-        "error should mention Cargo feature requirement, got: {err}"
+        source.contains("axum::serve"),
+        "stage 2 serve_sse 应调 axum::serve 跑 HTTP server until ctrl+c"
+    );
+    assert!(
+        source.contains("LocalSessionManager"),
+        "stage 2 serve_sse 应用 rmcp 内置 LocalSessionManager（session-bound lifecycle 留 v0.20+）"
     );
 }
 

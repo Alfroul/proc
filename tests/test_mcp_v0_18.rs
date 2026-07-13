@@ -61,14 +61,18 @@ fn test_subscribe_push_worker_spawn_push_task_returns_err_without_tokio_runtime(
 
 #[test]
 fn test_subscribe_push_worker_source_uses_peer_role_server() {
-    // v0.19 stage 1 Spike：注册表 value 类型从 Peer<RoleServer> 升级为
-    // Vec<Peer<RoleServer>>（适配 SSE multi-client 场景，与 brainstorm §决策 3 +
-    // ADR-0027 §6.3 multi-client 注册表对齐）。stage 2 加 Arc::ptr_eq identity
-    // 检测 + JoinSet 并发 push + fail peer 一次精确 retain 清理。
+    // v0.19 stage 2：注册表 value 类型从 Vec<Peer<RoleServer>> 升级为
+    // Vec<Arc<Peer<RoleServer>>>（让 push task 失败 cleanup 走 Arc::ptr_eq 精确 retain，
+    // 与 brainstorm §决策 3 + ADR-0027 §6.3 multi-client 注册表 stage 2 实装对齐）。
+    // type alias SubscribeRegistry 拆复杂类型（clippy type_complexity mitigate）。
     let source = std::fs::read_to_string("src/mcp/subscribe_worker.rs").expect("source readable");
     assert!(
-        source.contains("subscribers: Arc<Mutex<HashMap<String, Vec<Peer<RoleServer>>>>>"),
-        "v0.19 stage 1 Spike 注册表 value 应升级为 Vec<Peer<RoleServer>>"
+        source.contains("type SubscribeRegistry = HashMap<String, Vec<Arc<Peer<RoleServer>>>>"),
+        "v0.19 stage 2 注册表应用 type alias SubscribeRegistry 拆复杂类型"
+    );
+    assert!(
+        source.contains("subscribers: Arc<Mutex<SubscribeRegistry>>"),
+        "v0.19 stage 2 subscribers 字段应用 SubscribeRegistry type alias"
     );
     assert!(
         source.contains("peer.notify_resource_updated"),

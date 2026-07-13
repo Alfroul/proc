@@ -1,6 +1,6 @@
 # ADR-0027：rmcp 0.11 Resource subscribe + SSE transport 设计
 
-**Status**：Accepted（**v0.17 stage 4 partial 落地 polling-push；v0.18 stage 2 补全 subscribe-push；v0.19 stage 2 补全 SSE transport full 实装 + multi-client 升级**，详见 §关键设计点 5 + §6 SSE transport lifecycle + Migration path）
+**Status**：Accepted（**v0.17 stage 4 partial 落地 polling-push；v0.18 stage 2 补全 subscribe-push；v0.19 stage 2 补全 SSE transport full 实装 + multi-client 升级（stage 2 已知限制：subscribe dedup + unsubscribe precise removal 推迟 v0.20+ cycle 用 mcp-session-id）**，详见 §关键设计点 5 + §6 SSE transport lifecycle + Migration path）
 **Date**：2026-07-07（v0.17.0 阶段 1 落地决策）/ 2026-07-10 扩 §5 subscribe-push lifecycle（v0.18 stage 1 Spike 决策）/ 2026-07-13 扩 §6 SSE transport lifecycle（v0.19 stage 1 Spike 决策）
 **Related**：ADR-0009（v0.7 MCP server 设计）、ADR-0024（v0.15 handler 子 module 拆分）、ADR-0026（MCP handler 持久字段策略）、v0.15 TD-52 归档（sparkline 30s 历史不暴露）
 

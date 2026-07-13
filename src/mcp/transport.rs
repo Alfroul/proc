@@ -1,7 +1,7 @@
 //! v0.17 主题 B 可观测性 — SSE transport 容器。
 //!
-//! v0.17 阶段 1 Spike 落地：仅含结构 + 函数 stub。
-//! 阶段 4 Slice 实装 SSE transport 入口（`proc mcp serve --transport sse --port 8080`）。
+//! v0.17 阶段 1 Spike 落地结构 + 函数 stub / v0.19 stage 2 实装完整 axum +
+//! tower StreamableHttpService 路径（`proc mcp serve --transport sse --port 8080`）。
 //!
 //! 与 rmcp 0.11 stdio transport 并行——stdio 是默认 transport（适合 Claude
 //! Desktop / Cursor 等单 client 集成），SSE 是长连接场景替代（适合多 client
@@ -11,17 +11,29 @@
 //! `build_runtime` helper stub（src/mcp/mod.rs）+ `serve_sse` 改 v0.19 stage 1
 //! Spike 新格式 + CLI flag stub（src/cli/def.rs）+ 注册表 Vec<Peer> 升级
 //! （src/mcp/subscribe_worker.rs）+ 3 项调研（context7 rmcp 0.11 docs + cargo
-//! build/tree 实测 + tokio docs 验证 2026-07-13）。stage 2 实装完整 axum +
-//! tower StreamableHttpService 路径 + multi_thread runtime 分支。
+//! build/tree 实测 + tokio docs 验证 2026-07-13）。
+//!
+//! **v0.19 cycle stage 2 实装**：runtime 分支 match（[`TransportKind::Stdio`]
+//! → current_thread / [`TransportKind::Sse`] → multi_thread worker_threads(4)）+
+//! `serve_sse` 真实 axum + tower StreamableHttpService 路径 + multi-client
+//! 注册表 identity 检测（详见 ADR-0027 §6.1 / §6.2 / §6.3）。
 
-use serde_json::Value;
+use std::net::SocketAddr;
+use std::sync::Arc;
 
-/// SSE transport 配置（stage 4 实装时填字段）。
+use axum::Router;
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+use tokio::net::TcpListener;
+
+use crate::mcp::handler::ProcMcpHandler;
+
+/// SSE transport 配置（v0.19 stage 2 实装时填字段）。
 ///
-/// stage 1 Spike 仅声明 struct（字段全 stub）。stage 4 实装时加：
+/// v0.17 stage 1 Spike 仅声明 struct / v0.19 stage 2 实装 serve_sse 真正用到字段：
 /// - `tokio::net::TcpListener` bind 到 `bind_addr:port`
-/// - `axum` 或 rmcp 0.11 内置 SSE server 路由 MCP JSON-RPC over SSE
-/// - 每个 client 连接 spawn 一个 handler task，共享同一 `ProcMcpHandler`
+/// - `axum::Router` `/mcp` POST 路由到 `StreamableHttpService`
+/// - service_factory closure 每次连接 new 一个 `ProcMcpHandler`
 ///
 /// **v0.19 stage 1 Spike**：加 `PartialEq` derive 让 `TransportKind::Sse(config)`
 /// 可比较（用于 stage 1 单元测试 `transport_kind_clone_partial_eq_works`）。
@@ -29,18 +41,33 @@ use serde_json::Value;
 pub struct SseTransportConfig {
     /// 监听端口（如 8080）。
     pub port: u16,
-    /// 绑定地址（默认 "0.0.0.0" 全网卡；"127.0.0.1" 仅本机）。
+    /// 绑定地址（CLI flag `--bind-addr` 默认 `"127.0.0.1"` 仅本机；`"0.0.0.0"` 全网卡需显式 opt-in）。
     pub bind_addr: String,
 }
 
 impl SseTransportConfig {
-    /// 创建新配置（stage 4 实装时填默认值）。
+    /// 创建新配置。
+    ///
+    /// 注意：`SseTransportConfig::default()` 保留 `bind_addr = "0.0.0.0"` 用于 backward
+    /// compat 与测试场景；生产路径 CLI flag `--bind-addr` 默认 `"127.0.0.1"`（安全默认，
+    /// 详见 ADR-0027 §6.4），dispatch 时从 CLI 传值覆盖。
     #[must_use]
     pub fn new(port: u16) -> Self {
         Self {
             port,
             bind_addr: "0.0.0.0".to_string(),
         }
+    }
+
+    /// 解析 `(bind_addr, port)` 为 `SocketAddr`（serve_sse + 测试用）。
+    ///
+    /// # Errors
+    ///
+    /// `bind_addr` 不是合法 IP 地址（如 `"localhost"`）→ 返 Err 含错误信息。
+    fn socket_addr(&self) -> Result<SocketAddr, String> {
+        format!("{}:{}", self.bind_addr, self.port)
+            .parse()
+            .map_err(|e| format!("invalid bind_addr '{}': {e}", self.bind_addr))
     }
 }
 
@@ -56,16 +83,7 @@ impl Default for SseTransportConfig {
 /// Cursor）/ Sse 是长连接替代（v0.19 stage 2 实装完整 axum + tower StreamableHttpService
 /// 路由，多 client 监控 / Web dashboard / 远程 agent 集成）。
 ///
-/// **stage 1 Spike**：仅声明 enum + Default = Stdio + helper 方法（as_str / sse_config
-/// / from_cli_str）。stage 2 实装 `build_runtime(kind) -> Runtime` 按 `TransportKind`
-/// 分支选 `current_thread`（Stdio）/ `new_multi_thread().worker_threads(4)`（Sse）
-/// runtime，让 stdio 路径零回归（v0.7~v0.18 11 个 cycle 累积路径保持）+ SSE 路径
-/// 独立验证。
-///
 /// 与 ADR-0027 §6.1 runtime 分支选择 + §6.4 bind-addr 安全默认对齐。
-///
-/// **clap 集成**：stage 2 加 `From<clap::Args>` 实现让 CLI flag `--transport sse`
-/// 解析（stage 1 Spike 仅声明 enum，CLI flag 解析逻辑留 stage 2）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum TransportKind {
     /// stdio transport（默认，单 client，current_thread runtime）。
@@ -108,14 +126,10 @@ impl TransportKind {
     /// 从 CLI flag 字符串解析 `TransportKind`（v0.19 stage 1 Spike 落地）。
     ///
     /// 接受 `"stdio"` / `"sse"`（大小写敏感）。其他值返 `Err` 含合法值清单。
-    /// stage 2 实装时 main.rs / mcp_cmd.rs dispatch 调本方法把 CLI `transport: String`
-    /// 转 `TransportKind`，再传 `run_mcp_serve(kind)`（stage 2 重构签名）。
+    /// stage 2 `mcp_cmd::run_mcp` dispatch 调本方法把 CLI `transport: String`
+    /// 转 `TransportKind`，再传 `run_mcp_serve(kind)`。
     ///
-    /// **stage 1 Spike 用途**：仅 stage 1 单元测试 + stage 2 dispatch 复用，stage 1
-    /// 不接真实 dispatch（dispatch 仍调 `run_mcp_serve()` 无参）。stage 2 重构后
-    /// dispatch 改为 `run_mcp_serve(kind)` 才真正使用本方法解析结果。
-    ///
-    /// **clap 集成备选**：stage 2 评估是否改 clap `ValueEnum` derive（让 clap 自动
+    /// **clap 集成备选**：评估是否改 clap `ValueEnum` derive（让 clap 自动
     /// validate + 生成 help）。当前 enum 含 `Sse(SseTransportConfig)` 数据字段，
     /// `ValueEnum` 只支持 unit-only enum，本方法保留作 fallback。
     ///
@@ -133,59 +147,72 @@ impl TransportKind {
     }
 }
 
-/// 启动 SSE transport MCP server（v0.19 stage 1 Spike 结构化 stub，stage 2 实装）。
+/// 启动 SSE transport MCP server（v0.19 stage 2 实装）。
 ///
-/// **v0.19 stage 1 Spike**：本函数是 stub（返 "v0.19 stage 2 未实装" 错误），
-/// stage 2 实装完整 axum + tower + rmcp StreamableHttpService 路径：
+/// 完整 axum + tower + rmcp `StreamableHttpService` 路径：
 ///
-/// 1. 构造 `StreamableHttpService::new(service_factory, session_manager, config)`
-///    （service_factory 是 closure 每次连接 new 一个 `ProcMcpHandler`）
-/// 2. axum Router 把 `/mcp` POST 路由到 service
-/// 3. `tokio::net::TcpListener` bind `bind_addr:port`
-/// 4. `axum::serve(listener, app).await` 跑 server until ctrl+c
+/// 1. 构造 `StreamableHttpService::new(service_factory, session_manager, config)`：
+///    - `service_factory` closure 每次连接 new 一个 [`ProcMcpHandler`]
+///    - `session_manager` 用 rmcp 内置 [`LocalSessionManager`]（session-bound lifecycle
+///      留 v0.20+ cycle 评估）
+///    - `config` 用默认 [`StreamableHttpServerConfig`]（stateful mode + sse_keep_alive）
+/// 2. axum `Router` 把 `/mcp` POST 路由到 service（`tower_http::CorsLayer` 留 v0.20+）
+/// 3. `tokio::net::TcpListener` bind `(bind_addr, port)`（默认 `127.0.0.1:8080` 仅本机）
+/// 4. `axum::serve(listener, app)` 跑 server until ctrl+c / 进程退出
 ///
 /// 与 [`super::handler::serve`]（stdio transport）并行——stdio 是默认 transport，
 /// SSE 是 v0.19 stage 2 加 `--transport sse --port 8080 --bind-addr 127.0.0.1` CLI 入口替代。
 ///
-/// **stage 1 Spike 调研结论**（context7 rmcp 0.11 docs + cargo build 实测，2026-07-13）：
+/// **stage 2 调研结论**（context7 rmcp 0.11 docs + cargo build 实测，2026-07-13）：
 ///
 /// - Cargo feature：rmcp 0.11 需 `transport-streamable-http-server` +
 ///   `transport-streamable-http-server-session` 两个 feature（已加到 Cargo.toml）。
-///   brainstorm §决策 4 假设的 `transport-streamable-http-server` 单数正确，需补
-///   `-session` 后缀启用 session submodule（含 `StreamableHttpService` struct）。
-///   **不存在 `-tower` 后缀变体**——context7 docs 描述的「tower submodule」是 module
-///   可见性，需 `transport-streamable-http-server-session` + `transport-streamable-http-server`
-///   + `server` 三个 feature 组合启用（cargo build error 实测验证）
-/// - `StreamableHttpService::new` API 签名（详见 ADR-0027 §6.2）：
-///   `pub fn new<S, M>(service_factory: impl Fn() -> Result<S, Error> + Send + Sync + 'static,
-///    session_manager: Arc<M>, config: StreamableHttpServerConfig) -> Self`
-/// - axum 0.7.9 + tower 0.5.3 + tower-http 0.6.11 与 rmcp 内部对齐无 duplicate deps
-///   （cargo tree -d 实测验证，2026-07-13）
-/// - tokio runtime 类型检测 API：`Handle::runtime_flavor() -> RuntimeFlavor`
-///   （CurrentThread / MultiThread 两个变体，stage 2 build_runtime 测试用此 API）
+/// - `StreamableHttpService::new` API 签名：`new(service_factory: impl Fn() -> Result<S, Error>
+///   + Send + Sync + 'static, session_manager: Arc<M>, config: StreamableHttpServerConfig) -> Self`
+/// - axum 0.7.9 + tower 0.5.3 + tower-http 0.6.11 与 rmcp 内部对齐无 duplicate deps。
 ///
-/// **stage 1 Spike 不动业务代码**——仅更新 doc 注释 + 返 stage 1 Spike 标记错误，
-/// 让 stage 2 直接填业务逻辑（与 brainstorm §决策 7 项 3 描述 + ADR-0027 §6.2 对齐）。
+/// **bind-addr 安全默认**（ADR-0027 §6.4）：默认 `127.0.0.1`（仅本机）/ `0.0.0.0`
+/// （全网卡，用户显式 opt-in）。SSE 暴露 proc MCP tool（含 `proc_docker_rm` /
+/// `proc_docker_image_rm` / `proc_docker_volume_rm` / `proc_usb_release` /
+/// `proc_record_start` 等写操作），全网卡监听需用户显式 opt-in 避免意外暴露到 LAN。
 ///
 /// # Errors
 ///
-/// 当前 stage 1 Spike 永远返 Err，stage 2 实装后改成真实 server 启动路径
-/// （`axum::serve(TcpListener::bind(...).await?, app).await?`）。
-pub fn serve_sse(config: &SseTransportConfig) -> Result<Value, String> {
-    Err(format!(
-        "v0.19 stage 1 Spike: SSE transport is a structured stub. Full implementation deferred to v0.19 stage 2. \
-         stage 1 Spike 已完成 3 项调研（context7 rmcp 0.11 docs + cargo build/tree 实测 2026-07-13）—— \
-         (1) Cargo feature 验证: rmcp 0.11 需 'transport-streamable-http-server' + \
-         'transport-streamable-http-server-session' 两个 feature（已加 Cargo.toml，brainstorm §决策 4 \
-         假设的单数正确，需补 -session 启用 session submodule）; \
-         (2) StreamableHttpService::new API 签名验证 (service_factory closure + session_manager Arc<M> + \
-         StreamableHttpServerConfig builder)，详见 ADR-0027 §6.2; \
-         (3) axum 0.7.9 + tower 0.5.3 + tower-http 0.6.11 与 rmcp 内部对齐无 duplicate deps. \
-         Stage 2 实装: axum Router /mcp POST + TcpListener bind + axum::serve. \
-         Config received: port={}, bind_addr='{}'. \
-         See ADR-0027 §6 SSE transport lifecycle + docs/stages/v0.19-stage-2.md.",
-        config.port, config.bind_addr
-    ))
+/// - `bind_addr` 解析 SocketAddr 失败 → 返 Err 含错误信息
+/// - `TcpListener::bind` 失败（如端口已占用 / 权限不足）→ 返 Err 含错误信息
+/// - `axum::serve` 异常退出 → 返 Err 含错误信息
+pub async fn serve_sse(config: SseTransportConfig) -> anyhow::Result<()> {
+    let socket_addr = config.socket_addr().map_err(|e| anyhow::anyhow!(e))?;
+
+    // service_factory: 每次 client 连接 new 一个 ProcMcpHandler（与 brainstorm §决策 7
+    // 项 3 描述 + ADR-0027 §6.2 对齐）。ProcMcpHandler::new 会 spawn 持久 DNS collector
+    // + snapshot worker，每个 session 独立（不共享状态）。rmcp 要求 closure 返
+    // `Result<S, std::io::Error>` — `ProcMcpHandler::new` 不会失败，wrap 成 `Ok(...)`。
+    let service_factory = || Ok::<ProcMcpHandler, std::io::Error>(ProcMcpHandler::new());
+
+    // LocalSessionManager: rmcp 内置 impl，stateful mode（每个 client 一个 session）。
+    // session-bound subscribe-push worker（如需 session-bound 注册表清理）留 v0.20+ cycle。
+    let session_manager = Arc::new(LocalSessionManager::default());
+
+    let http_service = StreamableHttpService::new(
+        service_factory,
+        session_manager,
+        StreamableHttpServerConfig::default(),
+    );
+
+    // /mcp POST 路由到 StreamableHttpService。tower_http CorsLayer 留 v0.20+ cycle
+    // （brainstorm §决策 6 推迟范围，CORS 仅 Web dashboard 集成时才需要）。
+    let app = Router::new().route_service("/mcp", http_service);
+
+    eprintln!(
+        "MCP SSE server listening on http://{socket_addr}/mcp (bind_addr={}, port={})",
+        config.bind_addr, config.port
+    );
+
+    let listener = TcpListener::bind(socket_addr).await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -270,5 +297,43 @@ mod tests {
         let config = SseTransportConfig::default();
         assert_eq!(config.port, 8080);
         assert_eq!(config.bind_addr, "0.0.0.0");
+    }
+
+    #[test]
+    fn sse_transport_config_socket_addr_parses_localhost_v4() {
+        // v0.19 stage 2：socket_addr 解析 (bind_addr, port) → SocketAddr
+        let config = SseTransportConfig {
+            port: 8080,
+            bind_addr: "127.0.0.1".to_string(),
+        };
+        let addr = config.socket_addr().expect("合法 IPv4 应解析成功");
+        assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn sse_transport_config_socket_addr_parses_wildcard() {
+        // v0.19 stage 2：0.0.0.0 全网卡（用户显式 opt-in）
+        let config = SseTransportConfig {
+            port: 9090,
+            bind_addr: "0.0.0.0".to_string(),
+        };
+        let addr = config.socket_addr().expect("0.0.0.0 应解析成功");
+        assert!(addr.is_ipv4());
+        assert_eq!(addr.port(), 9090);
+    }
+
+    #[test]
+    fn sse_transport_config_socket_addr_rejects_hostname() {
+        // v0.19 stage 2：socket_addr 不接受 "localhost" 等主机名（需 IP 字面量）
+        let config = SseTransportConfig {
+            port: 8080,
+            bind_addr: "localhost".to_string(),
+        };
+        let result = config.socket_addr();
+        assert!(
+            result.is_err(),
+            "hostname 应被拒绝（需 IP 字面量，stage 2 安全保守）"
+        );
     }
 }
