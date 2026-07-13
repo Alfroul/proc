@@ -266,9 +266,10 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 | `proc export --format json\|csv [-o file] [--sort] [--limit]` | 进程数据导出（含 ISO-8601 本地时间戳） |
 | `proc docker ps / inspect / top / logs / images / volumes / image-rm / volume-rm / compose / events / exec`<sup>v0.5.0</sup> | Docker 11 子命令 |
 | `proc mcp serve`<sup>v0.7.0</sup> | 启动 MCP server（stdio transport，默认），把上述 32 个子命令 / 详情页 Tab / 系统指标 / 录屏 v2 / USB 状态暴露为 `proc_*` MCP tools 供 Claude Desktop / Cursor 等 LLM agent 调用（v0.7 落地 17 tool，v0.15 扩到 32 tool，v0.16 扩到 39 tool，v0.17 扩到 46 tool）|
-| `proc mcp serve --transport sse --port 8080`<sup>v0.17.0</sup> | 启动 MCP server（SSE transport，**当前为结构化 stub**，full 实装推迟 v0.18+ cycle — 详见 ADR-0027；agent 暂用 stdio + polling via `resources/read` 或 `proc_metrics_history` 替代）|
+| `proc mcp serve --transport sse --port 8080`<sup>v0.17.0 · full 实装 v0.19.0</sup> | 启动 MCP server（SSE transport，多 client 并发 / 远程 agent 集成 / Web dashboard 场景；`current_thread` runtime 切到 `multi_thread worker_threads(4)` runtime + axum + tower StreamableHttpService 路由 MCP JSON-RPC over HTTP/SSE；详见 ADR-0027 §6）|
+| `proc mcp serve --transport sse --port 8080 --bind-addr 0.0.0.0`<sup>v0.19.0</sup> | SSE transport 全网卡监听（用户显式 opt-in，默认 `127.0.0.1` 仅本机；含 `proc_docker_rm` / `proc_usb_release` / `proc_record_start` 等写操作的 MCP tool 暴露到 LAN 需用户明确知晓风险）|
 
-### MCP server（LLM agent 接入）<sup>v0.7.0 · 扩 v0.15.0 · 扩 v0.16.0 · 扩 v0.17.0 · 扩 v0.18.0</sup>
+### MCP server（LLM agent 接入）<sup>v0.7.0 · 扩 v0.15.0 · 扩 v0.16.0 · 扩 v0.17.0 · 扩 v0.18.0 · 扩 v0.19.0</sup>
 
 `proc mcp serve` 把 proc 的进程 / 网络 / DNS / Docker / 详情页 Tab / 系统指标 / 录屏 v2 / USB 状态 / record 暴露 / USB release / docker-rm 写操作能力暴露为 [MCP](https://modelcontextprotocol.io/) tools，让 Claude Code / Cursor / Windsurf 等客户端直接调用。详见 [`docs/adr/0009-mcp-server.md`](docs/adr/0009-mcp-server.md)（v0.7 设计）+ [`docs/adr/0023-mcp-inspect-tool-merge.md`](docs/adr/0023-mcp-inspect-tool-merge.md)（v0.15 详情页 6 Tab 合并）+ [`docs/adr/0024-mcp-handler-module-split.md`](docs/adr/0024-mcp-handler-module-split.md)（v0.15 子 module 拆分）+ [`docs/adr/0025a-mcp-replay-search-agent-schema.md`](docs/adr/0025a-mcp-replay-search-agent-schema.md)（v0.16 replay_search schema）+ [`docs/adr/0025b-mcp-record-not-exposed.md`](docs/adr/0025b-mcp-record-not-exposed.md)（v0.16 record 不暴露决策，v0.17 ADR-0029 翻盘）+ [`docs/adr/0026-mcp-handler-persistent-fields.md`](docs/adr/0026-mcp-handler-persistent-fields.md)（v0.17 MCP handler 持久字段）+ [`docs/adr/0027-resource-subscribe-and-sse-transport.md`](docs/adr/0027-resource-subscribe-and-sse-transport.md)（v0.17 Resource subscribe + SSE transport，v0.18 扩 §5 subscribe-push lifecycle）+ [`docs/adr/0028-vt100-to-uiframe-converter.md`](docs/adr/0028-vt100-to-uiframe-converter.md)（v0.17 VT100 转码）+ [`docs/adr/0029-record-exposure-and-confirm-mechanism.md`](docs/adr/0029-record-exposure-and-confirm-mechanism.md)（v0.17 record 暴露 + confirm 机制，v0.18 扩 §6 record auto-stop）。
 
@@ -408,7 +409,21 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 
 **subscribe-push worker lifecycle**（v0.18.0 落地，ADR-0027 §关键设计点 5）：`SubscribePushWorker` 持 `subscribers: Arc<Mutex<HashMap<String, Peer<RoleServer>>>>` 注册表，client 调 `resources/subscribe { uri }` 后 lazy spawn push task（1s tick 遍历调 `peer.notify_resource_updated`，peer 断开自动从注册表移除）。**stdio transport 单 client 假设**（同 URI 单 client 订阅）；SSE transport 多 client 待 v0.19+ cycle 升级为 `HashMap<String, Vec<Peer>>`。stage 1 Spike 调研结论（context7 rmcp 0.11 docs 验证）：rmcp 0.11 `ServerHandler` trait 不暴露 `subscribe_resource` 方法（client `resources/subscribe` 请求 SDK 自动 ACK），server 主动 push 走 `Peer::notify_resource_updated(ResourceUpdatedNotificationParam)` notification 路径——proc 需自建 worker lifecycle。
 
-**SSE transport**（`proc mcp serve --transport sse --port 8080`，ADR-0027）：v0.17 落地结构化 stub，full 实装推迟 v0.19+ cycle。理由：(1) rmcp 0.11 `streamable_http_server` 模块需 Cargo feature `transport-streamable-http-server-tower` + axum / tower / http / futures deps；(2) 当前 `run_mcp_serve` 用 `tokio::runtime::Builder::new_current_thread()`（避免与 DockerMonitor 内部 block_on 抢线程），SSE server 多 client 并发需 `new_multi_thread()` runtime 重构；(3) SSE multi-client subscribe-push 注册表升级（`HashMap<String, Peer>` → `HashMap<String, Vec<Peer>>`）。**Workaround**：用 stdio transport（默认）+ client-side `resources/subscribe` 走 v0.18 stage 2 落地的 subscribe-push worker lifecycle。
+**SSE transport**（`proc mcp serve --transport sse --port 8080`，ADR-0027 §6）：v0.19.0 full 实装。3 件套：
+
+- **runtime 分支切换**（ADR-0027 §6.1）：`TransportKind::Stdio` → `Builder::new_current_thread().enable_all()`（与 v0.7~v0.18 既有路径零回归）/ `TransportKind::Sse(_)` → `Builder::new_multi_thread().worker_threads(4).enable_all()`（多 client 并发 + axum + tower StreamableHttpService 需要）
+- **axum + tower StreamableHttpService 路由**（ADR-0027 §6.2）：`StreamableHttpService::new(service_factory, LocalSessionManager, StreamableHttpServerConfig)` + axum `Router::new().route_service("/mcp", http_service)` + `TcpListener::bind((bind_addr, port))` + `axum::serve(listener, app)`
+- **multi-client 注册表升级**（ADR-0027 §6.3）：`HashMap<String, Peer>` → `HashMap<String, Vec<Arc<Peer>>>`（同 URI 多 client 各占 vec 一位）+ push task 改 `tokio::task::JoinSet` 并发 spawn + `Arc::ptr_eq` 精确 cleanup fail peer
+
+**bind-addr 安全默认**（ADR-0027 §6.4）：CLI flag `--bind-addr` 默认 `127.0.0.1`（仅本机，与 ADR-0008 self-mitigation policy 对齐）/ `0.0.0.0`（全网卡，用户显式 opt-in）。SSE 暴露 proc MCP tool（含 `proc_docker_rm` / `proc_docker_image_rm` / `proc_docker_volume_rm` / `proc_usb_release` / `proc_record_start` 等写操作），全网卡监听需用户显式 opt-in 避免意外暴露到 LAN。
+
+**已知限制**（v0.19 stage 2 兜底策略，留 v0.20+ cycle 补全）：
+
+- **subscribe 跨调用不做 dedup**：rmcp 0.11 `Peer<R>` struct 字段全 private（`tx` / `request_id_provider` / `progress_token_provider` / `progress_timeout_watchers` / `info`），无 public identity method。同 client 多次 subscribe 同 URI 会在 vec push 多个 `Arc<Peer>` 项；依赖 push task 失败 cleanup 兜底（client 断开后下一次 push 失败对应 Arc 被精确移除）
+- **unsubscribe 清空整个 vec**：MCP 协议 `UnsubscribeRequestParam` 只有 uri 不携带 client identity。stdio 单 client 场景正确（vec 长度 ≤ 1）；SSE multi-client 场景下 A client unsubscribe 会清掉 B client 同 URI 订阅（B 想继续订阅需 client-side 重 subscribe）
+- **v0.20+ cycle 改进方向**：从 `RequestContext::extensions` 拿 `mcp-session-id` HTTP header（SSE 路径）作 client identity，让 subscribe dedup + unsubscribe precise removal 走 mcp-session-id 字符串作 secondary index
+
+**SSE 后续能力推迟 v0.20+ cycle**（brainstorm §决策 6）：graceful shutdown（Ctrl+C 时 axum 主动关连接）/ Auth Bearer token（生产部署）/ CORS（Web dashboard 集成）/ TLS（远程 agent 公网传输）。
 
 **字段裁剪**：`proc_ls` 不返回 `exe` / `cwd` / `user_id`，避免 LLM 上下文泄漏敏感路径（列表视角，详见 ADR-0009）；`proc_inspect(summary)` 是**详情页视角**，返完整 cmd/exe/cwd 真值（agent 主动查单个进程 = 已同意看真值，与列表视角互补不冲突，详见 ADR-0023）；`proc_inspect(env)` 默认 mask secret 12 关键字（与 v0.6 env_reveal 同款契约，`reveal=true` opt-in 显示真值）；写操作（`proc_kill` / `proc_pkill` / `proc_monitor_add` / `proc_monitor_remove` / `proc_bookmarks_add` / `proc_bookmarks_edit` / `proc_bookmarks_delete`）`dry_run=false` 默认（与 v0.7 契约一致，`dry_run=true` opt-in 预演）；**不可逆破坏性操作**（`proc_record_start` / `proc_usb_release` / `proc_docker_rm` / `proc_docker_image_rm` / `proc_docker_volume_rm`）`confirm: bool` 必传（ADR-0029 决策 5，与 `dry_run` 互补——dry_run 是「不真正执行」/ confirm 是「确认风险后再执行」）；sidecar 写失败兜底（`sidecar_written: false + warning`，brainstorm §决策 7）。
 

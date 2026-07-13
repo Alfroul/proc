@@ -5,7 +5,54 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.19.0] - 2026-07-14
+
+### v0.19.0 cycle 完结 — SSE transport full 实装 + multi-client subscribe-push 升级 cycle
+
+v0.19 cycle 是 proc 历史上较小 cycle（~900 行总改动，与 v0.18 cycle ~820 行同档轻量）。3 stage 全部 ✅（1 Spike + 1 Slice + 1 Review+收尾合并段，与 v0.15/v0.16/v0.17/v0.18 cycle 同款合并模式延续），MCP tool 总数 46 → 46（不变——4 项都是 transport 层与注册表基础设施补全），0 份新 ADR + 1 份扩段（[ADR-0027](docs/adr/0027-rmcp-resource-subscribe-sse-transport.md) §6 SSE transport lifecycle 4 子段），首次引入 axum + tower + tower-http web framework deps（与 rmcp 0.11 内部 axum 0.7.9 / tower 0.5.3 / tower-http 0.6.11 对齐无 duplicate）。全量回归 1447 passed / 0 failed / 4 ignored，fmt / clippy / build（含 --no-default-features）/ bench --no-run 全过。详见 [REVIEW-v0.19](docs/reviews/REVIEW-v0.19.md)（P0 0 / P1 0 / P2 4，不触发拆分）。
+
+**4 项基础设施补全落地范围**：
+
+- **项 1 runtime 分支切换**（stage 2）：`TransportKind` enum（Stdio / Sse(SseTransportConfig)，stage 1 Spike 落地）+ `build_runtime(kind)` match 分支（Stdio → `Builder::new_current_thread().enable_all()` / Sse → `Builder::new_multi_thread().worker_threads(4).enable_all()`）+ `run_mcp_serve(kind: TransportKind)` 重构签名 + TTY 提示仅 stdio 路径触发 + `mcp_cmd::run_mcp` 用 `build_transport_kind` helper 从 CLI flags (`transport / bind_addr / port`) 构造 `TransportKind`
+- **项 2 multi-client 注册表升级**（stage 2）：注册表 value `Vec<Peer<RoleServer>>` → `Vec<Arc<Peer<RoleServer>>>`（`type SubscribeRegistry` 别名拆 clippy `type_complexity`）+ `subscribe` 业务 `Arc::new(peer)` 包装后 push（**stage 2 已知限制**——subscribe 跨调用不做 dedup / SSE multi-client unsubscribe 清空整个 vec；rmcp 0.11 `Peer` 不暴露 public identity API，mcp-session-id-based 精确 identity 留 v0.20+ cycle）
+- **项 4 push task 并发改造**（stage 2）：`spawn_push_task` 改双层 for 循环为 `tokio::task::JoinSet` 并发 spawn（snapshot 注册表 + 每个 `Arc<Peer>::clone` 的 `notify_resource_updated` 并发执行）+ `join_next().await` 逐个判断 fail peer + `Arc::ptr_eq(p, &failed_arc)` 一次性从 vec retain 精确清理（替代 stage 1 Spike `vec.clear()` 不精确策略）
+- **项 3 SSE transport 入口**（stage 2）：`serve_sse` 从 stage 1 Spike stub 改为真实 axum + tower `StreamableHttpService` 路径——签名 `pub async fn serve_sse(config: SseTransportConfig) -> anyhow::Result<()>`；实装 `(1) StreamableHttpService::new(service_factory, LocalSessionManager, StreamableHttpServerConfig)` + `(2) axum Router /mcp POST route_service` + `(3) TcpListener::bind(socket_addr)` + `(4) axum::serve(listener, app)`；`SseTransportConfig::socket_addr()` 仅接 IP 字面量（hostname "localhost" 拒绝，stage 2 安全保守）
+
+**关键数字**：
+
+| 指标 | v0.18.0 基线 | v0.19.0 落地 |
+|---|---|---|
+| 全量回归 | 1425 passed / 0 failed / 3 ignored | **1447 passed / 0 failed / 4 ignored**（+22 新测试：12 stage 1 + 10 stage 2）|
+| MCP tool 总数 | 46 | **46**（不变，v0.19 cycle 不新增 tool——4 项都是基础设施补全）|
+| Transport | stdio only | **stdio + SSE**（`--transport sse --port 8080`）|
+| Cargo deps | 无 axum / tower / tower-http | **+ axum 0.7 + tower 0.5 + tower-http 0.6**（与 rmcp 内部对齐无 duplicate）|
+| runtime 分支 | current_thread（stdio 路径，与 v0.7~v0.18 既有路径一致）| **stdio current_thread / SSE multi_thread worker_threads(4)**（按 TransportKind 分支选 runtime）|
+| multi-client 注册表 | `HashMap<String, Peer>`（单 client 假设）| **`HashMap<String, Vec<Arc<Peer>>>`**（多 client 各占 vec 一位 + Arc::ptr_eq 精确 cleanup）|
+| push task | 顺序 for 循环遍历 + fail peer `vec.clear()` | **`JoinSet::spawn` 并发 + `Arc::ptr_eq` 精确 retain**（替代 stage 1 Spike 不精确策略）|
+| ADR | 0026 / 0027 / 0028 / 0029 | **0 新 ADR + 1 扩段**（0027 §6 SSE transport lifecycle 4 子段：runtime 分支 / axum 路由 / multi-client 注册表 / bind-addr 安全默认）|
+
+**v0.20+ 候选方向**（详细评估留 v0.20 cycle brainstorm）：mcp-session-id-based subscribe-push identity（v0.19 stage 2 P2-S4 + P2-S5 + P2-V2 补全）/ graceful shutdown（Ctrl+C 时 axum 主动关连接 + SubscribePushWorker::shutdown 实装）/ Auth Bearer token / CORS / TLS / bollard prune_children 真正字段 / record 暴露方案 (b) worker 持续采样 / VT100 永久转码 CLI / options_for_version 改名 fixint_options / 主题 C 跨平台扩展 / 主题 E 插件系统 / 主题 G 分布式采集。
+
+### v0.19.0 阶段 3 — REVIEW-v0.19 + CHANGELOG + README + Cargo.toml bump + tag v0.19.0
+
+v0.19.0 cycle stage 3 Review+收尾合并段落地：cycle 完结总览段 + 关键数字表（v0.18 末 vs v0.19 末）+ P0/P1/P2 Findings 段（P0 0 / P1 0 / P2 4，不触发拆分）+ v0.20+ 候选方向段（12 项，mcp-session-id-based identity 优先）。stage 3 不动业务代码（仅 doc + Cargo.toml version bump + git tag），不新增测试（cycle 已封版）。
+
+- **Docs**: `docs/reviews/REVIEW-v0.19.md`（新建 ~210 行 = cycle 总结 + 4 项 infrastructure 补全 4 维度审查 + Findings 汇总表 + cycle 完整性评分 + v0.20+ 候选方向 12 项）；`docs/stages/v0.19-brainstorm.md`（3 stage 总览表 stage 3 ⬜ → ✅，唯一勾选点）。
+- **Changed**: `CHANGELOG.md`（`[Unreleased]` 段 → `[0.19.0] - 2026-07-14` 段，加 cycle 完结总览段 + stage 3 段子）。
+- **Changed**: `README.md`（MCP 章节 stdio transport 段后加 SSE transport 用法示例 + bind-addr 安全默认提示 + 已知限制提示，详见 §MCP server SSE transport 子段）。
+- **Changed**: `Cargo.toml`（`version = "0.18.0"` → `"0.19.0"`，唯一一行改动）。
+- **Git**: `git tag v0.19.0`（annotated tag 含 cycle 完结总览）。
+
+**关键数字**：
+
+| 指标 | v0.19.0 stage 2 基线 | v0.19.0 stage 3 落地 |
+|---|---|---|
+| 全量回归 | 1447 passed / 0 failed / 4 ignored | **1447 passed / 0 failed / 4 ignored**（不变——stage 3 仅 doc + version bump，不动业务代码）|
+| MCP tool 总数 | 46 | **46**（不变）|
+| Cargo version | 0.18.0 | **0.19.0** |
+| git tag | — | **v0.19.0** |
+
+**设计要点**：(1) **stage 3 不动业务代码**（仅 doc + Cargo.toml version bump + git tag）；(2) **stage 3 不新增测试**（cycle 已封版，新测试留 v0.20+ cycle）；(3) **manual 验证 SSE transport 启动**：`./target/release/proc.exe mcp serve --transport sse --port 18080` 启动 banner `MCP SSE server listening on http://127.0.0.1:18080/mcp (bind_addr=127.0.0.1, port=18080)` + HTTP POST `/mcp` 返 406（rmcp StreamableHttpService 对单独 initialize POST 不带 GET SSE stream context 正确拒绝，证明 server live + routing 工作）；(4) **multi-client 同 URI 订阅 1s tick push + bind-addr LAN 暴露完整 manual 验证推迟 v0.20+ cycle**（依赖项 2 mcp-session-id-based identity 补全后才可精确验证，详见 REVIEW-v0.19 P2-V2 finding）。
 
 ### v0.19.0 阶段 2 — 4 项业务实装（runtime 分支 + multi-client 注册表 + push task 并发 + SSE transport 入口）
 
