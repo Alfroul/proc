@@ -61,12 +61,14 @@ fn test_subscribe_push_worker_spawn_push_task_returns_err_without_tokio_runtime(
 
 #[test]
 fn test_subscribe_push_worker_source_uses_peer_role_server() {
-    // stage 2：静态断言 SubscribePushWorker 注册表 value 类型是 Peer<RoleServer>
-    // （stage 1 Spike 用 () 占位，stage 2 替换为 Peer<RoleServer>）
+    // v0.19 stage 1 Spike：注册表 value 类型从 Peer<RoleServer> 升级为
+    // Vec<Peer<RoleServer>>（适配 SSE multi-client 场景，与 brainstorm §决策 3 +
+    // ADR-0027 §6.3 multi-client 注册表对齐）。stage 2 加 Arc::ptr_eq identity
+    // 检测 + JoinSet 并发 push + fail peer 一次精确 retain 清理。
     let source = std::fs::read_to_string("src/mcp/subscribe_worker.rs").expect("source readable");
     assert!(
-        source.contains("subscribers: Arc<Mutex<HashMap<String, Peer<RoleServer>>>>"),
-        "stage 2 注册表 value 应为 Peer<RoleServer>"
+        source.contains("subscribers: Arc<Mutex<HashMap<String, Vec<Peer<RoleServer>>>>>"),
+        "v0.19 stage 1 Spike 注册表 value 应升级为 Vec<Peer<RoleServer>>"
     );
     assert!(
         source.contains("peer.notify_resource_updated"),

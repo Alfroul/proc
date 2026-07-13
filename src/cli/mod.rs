@@ -87,7 +87,11 @@ pub fn run_subcommand(cmd: &Command) {
         // `sub=None` 时 fall back 到 `serve`，让 `proc mcp` 等价 `proc mcp serve`。
         Command::Mcp { sub } => match sub {
             Some(s) => mcp_cmd::run_mcp(s),
-            None => mcp_cmd::run_mcp(&McpSub::Serve),
+            None => mcp_cmd::run_mcp(&McpSub::Serve {
+                transport: "stdio".to_string(),
+                bind_addr: "127.0.0.1".to_string(),
+                port: 8080,
+            }),
         },
         // v0.7.0 阶段 3：`proc completions --shell <SHELL>` 在线生成补全脚本。
         Command::Completions { shell } => completions::run_completions(*shell),

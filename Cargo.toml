@@ -45,8 +45,22 @@ serde_json = "1"
 #   默认 feature 含 `macros` + `server`，自动启用 `dep:schemars`（v1.x）。
 #   我们直接复用 `rmcp::schemars::JsonSchema`，不另引直接依赖避免版本分裂。
 # - async-trait：rmcp handler trait 异步接口所需
-rmcp = { version = "0.11", features = ["server", "transport-io"] }
+# - v0.19 stage 1 Spike：SSE transport full 实装 + multi-client 升级 cycle（ADR-0027 §6）。
+#   rmcp features 加 `transport-streamable-http-server`（启用 streamable_http_server module）
+#   + `transport-streamable-http-server-session`（启用 session submodule + StreamableHttpService）。
+#   **stage 1 Spike 调研验证（cargo build error + context7 docs 2026-07-13）**：brainstorm §决策 4
+#   假设的 `transport-streamable-http-server` 单数是对的（启用 module），需补 `-session` 后缀
+#   启用 session submodule（含 StreamableHttpService struct）。rmcp 0.11 实际 features 清单：
+#   `transport-streamable-http-server` ✅ + `transport-streamable-http-server-session` ✅
+#   （无 `-tower` 后缀变体——context7 docs 描述的「tower submodule」是 module 可见性，
+#   不是 Cargo feature 名，需 `tower` feature 启用 tower 集成）。
+# - v0.19 stage 1 Spike：axum + tower + tower-http 直接 deps（与 rmcp 0.11 内部 axum 0.7 / tower 0.5
+#   对齐避免 duplicate deps，stage 1 Spike 跑 `cargo tree -d | grep -E "axum|tower|http"` 验证）。
+rmcp = { version = "0.11", features = ["server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-server-session"] }
 async-trait = "0.1"
+axum = "0.7"
+tower = "0.5"
+tower-http = "0.6"
 bincode = "1"
 # v0.17 stage 3 TD-44：u64 → String 快速格式化（format_bytes / format_speed /
 # format_uptime / format_run_time 中 B 档 / 时间档路径替换 std format!，省 1 次

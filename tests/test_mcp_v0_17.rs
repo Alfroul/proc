@@ -665,7 +665,9 @@ fn test_server_handler_impl_uses_procedure_resource_uris_constant() {
 // ===========================================================================
 
 #[test]
-fn test_serve_sse_returns_v0_18_hint_error() {
+fn test_serve_sse_returns_v0_19_stage_1_hint_error() {
+    // v0.19 stage 1 Spike：serve_sse 改返 v0.19 stage 1 Spike 标记错误
+    // （v0.17 stage 4 stub 升级到 v0.19 stage 1 Spike stub，含 3 项调研结论摘要）
     use proc::mcp::transport::{SseTransportConfig, serve_sse};
     let config = SseTransportConfig::default();
     let result = serve_sse(&config);
@@ -675,15 +677,15 @@ fn test_serve_sse_returns_v0_18_hint_error() {
     );
     let err = result.expect_err("error message");
     assert!(
-        err.contains("v0.18+"),
-        "error should mention v0.18+ cycle deferral, got: {err}"
+        err.contains("v0.19 stage 1 Spike"),
+        "error should mention v0.19 stage 1 Spike stub, got: {err}"
     );
     assert!(
-        err.contains("streamable_http_server"),
-        "error should mention rmcp streamable_http_server module, got: {err}"
+        err.contains("transport-streamable-http-server"),
+        "error should mention rmcp streamable_http_server Cargo feature, got: {err}"
     );
     assert!(
-        err.contains("Cargo feature"),
+        err.contains("Cargo feature") || err.contains("session submodule"),
         "error should mention Cargo feature requirement, got: {err}"
     );
 }

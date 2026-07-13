@@ -1,7 +1,7 @@
 # ADR-0027：rmcp 0.11 Resource subscribe + SSE transport 设计
 
-**Status**：Accepted（**v0.17 stage 4 partial 落地 polling-push；v0.18 stage 2 补全 subscribe-push**，详见 §关键设计点 5 + Migration path）
-**Date**：2026-07-07（v0.17.0 阶段 1 落地决策）/ 2026-07-10 扩 §5 subscribe-push lifecycle（v0.18 stage 1 Spike 决策）
+**Status**：Accepted（**v0.17 stage 4 partial 落地 polling-push；v0.18 stage 2 补全 subscribe-push；v0.19 stage 2 补全 SSE transport full 实装 + multi-client 升级**，详见 §关键设计点 5 + §6 SSE transport lifecycle + Migration path）
+**Date**：2026-07-07（v0.17.0 阶段 1 落地决策）/ 2026-07-10 扩 §5 subscribe-push lifecycle（v0.18 stage 1 Spike 决策）/ 2026-07-13 扩 §6 SSE transport lifecycle（v0.19 stage 1 Spike 决策）
 **Related**：ADR-0009（v0.7 MCP server 设计）、ADR-0024（v0.15 handler 子 module 拆分）、ADR-0026（MCP handler 持久字段策略）、v0.15 TD-52 归档（sparkline 30s 历史不暴露）
 
 ## 背景（Context）
@@ -123,6 +123,107 @@ pub struct SubscribePushWorker {
 
 **与 brainstorm 决策 3「自建 worker lifecycle」对齐**：rmcp 0.11 不提供原生 worker lifecycle helper，proc 自建「注册表 + 1s tick push + client 断开自动清理」三步管理。
 
+### 6. SSE transport lifecycle（v0.19 stage 1 Spike 扩段，stage 2 实装）
+
+**v0.19 cycle 主题**：SSE transport full 实装（v0.17 stage 4 stub 推迟项）+ multi-client subscribe-push 升级（v0.18 P2-S2 finding 补全）。4 子段对应 cycle 4 项业务实装。
+
+#### §6.1 runtime 分支选择（项 1 落地）
+
+stdio transport 保 `current_thread` runtime（v0.7~v0.18 既有路径零回归）/ SSE transport 走 `new_multi_thread().worker_threads(4)` runtime（多 client 并发 + axum + tower StreamableHttpService 需要）。
+
+**stage 1 Spike 调研结论**（context7 tokio docs 验证，2026-07-13）：
+
+| API | 签名 | 用途 |
+|---|---|---|
+| `tokio::runtime::Handle::runtime_flavor()` | `&self -> RuntimeFlavor` | 检测当前 runtime 类型 |
+| `RuntimeFlavor::CurrentThread` | enum 变体 | current_thread runtime 标识 |
+| `RuntimeFlavor::MultiThread` | enum 变体 | multi_thread runtime 标识 |
+| `RuntimeFlavor` derive | `#[derive(Debug, PartialEq, Eq)] #[non_exhaustive]` | 可直接 == 比较；match 要 `_` arm |
+
+stage 2 测试可直接写：
+```rust
+let runtime = build_runtime(&TransportKind::Stdio).unwrap();
+assert_eq!(runtime.handle().runtime_flavor(), RuntimeFlavor::CurrentThread);
+```
+
+**DockerMonitor block_on 真实风险评估**：docker runtime 独立（`Runtime::new()` 默认 multi_thread），不会抢 MCP runtime 的线程。真实风险是 multi_thread worker thread 被 docker 同步 `block_on` 阻塞（多 client 并发调 docker tool 时 worker thread 可能被占满）。mitigate：worker_threads(4) ≥ 一般 client 数；docker `block_on` 通常 < 1s（bollard list_containers 实测）；> 4 个并发 client 同时调 docker tool 概率低。
+
+#### §6.2 axum 路由 + StreamableHttpService（项 3 落地）
+
+**stage 1 Spike 调研关键发现**（cargo build error 实测 + context7 rmcp 0.11 docs 验证，2026-07-13）—— **Cargo feature flag 验证（brainstorm §决策 4 假设基本正确，补 `-session` 后缀）**：
+
+| brainstorm §决策 4 假设 | rmcp 0.11 实际 features 清单（cargo error 输出） | 验证结论 |
+|---|---|---|
+| `transport-streamable-http-server`（单数） | `transport-streamable-http-server` ✅ + `transport-streamable-http-server-session` ✅ + `transport-streamable-http-client` + `transport-streamable-http-client-reqwest` + `tower`（独立 feature） | brainstorm 假设正确，需补 `-session` 后缀启用 session submodule（含 `StreamableHttpService` struct）。**不存在 `-tower` 后缀变体**——context7 docs 描述的「tower submodule」是 module 可见性，需 `transport-streamable-http-server-session` + `transport-streamable-http-server` + `server` 三个 feature 组合启用（不能有 `local`） |
+
+**最终 Cargo.toml 配置**（stage 1 Spike 验证 cargo build --release 通过，2026-07-13）：
+```toml
+rmcp = { version = "0.11", features = ["server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-server-session"] }
+```
+
+**理由**：`StreamableHttpService` struct 在 `rmcp::transport::streamable_http_server::tower` 模块内，需 `transport-streamable-http-server`（启用 module）+ `transport-streamable-http-server-session`（启用 session submodule + StreamableHttpService）两个 feature 组合。rmcp 0.11 内部 axum 0.7.9 + tower 0.5.3 + tower-http 0.6.11 被这两个 feature 拉入，proc Cargo.toml 显式加 `axum = "0.7"` / `tower = "0.5"` / `tower-http = "0.6"` 与 rmcp 内部对齐避免 duplicate deps（cargo build 实测无 duplicate，2026-07-13）。
+
+**`StreamableHttpService::new` API 签名**（context7 docs 验证）：
+```rust
+pub fn new<S, M>(
+    service_factory: impl Fn() -> Result<S, Error> + Send + Sync + 'static,
+    session_manager: Arc<M>,
+    config: StreamableHttpServerConfig,
+) -> Self
+```
+
+- `service_factory`：closure 每次连接 new 一个 `ProcMcpHandler`（与 brainstorm §决策 7 项 3 描述一致）
+- `session_manager`：`Arc<impl SessionManager>`，proc 用 rmcp 内置 `LocalSessionManager` 或自实装（stage 2 调研具体类型）
+- `config`：`StreamableHttpServerConfig`（builder 方法 `with_allowed_hosts` / `with_sse_keep_alive` / `with_stateful_mode` / `disable_allowed_hosts` 等）
+
+**axum 版本对齐**（cargo tree -d baseline 验证，2026-07-13）：
+
+- 当前 `Cargo.toml` `rmcp = { version = "0.11", features = ["server", "transport-io"] }` 不引 axum / tower
+- 加 `-tower` + `-session` feature 后 rmcp 内部 axum 0.7 / tower 0.5 / http 1.x 被拉入
+- proc Cargo.toml 显式加 `axum = "0.7"` / `tower = "0.5"` / `tower-http = "0.6"` 与 rmcp 内部对齐避免 duplicate deps
+- stage 1 Spike 落地后跑 `cargo tree -d | grep -E "axum|tower|http"` 验证无 duplicate（baseline 状态当前无 axum/tower deps）
+
+**SessionManager trait**（context7 docs 验证）：8 个方法（create_session / initialize_session / has_session / close_session / create_stream / accept_message / create_standalone_stream / resume / restore_session provided）。proc stage 2 优先复用 rmcp 内置 `LocalSessionManager`（rmcp 内置 impl），如需自定义 session lifecycle（如 session-bound subscribe-push worker）再自实装。
+
+#### §6.3 multi-client 注册表（项 2 落地）
+
+`HashMap<String, Peer<RoleServer>>` 升级为 `HashMap<String, Vec<Peer<RoleServer>>>`（同 URI 多 client 各占 vec 一位）。
+
+**stage 1 Spike 调研结论**（context7 rmcp 0.11 docs 验证，2026-07-13）：
+
+| 维度 | rmcp 0.11 API | 结论 |
+|---|---|---|
+| `Peer<RoleServer>` derive Eq/Hash | 文档未明确显示 | stage 2 用 `Arc::ptr_eq` 做 vec 去重（Peer 内部 Arc 包装，cheap clone 后 pointer 一致） |
+| `RoleServer` impl PartialEq + Eq | `fn eq(&self, other: &RoleServer) -> bool` | 但 RoleServer 是 PhantomData marker，比较无意义（不用于 Peer identity） |
+| SSE 路径 session identity | `LocalSessionHandle::id() -> &SessionId` | SSE-only，stdio 路径无 session 概念 |
+| HTTP header `mcp-session-id` | `Extension<http::request::Parts>` 在 tool handler 拿 | SSE-only，stdio 无 |
+| `Peer<RoleServer>::from_context_part` | 从 RequestContext 拿 Peer | 已用于 v0.18 stage 2 `context.peer.clone()` |
+
+**stage 2 实装策略**（基于调研结论）：
+
+1. **stdio 路径**（current_thread runtime）：注册表 value `Vec<Peer>` 长度始终 ≤ 1（单 client 假设），identity 检测降级为「vec 是否空」
+2. **SSE 路径**（multi_thread runtime）：用 `Arc::ptr_eq(p1, p2)` 做 vec 去重 + fail peer 清理（Peer 是 Arc 包装，cheap clone 后 pointer 一致）
+3. **fallback**：如 `Arc::ptr_eq` 不可靠（Peer 内部不是简单 Arc 包装），fallback 到 `Peer::id()` / `mcp-session-id` HTTP header 拿 client 标识（stage 2 调研具体 API）
+
+**push task 改造**（项 4 落地）：1s tick 遍历 `Vec<Peer>` 用 `tokio::task::JoinSet` 并发调 `peer.notify_resource_updated`，`join_next().await` 逐个判断 fail peer 一次性从注册表清理。
+
+`JoinSet` 相对 `join_all` 的优势（brainstorm §FAQ Q5 + 本 ADR §6.3 实装策略对齐）：
+1. **fail peer 一次性清理**：JoinSet 的 `join_next().await` 逐个判断 vs `join_all` 等所有 future 完成
+2. **abort 能力**：`abort_all()` 在 worker shutdown 时主动取消
+3. **backpressure**：可配 `build()` 限并发度，避免 100 个 client 同 URI 一次性 spawn 100 个 task
+
+#### §6.4 bind-addr 安全默认（项 3 落地）
+
+CLI flag `--bind-addr` 默认 `127.0.0.1`（仅本机，与 ADR-0008 self-mitigation policy 对齐）/ `0.0.0.0`（全网卡，用户显式 opt-in）。
+
+**安全考量**：SSE transport 暴露 proc MCP tool（含 `proc_docker_rm` / `proc_docker_image_rm` / `proc_docker_volume_rm` / `proc_usb_release` / `proc_record_start` 等写操作），全网卡监听（`0.0.0.0`）需用户显式 opt-in 避免意外暴露到 LAN。默认 `127.0.0.1` 让本机使用（如 mcp-inspector 调试 / Claude Desktop 本机集成）零配置，LAN 部署需用户明确知晓风险。
+
+**stage 2 落地**：
+
+- `src/cli/def.rs::Command::McpServe` 加 `bind_addr: String` 字段默认 `"127.0.0.1"`（clap derive `#[arg(long, default_value = "127.0.0.1")]`）
+- CLI 解析后传入 `SseTransportConfig { bind_addr, port }`
+- mcp-inspector manual 验证：`--bind-addr 0.0.0.0` LAN 可访问，默认 `127.0.0.1` 仅本机可访问
+
 ## 备选方案（Alternatives）
 
 ### (a) 仅 tool，无 Resource subscribe
@@ -155,7 +256,9 @@ pub struct SubscribePushWorker {
 - **v0.17 stage 4 Slice**：ResourceRoute trait impl + SSE transport 入口 + TD-52 sparkline worker + `proc_metrics_history` tool 业务逻辑填充（**polling-push partial 落地**——client 走 `resources/read` 主动拉）
 - **v0.18 stage 1 Spike**：扩 §5 subscribe-push worker lifecycle + stage 1 调研 rmcp 0.11 API（已确认无原生 `ServerHandler::subscribe_resource`，自建 worker lifecycle 必要）+ `src/mcp/subscribe_worker.rs`（新）骨架 + `ResourceRoute` trait 加 `subscribe` / `unsubscribe` stub
 - **v0.18 stage 2 Slice**：subscribe-push worker lifecycle 业务逻辑填充（注册表 + 1s tick `peer.notify_resource_updated` push + client 断开自动清理）+ ADR-0027 Status 备注 「subscribe-push 已补全」
-- **v0.19+ cycle**：评估 WebSocket transport（如 rmcp 0.12+ 支持）/ 评估 Resource subscribe 推送频率可配置（如 5s / 10s tick 替代 1s tick）
+- **v0.19 stage 1 Spike**：扩 §6 SSE transport lifecycle（4 子段：§6.1 runtime 分支 / §6.2 axum 路由 / §6.3 multi-client 注册表 / §6.4 bind-addr 安全默认）+ stage 1 调研 3 子任务（context7 + cargo tree -d 验证）：(a) Cargo feature 修正 `transport-streamable-http-server` → `transport-streamable-http-server-tower` + `transport-streamable-http-server-session` 两个 feature（小修，< 5 处属 stage 1 内修正）；(b) `Peer<RoleServer>` identity 检测策略——文档未明确 Eq/Hash，stage 2 用 `Arc::ptr_eq` + `Arc<Peer>` cheap clone pointer equality；(c) tokio `Handle::runtime_flavor() -> RuntimeFlavor` 完美适配 stage 2 测试 `test_stdio_transport_uses_current_thread_runtime` / `test_sse_transport_uses_multi_thread_runtime`。stage 1 落地 5 项 stub（TransportKind enum / build_runtime / serve_sse 新格式 / CLI flag bind-addr + port / 注册表 Vec<Peer> 类型升级）+ Cargo.toml 加 axum 0.7 / tower 0.5 / tower-http 0.6 + rmcp feature 扩。
+- **v0.19 stage 2 Slice**：4 项业务实装（项 1 runtime 分支 build_runtime match / 项 2 multi-client 注册表 Vec<Peer> + Arc::ptr_eq identity / 项 4 push task JoinSet 并发 + fail peer 一次清理 / 项 3 SSE transport 入口 StreamableHttpService::new + axum Router + TcpListener bind）+ ADR-0027 Status 备注 「SSE transport full 实装 + multi-client 升级已补全」
+- **v0.20+ cycle**：评估 WebSocket transport（如 rmcp 0.12+ 支持）/ 评估 Resource subscribe 推送频率可配置（如 5s / 10s tick 替代 1s tick）/ SSE 后续能力（graceful shutdown / Auth Bearer token / CORS / TLS）
 
 ## 相关 ADR / 文档
 

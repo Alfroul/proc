@@ -290,9 +290,42 @@ pub enum Command {
 /// 和 `inspect <tool>`（打印某 tool 的 schema）—— v0.8 评估。
 #[derive(Subcommand, Debug)]
 pub enum McpSub {
-    /// 启动 MCP server（stdio transport），阻塞直到 client 关闭流。
-    /// 接入 Claude Desktop / Cursor 见 docs/adr/0009-mcp-server.md。
-    Serve,
+    /// 启动 MCP server，阻塞直到 client 关闭流。
+    ///
+    /// 默认 stdio transport（v0.7~v0.18 既有路径，单 client 集成适合 Claude Desktop /
+    /// Cursor）；SSE transport 是 v0.19 stage 2 实装（axum + tower StreamableHttpService，
+    /// 多 client 监控 / Web dashboard / 远程 agent 集成）。接入 Claude Desktop / Cursor
+    /// 见 docs/adr/0009-mcp-server.md + docs/adr/0027-rmcp-resource-subscribe-sse-transport.md。
+    Serve {
+        /// transport 类型：`stdio`（默认，单 client，current_thread runtime）/
+        /// `sse`（v0.19 stage 2 实装，多 client，multi_thread runtime）。
+        ///
+        /// **stage 1 Spike**：仅解析 flag 不真正实装 sse 路径（serve_sse 返 stage 1
+        /// Spike stub 错误）。stage 2 实装时 main.rs / mcp_cmd.rs dispatch 调
+        /// `TransportKind::from_cli_str(&transport)` 把 String 转 TransportKind，
+        /// 再传 `run_mcp_serve(kind)`（stage 2 重构签名）。
+        #[arg(long, default_value = "stdio")]
+        transport: String,
+
+        /// SSE transport 绑定地址（默认 `127.0.0.1` 仅本机 / `0.0.0.0` 全网卡需显式 opt-in）。
+        ///
+        /// 与 ADR-0027 §6.4 bind-addr 安全默认对齐——SSE 暴露 proc MCP tool
+        /// （含 `proc_docker_rm` / `proc_docker_image_rm` / `proc_docker_volume_rm` /
+        /// `proc_usb_release` / `proc_record_start` 等写操作），全网卡监听需用户显式
+        /// opt-in 避免意外暴露到 LAN。默认 `127.0.0.1` 让本机使用零配置（如
+        /// mcp-inspector 调试 / Claude Desktop 本机集成），LAN 部署需用户明确知晓风险。
+        ///
+        /// **stage 1 Spike**：仅解析 flag，stage 2 serve_sse 实装时真正用到。
+        #[arg(long, default_value = "127.0.0.1")]
+        bind_addr: String,
+
+        /// SSE transport 监听端口（默认 8080）。
+        ///
+        /// **stage 1 Spike**：仅解析 flag，stage 2 serve_sse 实装时真正用到
+        /// （`tokio::net::TcpListener::bind((bind_addr.as_str(), port))`）。
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
 }
 
 /// Docker 子命令（E3/E4/E1）。
