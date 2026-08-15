@@ -1181,16 +1181,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gguf"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3320278e066732d437f2860270b92c371e97a7710a1ad242973005b883a9e58"
-dependencies = [
- "nom",
- "serde",
-]
-
-[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2232,7 +2222,6 @@ dependencies = [
  "filelocksmith",
  "filetime",
  "futures-util",
- "gguf",
  "itoa",
  "netstat2",
  "nom",

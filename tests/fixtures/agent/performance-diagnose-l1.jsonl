@@ -1,0 +1,5 @@
+{"query":"我电脑为什么这么卡？","request":{"provider":"seed"},"response_deltas":[{"Text":"让我先看一下系统整体情况。"},{"ToolCall":{"id":"c1","name":"proc_metrics_system","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"CPU 使用率为什么这么高？","request":{"provider":"seed"},"response_deltas":[{"Text":"先看系统整体 CPU 情况。"},{"ToolCall":{"id":"c1","name":"proc_metrics_system","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"内存快满了，哪些进程占用最多？","request":{"provider":"seed"},"response_deltas":[{"Text":"我来查内存占用最多的进程。"},{"ToolCall":{"id":"c1","name":"proc_ls","arguments":{"sort":"mem","limit":10}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"磁盘 I/O 异常活跃，是什么进程造成的？","request":{"provider":"seed"},"response_deltas":[{"Text":"先看磁盘 IO 指标。"},{"ToolCall":{"id":"c1","name":"proc_metrics_disk_io","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"GPU 温度为什么这么高？","request":{"provider":"seed"},"response_deltas":[{"Text":"查一下 GPU 状态。"},{"ToolCall":{"id":"c1","name":"proc_metrics_gpu","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

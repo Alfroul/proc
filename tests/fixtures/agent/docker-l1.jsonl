@@ -1,0 +1,3 @@
+{"query":"postgres 容器为什么 unhealthy？","request":{"provider":"seed"},"response_deltas":[{"Text":"查容器健康详情。"},{"ToolCall":{"id":"c1","name":"proc_docker_inspect","arguments":{"name":"postgres"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"redis 容器最近的日志有什么异常？","request":{"provider":"seed"},"response_deltas":[{"Text":"看最近的容器日志。"},{"ToolCall":{"id":"c1","name":"proc_docker_logs","arguments":{"name":"redis"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"哪些 Docker 镜像没在用可以删？","request":{"provider":"seed"},"response_deltas":[{"Text":"列出镜像并检查 in_use 标记。"},{"ToolCall":{"id":"c1","name":"proc_docker_images","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

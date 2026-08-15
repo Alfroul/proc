@@ -1,0 +1,4 @@
+{"query":"USB 设备状态异常，分步诊断","request":{"provider":"seed"},"response_deltas":[{"Text":"逐个设备查状态。"},{"ToolCall":{"id":"c1","name":"proc_eject_status","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"多个 USB 设备同时被占用，规划释放顺序","request":{"provider":"seed"},"response_deltas":[{"Text":"先看所有设备占用情况再规划顺序。"},{"ToolCall":{"id":"c1","name":"proc_eject_status","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"eject_status → kill → eject_status 反馈循环演示","request":{"provider":"seed"},"response_deltas":[{"Text":"第一步先查状态。"},{"ToolCall":{"id":"c1","name":"proc_eject_status","arguments":{"drive":"E"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"检测所有 USB 设备并生成健康报告","request":{"provider":"seed"},"response_deltas":[{"Text":"扫描全部设备状态。"},{"ToolCall":{"id":"c1","name":"proc_eject_status","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

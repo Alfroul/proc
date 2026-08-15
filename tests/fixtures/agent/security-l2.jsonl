@@ -1,0 +1,4 @@
+{"query":"检查所有从 %TEMP% 启动的未签名进程","request":{"provider":"seed"},"response_deltas":[{"Text":"先按路径过滤，再核对签名。"},{"ToolCall":{"id":"c1","name":"proc_ls","arguments":{"filter":"exe =~ /Temp/"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"分析某可疑进程的完整画像","request":{"provider":"seed"},"response_deltas":[{"Text":"从 summary tab 开始全维度收集。"},{"ToolCall":{"id":"c1","name":"proc_inspect","arguments":{"tab":"summary"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"Word 启动了 cmd，是不是 macro 攻击？","request":{"provider":"seed"},"response_deltas":[{"Text":"查 cmd 进程的父子链。"},{"ToolCall":{"id":"c1","name":"proc_inspect","arguments":{"tab":"summary"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"全系统安全审计，找出 top 10 最高风险进程","request":{"provider":"seed"},"response_deltas":[{"Text":"按安全分升序取前 10。"},{"ToolCall":{"id":"c1","name":"proc_ls","arguments":{"sort":"security_score","limit":10}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

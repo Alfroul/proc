@@ -1,0 +1,2 @@
+{"query":"当前所有 TLS 连接的 SNI 列表","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_flows","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"哪些进程在连接非标准端口？","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_flows","arguments":{"filter":"remote_port != 443 AND remote_port != 80"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

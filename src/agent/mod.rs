@@ -27,6 +27,8 @@ pub mod mock_provider;
 pub mod model_registry;
 pub mod prompts;
 pub mod provider;
+#[cfg(feature = "mock-provider")]
+pub mod record_fixture;
 pub mod tool_registry;
 pub mod tools;
 pub mod types;

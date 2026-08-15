@@ -1,0 +1,3 @@
+{"query":"PID 1234 是什么进程？","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_inspect","arguments":{"pid":1234,"tab":"summary"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"chrome.exe 的完整进程信息","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_ls","arguments":{"filter":"name =~ /chrome/","limit":10}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"显示 explorer.exe 的环境变量","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_inspect","arguments":{"tab":"env"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

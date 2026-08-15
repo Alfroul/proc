@@ -1,0 +1,4 @@
+{"query":"chrome.exe 为什么占用这么多内存？","request":{"provider":"seed"},"response_deltas":[{"Text":"查一下该进程的详情。"},{"ToolCall":{"id":"c1","name":"proc_inspect","arguments":{"tab":"summary"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"PID 5678 加载了哪些 DLL？","request":{"provider":"seed"},"response_deltas":[{"Text":"列出该进程加载的 DLL。"},{"ToolCall":{"id":"c1","name":"proc_inspect","arguments":{"pid":5678,"tab":"dlls"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"哪些进程在监听 8080 端口？","request":{"provider":"seed"},"response_deltas":[{"Text":"查 8080 端口的监听进程。"},{"ToolCall":{"id":"c1","name":"proc_port","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"PID 1234 打开了哪些文件句柄？","request":{"provider":"seed"},"response_deltas":[{"Text":"列出该进程的句柄。"},{"ToolCall":{"id":"c1","name":"proc_handles","arguments":{"pid":1234}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

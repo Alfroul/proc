@@ -1,0 +1,2 @@
+{"query":"TCP 重传率为什么这么高？","request":{"provider":"seed"},"response_deltas":[{"Text":"查 TCP 传输质量统计。"},{"ToolCall":{"id":"c1","name":"proc_port","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"chrome 在和哪些远程服务器通信？","request":{"provider":"seed"},"response_deltas":[{"Text":"按进程名过滤 flow。"},{"ToolCall":{"id":"c1","name":"proc_flows","arguments":{"filter":"name =~ /chrome/"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

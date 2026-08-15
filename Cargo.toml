@@ -92,12 +92,11 @@ regex = "1"
 # - reqwest：LlamaCppProvider（本地 llama-server OpenAI 协议）+ AnthropicProvider
 #   （云端 Messages API）HTTP 客户端。default-features = false + rustls-tls
 #   避免拉入 openssl（与 proc 既有 rustls 路径对齐）。
-# - gguf：GGUF 文件 KV metadata 解析（general.name / general.architecture），
-#   ModelRegistry 扫描本地模型用。
 # - tokio-stream：LlmProvider trait 的 BoxStream 流式增量工具。
 # - futures-util 已有（v0.7 docker deps），BoxStream 类型别名来自这里。
+# - gguf crate stage 2 已移除：0.1.2 把 header + tensor 段绑定解析，1.6GB
+#   模型需全量读入，改 src/agent/gguf_scan.rs 手写流式 metadata parser。
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
-gguf = "0.1"
 tokio-stream = "0.1"
 
 [target.'cfg(windows)'.dependencies]

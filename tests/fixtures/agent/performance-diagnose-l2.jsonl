@@ -1,0 +1,2 @@
+{"query":"从最近 30s 历史看 CPU 是什么时候飙起来的？","request":{"provider":"seed"},"response_deltas":[{"Text":"先取 30s 历史采样。"},{"ToolCall":{"id":"c1","name":"proc_metrics_history","arguments":{"metric":"cpu"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"检查所有 critical 告警并给出处理建议","request":{"provider":"seed"},"response_deltas":[{"Text":"先看系统整体状态，再定位告警来源。"},{"ToolCall":{"id":"c1","name":"proc_metrics_system","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

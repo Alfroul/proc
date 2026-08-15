@@ -1,0 +1,1 @@
+{"query":"找出端口扫描特征的进程","request":{"provider":"seed"},"response_deltas":[{"Text":"先拉全量 flow 再看同进程多 IP 模式。"},{"ToolCall":{"id":"c1","name":"proc_flows","arguments":{"limit":50}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

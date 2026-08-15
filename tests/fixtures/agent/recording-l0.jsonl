@@ -1,0 +1,2 @@
+{"query":"录屏文件 recording.prec 的元数据","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_replay_info","arguments":{"path":"recording.prec"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"录屏里有多少个异常事件？","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_replay_info","arguments":{"path":"recording.prec"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

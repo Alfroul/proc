@@ -1,0 +1,1 @@
+{"query":"找出查询过 DGA 风格可疑域名的进程","request":{"provider":"seed"},"response_deltas":[{"Text":"拉全量 DNS 日志后按域名熵特征过滤。"},{"ToolCall":{"id":"c1","name":"proc_dns","arguments":{"limit":100}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

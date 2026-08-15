@@ -1,0 +1,4 @@
+{"query":"web-app 容器为什么一直 restart？","request":{"provider":"seed"},"response_deltas":[{"Text":"先看容器状态和健康详情。"},{"ToolCall":{"id":"c1","name":"proc_docker_inspect","arguments":{"name":"web-app"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"postgres 容器内正在跑什么查询？","request":{"provider":"seed"},"response_deltas":[{"Text":"看容器内进程列表。"},{"ToolCall":{"id":"c1","name":"proc_docker_top","arguments":{"name":"postgres"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"哪些 Docker 卷没被任何容器使用？","request":{"provider":"seed"},"response_deltas":[{"Text":"列出卷并反查 in_use。"},{"ToolCall":{"id":"c1","name":"proc_docker_volumes","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"Docker 最近 5 分钟事件流有什么异常？","request":{"provider":"seed"},"response_deltas":[{"Text":"取最近一批 docker 事件。"},{"ToolCall":{"id":"c1","name":"proc_docker_events","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

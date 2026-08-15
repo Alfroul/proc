@@ -1,0 +1,2 @@
+{"query":"在录屏里搜 CPU > 80% 的时刻","request":{"provider":"seed"},"response_deltas":[{"Text":"用 FilterExpr 搜时间轴。"},{"ToolCall":{"id":"c1","name":"proc_replay_search","arguments":{"path":"recording.prec","query":":cpu > 80"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"书签 #3 那个时刻系统发生了什么？","request":{"provider":"seed"},"response_deltas":[{"Text":"先取书签列表定位帧。"},{"ToolCall":{"id":"c1","name":"proc_bookmarks_list","arguments":{"path":"recording.prec"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

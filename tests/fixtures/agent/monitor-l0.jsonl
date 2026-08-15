@@ -1,0 +1,2 @@
+{"query":"当前有哪些 active 告警？","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_monitor_list","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"列出当前所有监控配置","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_monitor_list","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

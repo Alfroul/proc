@@ -7,6 +7,21 @@
 
 ## [Unreleased]
 
+### v0.20.0 阶段 2 — agent 基础设施实装（Slice A）
+
+v0.20 cycle stage 2 Slice A 落地（项 1 provider 层 + 项 5 ToolRegistry catalog + 项 2 MockProvider fixture 回放 + 项 3 GGUF scanner）：agent 基础设施全落地，`proc agent models` 真实工作，MockProvider 可确定性回放 70 query（CI 零 LLM 调用）。全量回归 1483 passed / 0 failed / 4 ignored（基线 1465 + 18 新测试）。
+
+- **Added**: `src/agent/tools/catalog.rs`（新）—— 46 个既有 MCP tool + proc_help 元 tool = 47 schema 批量注册（entry 4 个 / 非 entry 43 个 / ToolCategory 10 类视图；`default_registry()` 构造入口）；`Delta` / `StopReason` 加 serde derive（fixture JSONL 序列化依赖，`{"Text":...}` externally tagged）
+- **Added**: `src/agent/mock_provider.rs` 实装 fixture 回放——惰性扫描 `tests/fixtures/agent/*.jsonl` 建 `query_hash → response_deltas` 索引（SHA-256 前 16 hex，取最后一条 user message），`complete()` 从 deltas 组装 CompleteResponse（Text 拼接 / ToolCall 收集 / EndTurn 取 stop_reason）、`stream()` 按序 yield 全部 deltas；未命中返 `LlmError::Config`（含 hash + 目录，可诊断）
+- **Added**: `src/agent/record_fixture.rs`（新）—— FixtureRecorder 批量录制工具（任意 `Box<dyn LlmProvider>` 注入，逐 query append 到 `<scenario>-l<level>.jsonl`，单 query 失败不阻塞）；真实 LLM 录制（Gemma 4 E2B + Anthropic）留 stage 3b 末段 provider 可用后执行
+- **Added**: `src/agent/gguf_scan.rs` 实装——手写流式 GGUF metadata parser（magic / version / tensor_count / metadata_count + 逐条 KV，定长值 seek-skip、array 递归、metadata 段结束即停不读 tensor 段，1.6GB 模型不全量读入）+ `is_gguf_file` magic 嗅探（ollama blobs 目录无扩展名场景）；`src/agent/model_registry.rs` 实装 `scan(&[String])`（占位符展开 + 递归深度 6 + Error 条目保留）
+- **Added**: `src/cli/agent_cmd.rs` 实装 `proc agent models`（NAME / SIZE / QUANT / ARCH / PATH 表格输出 + 空列表友好提示默认扫描路径）；`ModelRegistry::scan` 不合并默认路径（CLI 组装默认 + agent.toml search_paths，方法可测试）
+- **Added**: `tests/fixtures/agent/`（新目录）—— 27 个 `<scenario>-l<level>.jsonl` seed fixture（70 query 合成数据，结构合法确定性回放；真实录制 stage 3b 覆盖替换）+ README（格式 + seed 标注）
+- **Changed**: `Cargo.toml` 移除 gguf dep（0.1.2 把 header + tensor 段绑定解析且输入不完整时丢弃 header，1.6GB 模型需全量读入，弃用改手写 parser）
+- **Fixed**: `src/security/path_rules.rs::expand_env_placeholders` UTF-8 损坏 bug——原实现按字节迭代 + `push(c as char)`，多字节路径段（中文用户名）被逐字节拆散；改为按字符推进整段拷贝（agent.toml search_paths 复用时暴露，中文 Windows 用户名的 path_rules.toml 自定义路径同样受益）
+- **Fixed**: `quant_from_filename` 误判——`no-quant.gguf` 被 `starts_with('Q')` 判为 `QUANT`；收紧为 Q/IQ/F/BF 后紧跟数字
+- **Tests**: `tests/test_agent_v0_20_stage_2.rs` 新 18 测试（catalog 计数 / category 覆盖 / entry token 预算 / proc_help execute / 50 query 回放 / stream deltas / fixture 缺失 / query_hash / record_fixture round-trip / GGUF parser / 嵌套扫描 / %TEMP% 展开 / quant 边界）
+
 ### v0.20.0 阶段 1 — 内置 AI agent 骨架铺设（Spike）
 
 v0.20 cycle stage 1 Spike 落地（ADR-0030 内置 AI agent + Tool registry 两层架构，方向 A 内置 agent + 方向 E 本地 LLM 合并）：建立 `src/agent/` 模块结构（14 文件）+ 锁定 LlmProvider trait / ToolRegistry 接口签名 + CLI `proc agent` subcommand 注册（ask / models 返 stage 2/3 占位错误）。全量回归 1465 passed / 0 failed / 4 ignored（基线 1447 + 18 新 stub 测试，业务逻辑不动）。

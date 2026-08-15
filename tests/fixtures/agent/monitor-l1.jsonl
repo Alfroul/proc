@@ -1,0 +1,3 @@
+{"query":"添加监控：CPU > 90% 持续 3 分钟告警","request":{"provider":"seed"},"response_deltas":[{"Text":"添加 CPU 阈值监控规则。"},{"ToolCall":{"id":"c1","name":"proc_monitor_add","arguments":{"target_kind":"cpu_threshold","target":"cpu > 90 for 3m"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"监控 cargo dev 进程，挂了自动重启","request":{"provider":"seed"},"response_deltas":[{"Text":"添加进程存活监控。"},{"ToolCall":{"id":"c1","name":"proc_monitor_add","arguments":{"target_kind":"process_alive","target":"cargo dev"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"删除 ID 为 2 的监控配置","request":{"provider":"seed"},"response_deltas":[{"Text":"删除指定 id 的监控规则。"},{"ToolCall":{"id":"c1","name":"proc_monitor_remove","arguments":{"id":2}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
+use serde::{Deserialize, Serialize};
 
 use super::types::{Message, ToolCall, ToolResult, ToolSchema};
 
@@ -72,7 +73,8 @@ pub struct CompleteResponse {
     pub usage: Usage,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StopReason {
     EndTurn,
     ToolUse,
@@ -86,8 +88,9 @@ pub struct Usage {
     pub output_tokens: u32,
 }
 
-/// stream 的增量单元。
-#[derive(Debug, Clone)]
+/// stream 的增量单元。serde externally tagged（fixture JSONL 的
+/// `response_deltas` 行格式：`{"Text":"..."}` / `{"ToolCall":{...}}`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Delta {
     /// 文本增量（assistant message 文本）
     Text(String),

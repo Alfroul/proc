@@ -1,0 +1,2 @@
+{"query":"最近 10 分钟访问过哪些域名？","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_dns","arguments":{"limit":50}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"chrome 最近查询了哪些 DNS？","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_dns","arguments":{"limit":50}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

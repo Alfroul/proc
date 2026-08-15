@@ -323,55 +323,60 @@ pub fn load_path_rules_from(path: &Path) -> Vec<PathRule> {
 
 /// 展开 `%VAR%` / `${VAR}` / `$VAR` 三种占位符。未设置的变量保留原占位符
 /// （规则仍生效但通常匹配不到，等价于禁用）。stage-6.md 任务 3 示例。
-fn expand_env_placeholders(input: &str) -> String {
+/// v0.20 stage 2 起 pub(crate)：agent.toml `[llama-cpp].search_paths` 复用。
+///
+/// v0.20 stage 2 修复：原实现按字节迭代 + `push(c as char)`，多字节 UTF-8
+/// 路径段（如中文用户名）被逐字节拆散损坏；改为按字符推进整段拷贝。
+pub(crate) fn expand_env_placeholders(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c == b'%' {
+    let mut rest = input;
+    while !rest.is_empty() {
+        let b = rest.as_bytes()[0];
+        if b == b'%' {
             // %VAR%
-            if let Some(end) = input[i + 1..].find('%')
-                && let Ok(val) = std::env::var(&input[i + 1..i + 1 + end])
+            if let Some(end) = rest[1..].find('%')
+                && let Ok(val) = std::env::var(&rest[1..1 + end])
             {
                 out.push_str(&val);
-                i += 2 + end;
+                rest = &rest[2 + end..];
                 continue;
             }
             out.push('%');
-            i += 1;
-        } else if c == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            rest = &rest[1..];
+        } else if b == b'$' && rest.len() > 1 && rest.as_bytes()[1] == b'{' {
             // ${VAR}
-            if let Some(end) = input[i + 2..].find('}') {
-                let var = &input[i + 2..i + 2 + end];
+            if let Some(end) = rest[2..].find('}') {
+                let var = &rest[2..2 + end];
                 if let Ok(val) = std::env::var(var) {
                     out.push_str(&val);
-                    i += 3 + end;
+                    rest = &rest[3 + end..];
                     continue;
                 }
             }
             out.push('$');
-            i += 1;
-        } else if c == b'$' {
+            rest = &rest[1..];
+        } else if b == b'$' {
             // $VAR（字母数字下划线，到非标识符字符止）
-            let start = i + 1;
-            let mut end = start;
+            let bytes = rest.as_bytes();
+            let mut end = 1;
             while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
                 end += 1;
             }
-            if end > start {
-                let var = &input[start..end];
+            if end > 1 {
+                let var = &rest[1..end];
                 if let Ok(val) = std::env::var(var) {
                     out.push_str(&val);
-                    i = end;
+                    rest = &rest[end..];
                     continue;
                 }
             }
             out.push('$');
-            i += 1;
+            rest = &rest[1..];
         } else {
-            out.push(c as char);
-            i += 1;
+            // 多字节 UTF-8 字符整段拷贝（防字节级 push 损坏中文路径）。
+            let ch = rest.chars().next().unwrap();
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
         }
     }
     out

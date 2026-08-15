@@ -1,0 +1,3 @@
+{"query":"列出所有 Docker 容器","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_docker_ps","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"nginx 容器的健康状态","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_docker_inspect","arguments":{"name":"nginx"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
+{"query":"本地有哪些 Docker 镜像？","request":{"provider":"seed"},"response_deltas":[{"ToolCall":{"id":"c1","name":"proc_docker_images","arguments":{}}},{"EndTurn":{"stop_reason":"tool_use"}}]}

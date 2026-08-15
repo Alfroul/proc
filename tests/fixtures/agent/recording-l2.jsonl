@@ -1,0 +1,1 @@
+{"query":"回放录屏，找出 chrome 卡顿的瞬间并解释","request":{"provider":"seed"},"response_deltas":[{"Text":"先按 chrome 关键字搜命中帧。"},{"ToolCall":{"id":"c1","name":"proc_replay_search","arguments":{"path":"recording.prec","query":"chrome"}}},{"EndTurn":{"stop_reason":"tool_use"}}]}
