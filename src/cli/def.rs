@@ -282,6 +282,48 @@ pub enum Command {
         #[arg(long, short)]
         shell: clap_complete::Shell,
     },
+
+    /// v0.20：内置 AI agent（ADR-0030）— proc 自身调 LLM（自然语言 query →
+    /// tool 自动调用 → 异常诊断）。默认 Gemma 4 E2B 本地优先（隐私架构），
+    /// Anthropic 云端 opt-in。详见 docs/adr/0030-builtin-ai-agent.md。
+    #[command(name = "agent", about = "Built-in AI agent (local LLM first)")]
+    Agent {
+        #[command(subcommand)]
+        sub: AgentSub,
+    },
+}
+
+/// `proc agent <sub>` — v0.20 新增。
+///
+/// - `models`：列出检测到的本地 GGUF 模型（stage 2 实装）
+/// - `ask`：单轮 query，agent 多步 tool-use loop（stage 3b 实装）
+#[derive(Subcommand, Debug)]
+pub enum AgentSub {
+    /// 列出检测到的本地 LLM 模型（GGUF scanner，默认扫描 llama.cpp / Ollama /
+    /// HuggingFace 目录 + agent.toml 自定义路径）。
+    Models {
+        /// 强制刷新扫描缓存
+        #[arg(long)]
+        refresh: bool,
+    },
+
+    /// 单轮 query（agent 多步 tool-use loop）。
+    Ask {
+        /// 用户 query（自然语言）
+        query: String,
+
+        /// 指定 provider（llama-cpp / anthropic / mock；默认走 agent.toml [default].provider）
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// 指定模型（默认走 agent.toml [default].model）
+        #[arg(long)]
+        model: Option<String>,
+
+        /// agent loop 最大步数
+        #[arg(long, default_value_t = 10)]
+        max_steps: u32,
+    },
 }
 
 /// `proc mcp <sub>` — v0.7.0 阶段 2 新增。

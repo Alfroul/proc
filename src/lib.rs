@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod alert;
 pub mod anomaly;
 pub mod app;

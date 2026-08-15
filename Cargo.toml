@@ -88,6 +88,17 @@ nucleo = "0.5"
 # - regex：FilterExpr 的 `=~` 操作符 + 单位后缀校验。底部/btop 同款思路。
 nom = "7"
 regex = "1"
+# v0.20 stage 1：内置 AI agent（ADR-0030）deps。
+# - reqwest：LlamaCppProvider（本地 llama-server OpenAI 协议）+ AnthropicProvider
+#   （云端 Messages API）HTTP 客户端。default-features = false + rustls-tls
+#   避免拉入 openssl（与 proc 既有 rustls 路径对齐）。
+# - gguf：GGUF 文件 KV metadata 解析（general.name / general.architecture），
+#   ModelRegistry 扫描本地模型用。
+# - tokio-stream：LlmProvider trait 的 BoxStream 流式增量工具。
+# - futures-util 已有（v0.7 docker deps），BoxStream 类型别名来自这里。
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+gguf = "0.1"
+tokio-stream = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.57", features = [
@@ -122,12 +133,20 @@ version = "0.12"
 optional = true
 
 [features]
-default = ["nvidia", "mcp-persistent-state"]
+default = ["nvidia", "mcp-persistent-state", "llama-cpp", "mock-provider"]
 nvidia = ["nvml-wrapper"]
 # v0.17 stage 1（ADR-0026）：ProcMcpHandler 持久字段 cfg-gate。
 # 默认开启让生产路径有 snapshot / system_history / record_handle 字段；
 # --no-default-features 时 cfg-gate 掉，struct 不含这 3 个字段（最小化 build）。
 mcp-persistent-state = []
+
+# v0.20 stage 1（ADR-0030）：内置 AI agent provider cfg-gate。
+# llama-cpp / mock-provider 默认启用（生产路径 + CI 路径）；
+# anthropic 是 opt-in（云端对照路径，需 ANTHROPIC_API_KEY + 显式
+# `cargo build --features anthropic`）。
+llama-cpp = []      # 启用 LlamaCppProvider（spawn llama-server 子进程）
+mock-provider = []  # 启用 MockProvider（fixture 回放，CI 零 LLM 调用）
+anthropic = []      # opt-in：启用 AnthropicProvider（云端对照）
 
 # v0.12.0 阶段 1（ADR-0022）：proc 转为 Windows-only。
 # v0.12.0 阶段 2：移除 nvtop / nethogs / ebpf 空 feature stub

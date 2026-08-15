@@ -5,6 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### v0.20.0 阶段 1 — 内置 AI agent 骨架铺设（Spike）
+
+v0.20 cycle stage 1 Spike 落地（ADR-0030 内置 AI agent + Tool registry 两层架构，方向 A 内置 agent + 方向 E 本地 LLM 合并）：建立 `src/agent/` 模块结构（14 文件）+ 锁定 LlmProvider trait / ToolRegistry 接口签名 + CLI `proc agent` subcommand 注册（ask / models 返 stage 2/3 占位错误）。全量回归 1465 passed / 0 failed / 4 ignored（基线 1447 + 18 新 stub 测试，业务逻辑不动）。
+
+- **Added**: `Cargo.toml` 加 reqwest 0.12（json/stream/rustls-tls，default-features=false）+ gguf 0.1 + tokio-stream 0.1 deps；features 加 `llama-cpp` / `mock-provider`（默认启用）+ `anthropic`（opt-in）
+- **Added**: `src/agent/`（新 module）—— provider.rs（LlmProvider trait + Delta + LlmError + CompleteOptions/Response + ProviderStream 别名）/ types.rs（Message / Role / ToolSchema / ToolCategory / ToolCall / ToolResult）/ config.rs（AgentConfig 4 section 解析 `~/.config/proc/agent.toml`，no_thinks 默认 true）/ model_registry.rs + gguf_scan.rs（骨架）/ mock_provider.rs + llama_cpp_provider.rs + anthropic_provider.rs（三 provider stub，cfg feature gate）/ tool_registry.rs（ToolRegistry 两层架构 + ENTRY_TOOL_NAMES 4 entry tool）/ tools/help.rs（proc_help 元 tool）/ prompts/system.md（3 层 system prompt + 3 few-shot 示例，include_str! 嵌入）/ grammars/tool_call.gbnf（GBNF 约束，include_str! 嵌入）
+- **Added**: CLI `proc agent models --refresh` / `proc agent ask "<query>" [--provider] [--model] [--max-steps]` subcommand 注册（stage 1 占位错误，stage 2/3b 实装业务）
+- **Added**: `docs/adr/0030-builtin-ai-agent.md`（D1~D7 七决策 + Status: Accepted）+ `docs/stages/v0.20-fixtures.md`（70 query fixture 录制计划）
+- **Tests**: `tests/test_agent_v0_20_stage_1.rs` 新 18 测试（模块编译 / dyn 兼容 / serde round-trip / ToolRegistry 视图 / cfg-gate / CLI 注册）
+
 ## [0.19.0] - 2026-07-14
 
 ### v0.19.0 cycle 完结 — SSE transport full 实装 + multi-client subscribe-push 升级 cycle

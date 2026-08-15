@@ -1,6 +1,7 @@
 // v0.6.0 阶段 5 #6：原 `src/cli.rs` 拆为 `src/cli/{mod.rs, def.rs, ...}`,
 // 每个文件持一类 CLI 子命令的 dispatch 实现。`def.rs` 保留 clap derive 定义。
 
+pub mod agent_cmd;
 pub mod def;
 pub mod diag;
 pub mod dns;
@@ -95,5 +96,7 @@ pub fn run_subcommand(cmd: &Command) {
         },
         // v0.7.0 阶段 3：`proc completions --shell <SHELL>` 在线生成补全脚本。
         Command::Completions { shell } => completions::run_completions(*shell),
+        // v0.20：内置 AI agent（ADR-0030）——stage 1 Spike 占位错误。
+        Command::Agent { sub } => agent_cmd::run_agent(sub),
     }
 }

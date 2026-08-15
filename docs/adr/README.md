@@ -23,6 +23,7 @@
 | [0027](./0027-rmcp-resource-subscribe-sse-transport.md) | rmcp 0.11 Resource subscribe + SSE transport 设计 | Accepted | v0.17.0 阶段 1 |
 | [0028](./0028-vt100-to-uiframe-converter.md) | VT100 字节流转码 UiFrame 路径（临时转码） | Accepted | v0.17.0 阶段 1 |
 | [0029](./0029-record-exposure-and-confirm-mechanism.md) | record 暴露 + 写操作 confirm 机制 | Accepted | v0.17.0 阶段 1 |
+| [0030](./0030-builtin-ai-agent.md) | 内置 AI agent + Tool registry 两层架构 | Accepted | v0.20.0 阶段 1 |
 
 ## ADR 模板
 
