@@ -22,6 +22,8 @@ pub mod gguf_scan;
 pub mod grammars;
 #[cfg(feature = "llama-cpp")]
 pub mod llama_cpp_provider;
+#[cfg(feature = "llama-cpp")]
+pub mod llama_server_handle;
 #[cfg(feature = "mock-provider")]
 pub mod mock_provider;
 pub mod model_registry;

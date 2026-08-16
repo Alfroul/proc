@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+### v0.20.0 阶段 3a — LlamaCppProvider 实装（Slice B1，Gemma 4 E2B 真实推理）
+
+v0.20 cycle stage 3a Slice B1 落地（brainstorm 项 4）：LlamaServerHandle 子进程管理 + OpenAI 协议 client + GBNF 接线，Gemma 4 E2B 在用户机器真实推理跑通（complete / stream / tool_calls / grammar 约束实测）。全量回归 1510 passed / 0 failed / 4 ignored（基线 1483 + 27 新测试）。
+
+- **Added**: `src/agent/llama_server_handle.rs`（新 ~240 行）—— `allocate_port()` 动态端口分配（bind 127.0.0.1:0 → OS 分配 → 立即释放）+ `build_spawn_command()` 纯函数（`--model` / `--host 127.0.0.1` / `--port` / `--jinja` / `--ctx-size 8192` / `--reasoning off`）+ `LlamaServerHandle::spawn()` async（路径存在性 friendly error + `/health` 轮询就绪 250ms/120s + stderr drain 线程保留尾部 8KB 供超时诊断）+ Drop kill + wait 防僵尸；`SpawnOptions { ctx_size / no_thinks / chat_template / startup_timeout }`（chat_template 用户覆盖位默认 None）
+- **Added**: `src/agent/llama_cpp_provider.rs` 重写实装（stub → ~470 行）—— `Arc<ProviderInner>` 惰性 spawn 跨调用复用（`new()` 签名不变 + `with_options()`）；`complete()` 非流式 + `parse_chat_response`（finish_reason 映射 / arguments 解析降级 Null）；`stream()` 走 `stream::once + try_flatten` + `SseFrameBuffer`（SSE 分帧跨 chunk 安全）+ `ToolCallAccum`（流式 tool_calls arguments 分片按 index 拼接）；`messages_to_openai`（tool_results 逐条展开成 OpenAI tool 消息）；GBNF 接线 `CompleteOptions.grammar` → 请求体 `grammar` 字段
+- **Fixed**: `src/agent/grammars/tool_call.gbnf` 规则名 bug —— GBNF 规则名不支持下划线（llama.cpp 语法只允许 `[a-zA-Z0-9-]`），stage 1 的 `tool_call` 规则名导致整个 grammar 被 llama-server **静默忽略**（不报错不约束）；改名 `tool-call` 后实测生效（`root ::= "yes"` 强制输出实验 + 完整 grammar 约束输出 JSON 形状验证）
+- **实测更正**: brainstorm 决策 4 的 3 个启动 flag 按用户机器 llama-server b8685 实测修正 —— `--no-thinks` 不存在（等效 `--reasoning off`）；`--chat-template gemma` + `--jinja` 组合把 user content 渲染丢掉（prompt_tokens=3）→ 不传走 GGUF 自带模板；`--special` 泄漏 `<turn|>` 字面量到 content → 不传。实测 E2B tool_calls 正常生成（`proc_ls` + 正确 arguments），详见 `docs/stages/v0.20-stage-3a.md` 决策 A/F/G
+- **Tests**: `tests/test_llama_cpp_provider.rs` 新 27 测试（spawn 命令断言 6 / OpenAI 消息转换与请求体 7 / 非流式响应解析 5 / SSE 分帧与聚合 7 / GBNF 规则名防回归 1 / 真实 llama-server 端到端 2 —— spawn→health→complete→stream→grammar→Drop 清理，缺环境自动 skip）
+
 ### v0.20.0 阶段 2 — agent 基础设施实装（Slice A）
 
 v0.20 cycle stage 2 Slice A 落地（项 1 provider 层 + 项 5 ToolRegistry catalog + 项 2 MockProvider fixture 回放 + 项 3 GGUF scanner）：agent 基础设施全落地，`proc agent models` 真实工作，MockProvider 可确定性回放 70 query（CI 零 LLM 调用）。全量回归 1483 passed / 0 failed / 4 ignored（基线 1465 + 18 新测试）。

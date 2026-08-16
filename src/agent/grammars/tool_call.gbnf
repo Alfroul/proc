@@ -1,7 +1,13 @@
-# 强制 tool call 输出为合法 JSON（v0.20 stage 1 从 brainstorm 决策 8 段复制；
-# stage 3a 实装时按 llama-server 实际行为细化）
-root ::= "{" ws "\"tool_calls\"" ws ":" ws "[" ws tool_call* ws "]" ws "}"
-tool_call ::= "{" ws "\"name\"" ws ":" ws string ws "," ws "\"arguments\"" ws ":" ws object ws "}"
+# 强制 tool call 输出为合法 JSON（v0.20 stage 3a 实测修正）。
+#
+# 实测结论（b8685，2026-08-15，stage 3a 决策 G）：
+# - llama-server `/v1/chat/completions` 请求体 `grammar` 字段真实生效
+#   （`root ::= "yes"` 实验强制输出 "yes"）
+# - **GBNF 规则名不支持下划线**（llama.cpp 语法只允许 [a-zA-Z0-9-]）：
+#   stage 1 初版的 `tool_call` 规则名导致整个 grammar 被 llama-server 静默
+#   忽略（不报错、不约束）。规则名一律用连字符（`tool-call`）。
+root ::= "{" ws "\"tool_calls\"" ws ":" ws "[" ws tool-call* ws "]" ws "}"
+tool-call ::= "{" ws "\"name\"" ws ":" ws string ws "," ws "\"arguments\"" ws ":" ws object ws "}"
 string ::= "\"" ([^"\\] | "\\" .)* "\""
 object ::= "{" ws (string ws ":" ws value (ws "," ws string ws ":" ws value)*)? ws "}"
 value ::= string | object | number | "true" | "false" | "null"
