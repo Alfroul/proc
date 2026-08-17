@@ -156,10 +156,11 @@ fn test_grammars_embedded_in_binary() {
 fn test_system_prompt_embedded_with_snapshot_placeholder() {
     let prompt = proc::agent::prompts::SYSTEM_PROMPT;
     assert!(prompt.contains("{{SYSTEM_SNAPSHOT}}"));
-    // 3 个 few-shot 示例（附录 C）
-    assert!(prompt.contains("示例 1"));
-    assert!(prompt.contains("示例 2"));
-    assert!(prompt.contains("示例 3"));
+    // stage 3b 决策 I：few-shot 对话示例实测让 E2B 角色扮演编造结果，已移除，
+    // 换成类别路由表 + proc_finish 工作循环指令。
+    assert!(prompt.contains("proc_finish"));
+    assert!(prompt.contains("proc_help(category"));
+    assert!(prompt.contains("严禁凭空编造"));
 }
 
 #[test]

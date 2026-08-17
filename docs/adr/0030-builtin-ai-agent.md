@@ -24,7 +24,21 @@ v0.19 cycle 完结后，proc 已是完整 MCP server（46 tool 暴露给外部 L
 - **D4：Gemma 4 E2B 本地优先**——默认走 LlamaCppProvider（隐私架构：数据零外发），AnthropicProvider 是 opt-in feature（`--features anthropic` + `ANTHROPIC_API_KEY`）。按需 spawn：仅用户显式调 `proc agent ask` 时才 spawn llama-server（不占日常使用的 RAM / 端口）
 - **D5：Mock provider fixture 回放**——70 query fixture 按 JSONL 格式录制（9 场景 × 3 level 拆 27 文件），CI 跑 agent loop 零 LLM 调用、确定性强、零 API 成本
 - **D6：thinking mode 强制禁用**——llama-server 启动强制加 `--no-thinks` CLI flag（Gemma 4 系列专用），避免 E2B thinking mode TTFT 5.8s（禁用后 < 0.3s，20× 加速）
-- **D7：GBNF grammar 嵌入 binary**——`include_str!` 编译时嵌入 `tool_call.gbnf`，约束 Gemma 4 输出合法 JSON tool call（E2B 偶尔输出乱码 JSON 的保命手段）
+- **D7：GBNF grammar 嵌入 binary**——`include_str!` 编译时嵌入 `tool_call.gbnf`，约束 Gemma 4 输出合法 JSON tool call（E2B 偶尔输出乱码 JSON 的保命手段）。**stage 3b 实测注记**：grammar 不进 ReAct 主循环（约束形状与自然语言回答互斥；OpenAI tools 协议 + `tool_choice=required` + proc_finish 控制 tool 已构成可靠循环），agent.toml `grammar_file` 显式启用逃生舱
+
+## stage 3b 实测注记（2026-08-17，`docs/stages/v0.20-stage-3b.md` 决策 I / J）
+
+1. **few-shot 对话示例对 E2B 是负效果**：模型把示例当回答模板，在 content 里
+   角色扮演「调工具 + 编造结果」而不发真实结构化 tool_calls → system prompt
+   改「类别路由表」式策略行。
+2. **`tool_choice=required` + proc_finish 控制 tool**：auto 模式下 E2B 对可直接
+   回答的 query 倾向凭空文字回答且中途过早停止；required 强制每轮必调 tool，
+   proc_finish(answer) 显式提交答案结束循环。
+3. **两层架构的发现通道是双通道**：OpenAI 协议下模型只能调用请求 tools 数组
+   里声明的 tool——proc_help 的 schema 文本回传之外，runner 还必须把发现的
+   类别 schema 动态加入后续轮 tools 数组（token 预算 6K 封顶）。
+4. **`max_tokens=1024` 必设**：不限时 E2B 单轮生成千字分析，验收 18 query 拖
+   到 82 分钟；设限后 7.5 分钟（10.8× 加速），答案质量不受影响（300 字内足够）。
 
 ## Consequences
 

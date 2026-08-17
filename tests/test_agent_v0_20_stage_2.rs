@@ -151,6 +151,11 @@ fn test_agent_mock_provider_replay_50_queries() {
     let entries = load_entries(&files);
     assert_eq!(entries.len(), 50, "L0+L1 seed fixture 应为 50 query");
 
+    // stage 3b 注记：seed 已被真实 E2B 录制覆盖。真实响应绝大多数是结构化
+    // tool call，个别 query 会退化为伪 tool-call 文本（Text-only + EndTurn）。
+    // 回放契约按 v0.20-fixtures.md 判定：complete 不 Err + 响应非空（tool_calls
+    // 或 content 至少其一）。退化率是 agent loop 验收（stage 3b
+    // test_agent_stage3b_acceptance）的度量项，不在本回放测试重复断言。
     let provider = MockProvider::new("tests/fixtures/agent".into());
     rt().block_on(async {
         for entry in &entries {
@@ -161,11 +166,15 @@ fn test_agent_mock_provider_replay_50_queries() {
                 .unwrap_or_else(|e| panic!("query {:?} 回放失败: {e}", entry.query));
             assert_eq!(resp.message.role, Role::Assistant);
             assert!(
-                !resp.message.tool_calls.is_empty(),
-                "query {:?} 无 tool call",
+                !resp.message.tool_calls.is_empty()
+                    || resp
+                        .message
+                        .content
+                        .as_deref()
+                        .is_some_and(|c| !c.is_empty()),
+                "query {:?} 回放响应为空",
                 entry.query
             );
-            assert_eq!(resp.stop_reason, StopReason::ToolUse);
         }
     });
 }

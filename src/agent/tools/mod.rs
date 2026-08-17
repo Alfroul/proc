@@ -2,4 +2,5 @@
 //! handler，仅 agent Layer 0 / Layer 1 可见。
 
 pub mod catalog;
+pub mod dispatch;
 pub mod help;

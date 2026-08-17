@@ -135,7 +135,7 @@ pub fn register_default_tools(registry: &mut ToolRegistry) {
             "proc_metrics_history",
             "Last 30s sampled system history (sparkline data points for cpu/mem/swap).",
             ToolCategory::Performance,
-            serde_json::json!({"type": "object", "properties": {"metric": {"type": "string", "enum": ["cpu", "memory", "swap"]}}}),
+            serde_json::json!({"type": "object", "properties": {"metric": {"type": "string", "enum": ["cpu", "memory", "swap"]}, "seconds": {"type": "integer", "maximum": 30}}}),
         ),
         tool(
             "proc_smart",
@@ -301,9 +301,9 @@ pub fn register_default_tools(registry: &mut ToolRegistry) {
         ),
         tool(
             "proc_port",
-            "List listening/established TCP ports with owning pid and retransmission stats.",
+            "List listening/established TCP ports with owning pid and retransmission stats. Pass port to filter one local port (e.g. which process listens on 8080).",
             ToolCategory::Flow,
-            no_params(),
+            serde_json::json!({"type": "object", "properties": {"port": {"type": "integer"}}}),
         ),
         // ---- monitor（3）----
         tool(
@@ -314,9 +314,9 @@ pub fn register_default_tools(registry: &mut ToolRegistry) {
         ),
         tool(
             "proc_monitor_add",
-            "Add a monitor rule (process alive / resource threshold alerts). dry_run supported.",
+            "Add a monitor rule (process alive / resource threshold alerts). target_kind: pid|port|command. dry_run supported.",
             ToolCategory::Monitor,
-            serde_json::json!({"type": "object", "properties": {"target_kind": {"type": "string"}, "target": {"type": "string"}, "dry_run": {"type": "boolean"}}}),
+            serde_json::json!({"type": "object", "properties": {"target_kind": {"type": "string", "enum": ["pid", "port", "command"]}, "target": {"type": "string"}, "restart_policy": {"type": "string"}, "dry_run": {"type": "boolean"}}}),
         ),
         tool(
             "proc_monitor_remove",

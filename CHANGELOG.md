@@ -7,6 +7,18 @@
 
 ## [Unreleased]
 
+### v0.20.0 阶段 3b — AgentRunner ReAct loop + `proc agent ask` 实装（Slice B2，E2B L0/L1 验收）
+
+v0.20 cycle stage 3b Slice B2 落地（brainstorm 项 6+7）：AgentRunner ReAct tool-use 循环 + CLI `proc agent ask` 单轮自然语言 query 端到端跑通（E2B 调 proc_ls → 结果回填 → Markdown 总结），写操作 confirm gate 拦截 + result 截断 + PII 过滤，末段 FixtureRecorder 真实录制覆盖 seed fixture。全量回归 1530 passed / 0 failed / 6 ignored（基线 1510 + 23 新 CI 测试，2 个真实 E2B 测试 `#[ignore]` 本机显式跑）。
+
+- **Added**: `src/agent/tools/dispatch.rs`（新 ~550 行）—— 47 tool 执行入口 dispatch，复用 MCP handler `make_*_json` helper（ADR-0030「复用同一套 tool 的 Rust API」，备选 C 自环否决）；`WRITE_TOOL_NAMES` 8 个破坏性 tool 拦截（CLI ask 非交互无确认通道，复用 ADR-0008/0029 confirm 契约）；`truncate_result` 16K chars 截断；`apply_pii_filter` PII 过滤（SECRET_PATTERNS 12 关键字 regex，JSON / kv 双形态，值 ≥ 8 chars 才 mask 防误伤）；`proc_ls` agent 版支持 filter（FilterExpr）+ 默认 limit 20；proc_dns 走现场采集版 / proc_metrics_history 走 no-state 变体 / proc_record_start+stop agent 侧不支持（跨调用子进程保活留 v0.21）
+- **Added**: `src/agent/runner.rs`（新 ~290 行）—— AgentRunner ReAct 循环：system prompt 注入（`{{SYSTEM_SNAPSHOT}}` 运行时快照替换）+ tool-use 循环 + `max_steps` 兜底（trace 摘要 fallback）+ 空响应 nudge 重试；GBNF grammar 不进主循环（agent.toml `grammar_file` 显式启用逃生舱）
+- **Changed（实测驱动，决策 I）**: `tool_choice: "required"` + `proc_finish` 控制 tool 构成小模型可靠循环——实测发现 brainstorm 附录 C 的 3 个 few-shot 对话示例让 E2B 在 content 里角色扮演「调工具 + 编造结果」不发真实 tool_calls，auto 模式下对可直接回答的 query 倾向凭空文字回答且第 2 轮过早停止；`CompleteOptions` 加 `tool_choice`（Auto/Required）+ 每轮 tools = entry 4 + proc_finish（loop 内部控制信号，要结束必须显式提交 answer）+ system.md 移除对话示例改「类别路由表」；实验 G 验证卡顿 query 完美 3 轮 metrics → ls → finish
+- **Added**: `src/cli/agent_cmd.rs` 实装 `proc agent ask` —— provider 构造链（CLI flag > agent.toml > 代码默认）：llama-cpp server_path 三级解析（config > PATH 查找 > friendly error）+ model 名称匹配（ModelRegistry 扫描 + 单模型自动选用）+ SpawnOptions 映射 + stderr 实时步骤 trace + stdout Markdown 回答；anthropic 拦到 stage 4
+- **Added**: `src/agent/record_fixture.rs` 增强 —— `with_system_message` builder（录制请求形状与 agent loop 第 1 轮一致）+ 录制走 Required（录到的首响应必是真实 tool call）
+- **Changed**: `src/agent/prompts/system.md` 重写（few-shot 示例 → 类别路由表）；`src/agent/llama_cpp_provider.rs` 补 `tool_choice` / `top_p` / `top_k` 请求体透传；`src/agent/tools/catalog.rs` proc_port 加 port 参数 / proc_monitor_add 加 restart_policy / proc_metrics_history 加 seconds
+- **Tests**: `tests/test_agent_v0_20_stage_3b.rs` 新 23 CI 测试（dispatch 层 10：proc_ls 默认 limit / filter / metrics / proc_help / 未知 tool / 写拦截 / 缺参数 / 截断 / PII 双形态；runner 层 11：单轮 / tool 循环回填 / 两层架构 tools 恒 5 / proc_finish 拦截 / required 传递 / max_steps / 空响应重试与放弃 / system prompt 注入 / 进度事件）+ 2 个 `#[ignore]` 真实测试（L0/L1 验收 50 query + fixture 真实录制）
+
 ### v0.20.0 阶段 3a — LlamaCppProvider 实装（Slice B1，Gemma 4 E2B 真实推理）
 
 v0.20 cycle stage 3a Slice B1 落地（brainstorm 项 4）：LlamaServerHandle 子进程管理 + OpenAI 协议 client + GBNF 接线，Gemma 4 E2B 在用户机器真实推理跑通（complete / stream / tool_calls / grammar 约束实测）。全量回归 1510 passed / 0 failed / 4 ignored（基线 1483 + 27 新测试）。

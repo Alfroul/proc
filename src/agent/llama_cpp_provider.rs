@@ -240,12 +240,27 @@ pub fn build_request_body(
     if let Some(temperature) = options.temperature {
         body["temperature"] = temperature.into();
     }
+    if let Some(top_p) = options.top_p {
+        body["top_p"] = top_p.into();
+    }
+    // llama.cpp 扩展字段（OpenAI 标准无 top_k）。
+    if let Some(top_k) = options.top_k {
+        body["top_k"] = top_k.into();
+    }
     if !options.stop_sequences.is_empty() {
         body["stop"] = options.stop_sequences.clone().into();
     }
     // GBNF 接线（ADR-0030 D7）：llama.cpp 扩展字段，强制输出合法 JSON tool call。
     if let Some(grammar) = &options.grammar {
         body["grammar"] = grammar.clone().into();
+    }
+    // stage 3b：required 强制本轮必调 tool（E2B 实测 auto 模式倾向凭空文字回答）。
+    if let Some(choice) = options.tool_choice {
+        body["tool_choice"] = match choice {
+            super::provider::ToolChoice::Auto => "auto",
+            super::provider::ToolChoice::Required => "required",
+        }
+        .into();
     }
     body
 }

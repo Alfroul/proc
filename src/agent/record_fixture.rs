@@ -16,6 +16,10 @@ use super::types::{Message, Role};
 pub struct FixtureRecorder {
     provider: Box<dyn LlmProvider>,
     output_dir: PathBuf,
+    /// 可选 system message（stage 3b）：录制请求形状与 agent loop 第 1 轮一致
+    /// （含 system prompt + 快照），录到的响应才有代表性；回放匹配键仍是
+    /// user query hash 不受影响。
+    system_message: Option<String>,
 }
 
 pub struct FixtureQuery {
@@ -43,7 +47,14 @@ impl FixtureRecorder {
         Self {
             provider,
             output_dir,
+            system_message: None,
         }
+    }
+
+    /// 注入与 agent loop 同款的 system prompt（stage 3b 真实录制用）。
+    pub fn with_system_message(mut self, system: String) -> Self {
+        self.system_message = Some(system);
+        self
     }
 
     /// 批量录制：逐 query 调 provider.complete → append 到
@@ -63,15 +74,26 @@ impl FixtureRecorder {
     }
 
     async fn record_one(&mut self, fq: &FixtureQuery) -> Result<(), LlmError> {
-        let messages = vec![Message::new(Role::User, fq.query.clone())];
+        let mut messages = Vec::new();
+        if let Some(system) = &self.system_message {
+            messages.push(Message::new(Role::System, system.clone()));
+        }
+        messages.push(Message::new(Role::User, fq.query.clone()));
         let tools = super::tools::catalog::default_registry()
             .entry_tools()
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
+        // 与 agent loop 第 1 轮同款约束（决策 I）：required 让录到的首响应必是
+        // 真实 tool call（不带 proc_finish——录制的查询工具集只有 entry 4，
+        // 模型只能从中选）。MockProvider 回放时忽略 options，不受影响。
+        let options = super::provider::CompleteOptions {
+            tool_choice: Some(super::provider::ToolChoice::Required),
+            ..Default::default()
+        };
         let response = self
             .provider
-            .complete(messages.clone(), tools.clone(), Default::default())
+            .complete(messages.clone(), tools.clone(), options)
             .await?;
 
         let mut deltas = Vec::new();

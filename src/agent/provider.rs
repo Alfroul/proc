@@ -64,6 +64,19 @@ pub struct CompleteOptions {
     pub stop_sequences: Vec<String>,
     /// GBNF grammar 文件内容（仅 LlamaCppProvider 用，强制 JSON tool call 输出）。
     pub grammar: Option<String>,
+    /// 强制本轮必须调用某个 tool（OpenAI `tool_choice: "required"`）。
+    /// stage 3b 实测：E2B 在 auto 模式下对小 query 倾向直接文字回答（凭空
+    /// 编造数据），required + proc_finish 控制 tool 构成可靠 ReAct 循环。
+    pub tool_choice: Option<ToolChoice>,
+}
+
+/// OpenAI 协议 `tool_choice` 值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolChoice {
+    /// 模型自行决定调 tool 或直接回答（默认）。
+    Auto,
+    /// 强制必须调用至少一个 tool。
+    Required,
 }
 
 #[derive(Debug, Clone)]

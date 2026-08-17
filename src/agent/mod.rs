@@ -31,6 +31,7 @@ pub mod prompts;
 pub mod provider;
 #[cfg(feature = "mock-provider")]
 pub mod record_fixture;
+pub mod runner;
 pub mod tool_registry;
 pub mod tools;
 pub mod types;
@@ -43,5 +44,6 @@ pub use provider::{
     CompleteOptions, CompleteResponse, Delta, LlmError, LlmProvider, ProviderStream, StopReason,
     Usage,
 };
+pub use runner::{AgentOptions, AgentRunner, RunnerOutcome, StepTrace, StopCause};
 pub use tool_registry::ToolRegistry;
 pub use types::{Message, Role, ToolCall, ToolCategory, ToolResult, ToolSchema};
