@@ -214,7 +214,9 @@ fn test_llama_cpp_provider_compiles_with_feature_gate() {
 #[test]
 fn test_anthropic_provider_compiles_with_feature_gate() {
     // ANTHROPIC_API_KEY 未设置时 friendly error（不 panic）。
-    std::env::remove_var("ANTHROPIC_API_KEY");
+    // stage 4 修复：anthropic feature stage 1~3b 从未启用过，本测试从未被
+    // 编译——edition 2024 的 set_var / remove_var 需 unsafe 块。
+    unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
     let result = proc::agent::anthropic_provider::AnthropicProvider::from_env(
         "claude-sonnet-4-6".into(),
         4096,

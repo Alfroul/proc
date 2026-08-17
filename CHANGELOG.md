@@ -7,6 +7,64 @@
 
 ## [Unreleased]
 
+v0.21 候选方向（[REVIEW-v0.20](docs/reviews/REVIEW-v0.20.md) §v0.21+ 候选方向段）：**TUI AgentPanel + streaming chat（方向 F）+ Eval/Observability（方向 C）双主题 cycle**（brainstorm 既定计划，v0.20 `stream()` 三 provider 就绪是前置）；L2 多步 ReAct fixture 启用；TD-55~57（Sonnet 对照补验 / Anthropic model ID / nudge 路径）视 `ANTHROPIC_API_KEY` 可得性穿插；更强本地模型复测 L1（agent.toml 换模型即支持）。
+
+## [0.20.0] - 2026-08-17
+
+### v0.20.0 cycle 完结 — 内置 AI agent + Tool registry 两层架构 cycle
+
+v0.20 cycle 是 proc 历史上第二大 cycle（~3000 行总改动，vs v0.17 cycle ~5540 行），首次 5 stage 节奏（1 Spike + 3 Slice + Review+收尾合并段；stage 3 按容量阈值拆 3a/3b）。**proc 的调用方向从单向「外部 LLM → proc（MCP server）」扩展为双向**——proc 自身有 LLM 调用能力（`src/agent/` 新 module 17 文件），入口 CLI `proc agent ask "<自然语言 query>"` 端到端跑通（Gemma 4 E2B 本地推理调 proc tool → 结果回填 → Markdown 总结）。MCP tool 总数 46 → 46（不变——内置 agent 不走 MCP 协议），agent 内部 tool 47（46 复用 + proc_help 元 tool）+ 1 loop 控制 tool（proc_finish）。1 份新 ADR-0030（D1~D7 七决策 + stage 3b 实测注记 4 条）。全量回归 1447（v0.19.0）→ **1533 passed / 0 failed / 6 ignored（默认 feature）+ 1557 passed / 0 failed / 7 ignored（`--features anthropic` 新增验证矩阵档）**，fmt / clippy（双档）/ build（`--no-default-features` + `--no-default-features --features anthropic`）/ bench --no-run 全过。详见 [REVIEW-v0.20](docs/reviews/REVIEW-v0.20.md)（P0 0 / P1 1 已修复 / P2 3 归档 TD-55~57）。
+
+**8 项交付落地范围**：
+
+- **项 1 LlmProvider trait**（stage 1/2）：`complete`（async_trait）+ `stream`（返 `ProviderStream` BoxStream）+ `Delta` serde 化（fixture JSONL 直接序列化）+ `CompleteOptions` 全通道（max_tokens / temperature / top_p / top_k / stop_sequences / grammar / tool_choice）
+- **项 2 MockProvider + fixture 基础设施**（stage 2/3b）：`OnceLock` 惰性索引回放（query_hash 只含 query 文本）+ FixtureRecorder（provider 可注入 + with_system_message）+ 27 jsonl（L0/L1 18 文件 50 行被真实 E2B 响应覆盖，L2 seed 留 v0.21 启用）——CI 零 LLM 调用
+- **项 3 GGUF scanner + ModelRegistry**（stage 2）：手写流式 metadata parser（弃 gguf crate——0.1.2 需全量读入 1.6GB）+ `proc agent models` CLI；顺带修复 `expand_env_placeholders` UTF-8 字节级损坏中文路径
+- **项 4 LlamaCppProvider + LlamaServerHandle + GBNF**（stage 3a）：动态端口 + `/health` 轮询 + Drop 防僵尸 + OpenAI 协议 complete/stream + GBNF 接线；**实测更正 3 处 flag 假设**（`--no-thinks` 不存在→`--reasoning off` / `--chat-template gemma`+`--jinja` 丢 content→不传 / `--special` 泄漏→不传）+ **GBNF 规则名 bug**（下划线规则名被 llama-server 静默忽略）
+- **项 5 ToolRegistry 两层架构**（stage 2）：47 tool catalog（entry 4 / 非 entry 43 / 10 类索引）+ estimated_tokens 实算——单轮 tool-context ~15K → 峰值 ~1.5K token（96% 减少），2B 模型可驱动
+- **项 6 AgentRunner ReAct loop**（stage 3b）：dispatch 层（47 tool 复用 MCP `make_*_json` + 写操作 8 tool 拦截 + 8K 截断 + PII 过滤 12 关键字）+ ReAct 循环 + **决策 I 实测结论**（few-shot 对 E2B 负效果→类别路由表；`tool_choice=required` + proc_finish 控制 tool 构成可靠循环；`max_tokens=1024` 10.8× 加速）+ **决策 J**（proc_help 发现的 schema 动态加入 tools 数组 / spawn_blocking / ctx 16384）
+- **项 7 CLI `proc agent ask`**（stage 3b）：provider 构造链（CLI flag > agent.toml > 代码默认）+ 模型解析（ModelRegistry 扫描 + 单模型自动选用）+ stderr 实时步骤 trace + stdout Markdown
+- **项 8 AnthropicProvider 云端对照**（stage 4）：Messages API client（complete 非流式 + stream SSE 流式聚合）+ `tool_choice Required→{"type":"any"}` + 采样参数至多一（API 约束）+ `ANTHROPIC_API_KEY` env 不落盘——**同一份 AgentRunner 零改动跑云端 provider，multi-provider 抽象闭环**
+
+**关键数字**：
+
+| 指标 | v0.19.0 基线 | v0.20.0 落地 |
+|---|---|---|
+| 全量回归 | 1447 passed / 0 failed / 4 ignored | **1533 passed / 0 failed / 6 ignored（默认）+ 1557（`--features anthropic`）**（+90 新测试，含 4 个 `#[ignore]` 真实测试另计）|
+| MCP tool 总数 | 46 | **46**（不变）+ agent 内部 47 catalog + proc_finish 控制 tool |
+| agent 入口 | —（proc 自身无 LLM 调用能力）| **`proc agent ask "..."`**（E2B 本地 / Anthropic 云端 opt-in / Mock 测试三 provider）|
+| 单轮 tool-context | （N/A）| **~15K → ~1.5K token 峰值**（两层架构，96% 减少）|
+| E2B 验收（QUICK 18 query）| — | **18/18**（454s）|
+| E2B 验收（FULL L0 23 / L1 27）| — | **L0 23/23**（21/23 + 2 个口径 artifact 经 REVIEW-v0.20 拍板放宽）/ **L1 21/27（78%，基线 29.4% 的 2.6 倍，拍板接受）**|
+| Sonnet 对照（50 query）| — | **deferred**（无 API key，TD-55；降级验证 = 24 CI 测试 + 无效 key 真实 API 403 错误映射）|
+| 真实 fixture | — | **L0/L1 50 query 真实 E2B 响应**（MockProvider 确定性回放验证）|
+| ADR | 0029 | **新 ADR-0030**（D1~D7 + stage 3b 实测注记）|
+| Cargo deps | axum / tower / tower-http | **+ reqwest 0.12（rustls-tls）+ tokio-stream**（gguf 引入后弃用）|
+
+### v0.20.0 阶段 4 — AnthropicProvider 云端对照 + v0.20 cycle Review 收尾
+
+v0.20 cycle stage 4 Review+收尾落地（brainstorm 项 8）：AnthropicProvider 实装（Messages API client，opt-in feature `anthropic`）+ 全 cycle Review（含 stage 3b 遗留的 E2B 验收口径拍板）+ 版本收尾。全量回归默认 feature 集不变（1533 passed / 0 failed / 6 ignored），新增 `--features anthropic` 验证矩阵档（1557 passed / 0 failed / 7 ignored，+24 stage 4 CI 测试 + stage 1 anthropic-gate 测试首次编译）。
+
+- **Added**: `src/agent/sse.rs`（新 70 行）—— `SseFrameBuffer` 从 llama_cpp_provider 抽共享模块（provider 无关的 SSE `data:` 帧分帧，anthropic-only build `--no-default-features --features anthropic` 可用；re-export 保持既有 import 路径零测试改动）
+- **Added**: `src/agent/anthropic_provider.rs`（stub 55 → ~520 行）—— Anthropic Messages API client：`complete()` 非流式（content blocks 解析：text 拼接 + tool_use 转 ToolCall）+ `stream()` SSE 流式（`content_block_delta` text_delta 逐帧 / `input_json_delta` 分片累积 / `message_delta` stop_reason → EndTurn 恰好一次，`StreamState` 纯逻辑可测）+ 消息转换（system 顶层提取——Anthropic 不允许 messages 出现 system role / tool_result 进 user 消息 / 空 assistant 消息跳过）+ `tool_choice Required→{"type":"any"}`（与 stage 3b 决策 I proc_finish 循环语义对齐，provider 只透传 schema）+ 采样参数至多一（Anthropic API 约束，temperature > top_p > top_k 优先级）+ grammar（GBNF llama.cpp 专属）忽略 + `from_env` 存 key 不落盘（空白 key 也报错）
+- **Changed**: `src/cli/agent_cmd.rs` —— 解除 `--provider anthropic` 拦截：model 四级解析（`--model` > `[anthropic].model` > `[default].model` > `claude-sonnet-4-6`）+ `[anthropic].max_tokens`（默认 4096）+ temperature 按 provider 选配置段（default feature 下无 unused_mut）
+- **Fixed**: `tests/test_agent_v0_20_stage_1.rs` —— anthropic-gated 测试自 stage 1 起从未编译（feature opt-in 验证盲区），edition 2024 `remove_var` 需 unsafe 块（P1-1，REVIEW-v0.20）
+- **Tests**: `tests/test_agent_v0_20_stage_4.rs`（新 ~850 行）—— 23 CI 纯逻辑测试（消息转换 6 / 请求体 5 / 响应解析 4 / stream 聚合 6 / from_env 1 + 无 tool 时不带 tool_choice 等边界）+ 1 个 `#[ignore]` Sonnet 对照验收（50 query ≥48/50 断言 + QUICK 抽样模式；**deferred**——用户拍板无 ANTHROPIC_API_KEY，TD-55）
+- **Docs**: `docs/reviews/REVIEW-v0.20.md`（新 ~260 行 = 5 stage 全 cycle Review + **验收口径拍板 3 项**：L0 2 个口径 artifact 放宽为 23/23 / L1 21/27 接受（78% = 基线 2.6 倍）/ Sonnet 对照 deferred）+ `docs/tech-debt.md`（TD-55~57）+ README AI Agent 章节 + brainstorm cycle 总结
+- **Changed**: `Cargo.toml`（0.19.0 → 0.20.0）+ `git tag v0.20.0`
+
+**关键数字**：
+
+| 指标 | stage 3b 基线 | stage 4 落地 |
+|---|---|---|
+| 全量回归（默认）| 1533 passed / 0 failed / 6 ignored | **不变**（anthropic 测试不在默认 feature 集）|
+| 全量回归（`--features anthropic`）| —（无此档）| **1557 passed / 0 failed / 7 ignored**（+24 CI + stage-1 gate 首次编译）|
+| 验证矩阵 | clippy / build 各 1 档 | **clippy 双档（default + anthropic）+ build 双档（含 `--no-default-features --features anthropic`）** |
+| Sonnet 对照 | — | **deferred（TD-55）**；降级冒烟 = 无 key friendly error + 无效 key 真实 API 403 → `LlmError::Api` 映射（HTTP 全链路验证）|
+| Cargo version | 0.19.0 | **0.20.0** |
+| git tag | — | **v0.20.0** |
+
+
 ### v0.20.0 阶段 3b — AgentRunner ReAct loop + `proc agent ask` 实装（Slice B2，E2B L0/L1 验收）
 
 v0.20 cycle stage 3b Slice B2 落地（brainstorm 项 6+7）：AgentRunner ReAct tool-use 循环 + CLI `proc agent ask` 单轮自然语言 query 端到端跑通（E2B 调 proc_ls → 结果回填 → Markdown 总结），写操作 confirm gate 拦截 + result 截断 + PII 过滤，末段 FixtureRecorder 真实录制覆盖 seed fixture。全量回归 1530 passed / 0 failed / 6 ignored（基线 1510 + 23 新 CI 测试，2 个真实 E2B 测试 `#[ignore]` 本机显式跑）。

@@ -673,6 +673,42 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.15 stage 4 决策**：归档 v0.16+ cycle 评估。理由：(1) `App::new()` 不是 Send + Sync（包含多个 worker handle + UI 状态），跨 tool call 共享需评估线程安全；(2) SystemSnapshot 共享较简单但需评估 freshness（worker 路径 vs MCP 路径同步）；(3) agent 实际不会高频调（典型 task 调 1-2 次），优化收益边际；(4) v0.16 cycle 主题 D2 涉及更多 worker 路径，统一评估。
 
+### TD-55（REVIEW-v0.20 P2-1）：Sonnet 50 query 真实对照验收 deferred
+
+**位置**：`tests/test_agent_v0_20_stage_4.rs::test_agent_stage4_anthropic_acceptance`（`#[ignore]`，已就位）
+
+**现状**：v0.20 stage 4 用户拍板（2026-08-17）无 `ANTHROPIC_API_KEY`，brainstorm 风险 1 mitigate 5 的 Sonnet 对照（≥ 48/50）未实测。降级验证已做：24 CI 纯逻辑测试（消息转换 / tool_choice 映射 / 响应解析 / stream 聚合）+ 无效 key 真实 API 403 错误映射（HTTP 全链路）。anthropic 对照 fixture 录制一并 deferred——MockProvider hash 只含 query 文本，同目录混放两 provider fixture 会覆盖索引，如需录落 `tests/fixtures/agent-anthropic/`。
+
+**影响**：「multi-provider 抽象可移植」的云端实证缺口；本地（E2B）+ 测试（Mock）两路已闭环。
+
+**修复方案**：有 key 后一条命令：`ANTHROPIC_API_KEY=... cargo test --release --features anthropic -- --ignored test_agent_stage4_anthropic_acceptance`（FULL 50 query 预期 <10 分钟）。
+
+**v0.20 stage 4 决策**：归档 v0.21+（TD-56 / TD-57 同批验证）。
+
+### TD-56（REVIEW-v0.20 P2-2）：Anthropic model ID 未对真实 API 验证
+
+**位置**：`src/agent/anthropic_provider.rs::DEFAULT_MODEL`（`claude-sonnet-4-6`，brainstorm 决策 9 写入）
+
+**现状**：403 冒烟（无效 key）在 auth 层被拒，model 校验未到达。Anthropic API 常要求 dated ID（如 `claude-sonnet-4-6-YYYYMMDD`），若默认值不被接受首个真实请求 404 model-not-found。
+
+**影响**：低——用户可在 agent.toml `[anthropic].model` 覆盖；代码默认值可能需按 API 错误信息调整一次。
+
+**修复方案**：有 key 后首个真实请求即验证；404 时按 API error body 调整 `DEFAULT_MODEL`。
+
+**v0.20 stage 4 决策**：归档 v0.21+（与 TD-55 同批）。
+
+### TD-57（REVIEW-v0.20 P2-3）：Anthropic nudge 路径连续 user 消息实测缺失
+
+**位置**：`src/agent/anthropic_provider.rs::messages_to_anthropic`（空 assistant 消息跳过逻辑，stage 4 决策 B）
+
+**现状**：runner 空响应 nudge 重试路径（push 空 assistant 占位 + nudge user 消息）在 Anthropic 侧转换后可能出现相邻两条 user 消息（空 assistant 被跳过）——Anthropic 同角色消息 merge 语义未实测。Sonnet 空响应罕见，路径低频。
+
+**影响**：极低——仅 Sonnet 空响应重试场景；若 API 拒绝相邻同角色消息，会在该路径返 400（可观测不致命）。
+
+**修复方案**：TD-55 验收跑完后确认（50 query 若无空响应则路径未触发，保留观察）；如需修复在 `messages_to_anthropic` 合并相邻 user 文本消息。
+
+**v0.20 stage 4 决策**：归档 v0.21+（随 TD-55 顺带覆盖）。
+
 ---
 
 ## 历史回顾

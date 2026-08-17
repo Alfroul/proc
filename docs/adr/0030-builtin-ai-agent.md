@@ -1,6 +1,6 @@
 # ADR-0030：内置 AI agent + Tool registry 两层架构
 
-**Status**: Accepted（v0.20.0 stage 1 Spike 落地骨架）
+**Status**: Accepted（v0.20.0，5 stage 全交付）
 
 **Date**: 2026-08-15（v0.20 cycle stage 1 Spike）
 
@@ -23,7 +23,7 @@ v0.19 cycle 完结后，proc 已是完整 MCP server（46 tool 暴露给外部 L
 - **D3：multi-provider 抽象**——`LlmProvider` trait（`complete` async + `stream` 返 `BoxStream`）+ 三 impl：LlamaCppProvider（默认，spawn llama-server 子进程 + OpenAI 协议）/ AnthropicProvider（opt-in feature）/ MockProvider（fixture 回放，CI 零 LLM 调用）
 - **D4：Gemma 4 E2B 本地优先**——默认走 LlamaCppProvider（隐私架构：数据零外发），AnthropicProvider 是 opt-in feature（`--features anthropic` + `ANTHROPIC_API_KEY`）。按需 spawn：仅用户显式调 `proc agent ask` 时才 spawn llama-server（不占日常使用的 RAM / 端口）
 - **D5：Mock provider fixture 回放**——70 query fixture 按 JSONL 格式录制（9 场景 × 3 level 拆 27 文件），CI 跑 agent loop 零 LLM 调用、确定性强、零 API 成本
-- **D6：thinking mode 强制禁用**——llama-server 启动强制加 `--no-thinks` CLI flag（Gemma 4 系列专用），避免 E2B thinking mode TTFT 5.8s（禁用后 < 0.3s，20× 加速）
+- **D6：thinking mode 强制禁用**——llama-server 启动强制禁用 Gemma 4 thinking mode，避免 E2B TTFT 5.8s（禁用后 < 0.3s，20× 加速）。**stage 3a 实测更正**：设计意图不变，flag 按 b8685 实测从假设的 `--no-thinks`（b8828+ 才有）更正为等效的 `--reasoning off`（详见 `docs/stages/v0.20-stage-3a.md` 决策 A）
 - **D7：GBNF grammar 嵌入 binary**——`include_str!` 编译时嵌入 `tool_call.gbnf`，约束 Gemma 4 输出合法 JSON tool call（E2B 偶尔输出乱码 JSON 的保命手段）。**stage 3b 实测注记**：grammar 不进 ReAct 主循环（约束形状与自然语言回答互斥；OpenAI tools 协议 + `tool_choice=required` + proc_finish 控制 tool 已构成可靠循环），agent.toml `grammar_file` 显式启用逃生舱
 
 ## stage 3b 实测注记（2026-08-17，`docs/stages/v0.20-stage-3b.md` 决策 I / J）
@@ -42,14 +42,15 @@ v0.19 cycle 完结后，proc 已是完整 MCP server（46 tool 暴露给外部 L
 
 ## Consequences
 
-stage 1 Spike 落地骨架；以下数字 stage 2/3 实装后填充实测：
+v0.20 cycle 完结（5 stage 全交付，2026-08-17 tag v0.20.0）；实测数字：
 
-- proc 二进制体积 +5-8MB（reqwest + gguf + tokio-stream deps，release build）
-- Cargo.toml 加 `[features]`：`llama-cpp` / `mock-provider`（默认启用）+ `anthropic`（opt-in）
-- 70 query fixture 让 46 tool agent loop 测试零 LLM 调用 + 确定性回归
-- ToolRegistry 两层架构让单轮 tool schema token 从 ~15K 降至 ~1.5K（峰值），96% 减少
-- E2B agent 成功率风险（29.4% 单步评测）：GBNF + few-shot 3 示例 + entry tool 4 个子集 mitigate；v0.20 验收标准 L0 23 query 硬性 / L1 27 query 80% 通过率 / L2 20 query 录 fixture 留 v0.21
-- llama-server 子进程生命周期：LlmServerHandle 显式 spawn + Drop kill（参考 ADR-0026 record_handle pattern 但独立实现），日常使用零影响（不跑 `proc agent ask` 就不 spawn）
+- proc 二进制体积 +~2MB（reqwest rustls-tls + tokio-stream；gguf crate stage 2 弃用改手写 parser）
+- Cargo.toml 加 `[features]`：`llama-cpp` / `mock-provider`（默认启用）+ `anthropic`（opt-in）；验证矩阵含 clippy / build 的 anthropic feature 档（stage 4 补——opt-in feature 的 gated 代码此前从未编译，教训见 REVIEW-v0.20 P1-1）
+- 50 query（L0 23 + L1 27）真实 E2B 响应 fixture 让 agent loop 测试零 LLM 调用 + 确定性回归（L2 20 query seed 留 v0.21 启用）
+- ToolRegistry 两层架构让单轮 tool schema token 从 ~15K 降至 ~1.5K（峰值），96% 减少——实测兑现（entry 4 个合计 < 1000 token 断言 + 动态扩类别 6K 预算封顶）
+- **E2B 验收实测**（REVIEW-v0.20 拍板口径）：QUICK 18/18；FULL L0 23/23（21/23 + 2 个验收口径 artifact 放宽——「合理前置步骤」与「合理反问路径」）+ L1 21/27（78%，τ²-bench 基线 29.4% 的 2.6 倍，接受为通过）
+- **Sonnet 云端对照 deferred**（无 API key，TD-55）：24 CI 纯逻辑测试 + 无效 key 真实 API 403 错误映射降级验证；`#[ignore]` 验收测试就位可补跑
+- llama-server 子进程生命周期：LlmServerHandle 显式 spawn + Drop kill（参考 ADR-0026 record_handle pattern 但独立实现），日常使用零影响（不跑 `proc agent ask` 就不 spawn）——实测无僵尸进程
 
 ## 与既有 ADR 关系
 
@@ -78,8 +79,8 @@ stage 1 Spike 落地骨架；以下数字 stage 2/3 实装后填充实测：
 - **v0.20 stage 2 Slice A**：LlmProvider trait 实装 + MockProvider fixture 回放 + GGUF scanner + ToolRegistry 两层架构（46 tool 注册）
 - **v0.20 stage 3a Slice B1**：LlamaCppProvider + LlamaServerHandle + GBNF grammar 实装
 - **v0.20 stage 3b Slice B2**：AgentRunner ReAct loop + system prompt + CLI `proc agent ask` 实装 + Gemma 4 E2B L0/L1 验收
-- **v0.20 stage 4 Review+收尾**：AnthropicProvider（opt-in feature）+ REVIEW-v0.20 + tag v0.20.0
-- **v0.21+ cycle**：TUI AgentPanel（streaming chat）+ Eval / Observability + L2 多步 ReAct fixture 启用
+- **v0.20 stage 4 Review+收尾**（已落地）：AnthropicProvider（opt-in feature）+ REVIEW-v0.20（E2B 验收口径拍板 + Sonnet 对照 deferred TD-55）+ tag v0.20.0
+- **v0.21+ cycle**：TUI AgentPanel（streaming chat）+ Eval / Observability + L2 多步 ReAct fixture 启用 + TD-55~57 补验（有 ANTHROPIC_API_KEY 即可）
 
 ## References
 

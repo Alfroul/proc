@@ -1,6 +1,8 @@
 # proc
 
-Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中。**Windows-only 应用**（Windows 10 1809+ / Windows 11 x64，详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。
+Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中，并通过 **MCP server（外部 LLM → proc）+ 内置 AI agent（proc → LLM，v0.20）双向接入 LLM**。**Windows-only 应用**（Windows 10 1809+ / Windows 11 x64，详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。
+
+> **v0.20.0（2026-08-17）— 内置 AI agent + Tool registry 两层架构 cycle**：proc 历史上第二大 cycle（~3000 行，5 stage），proc 从「MCP server 暴露给外部 LLM」扩展为**自身有 LLM 调用能力**——CLI `proc agent ask "我电脑为什么这么卡？"` 自然语言 query → agent 多步 tool-use 循环（Gemma 4 E2B 本地推理调 proc_ls / proc_metrics_system 等 → 结果回填 → Markdown 总结）。(1) **multi-provider 抽象**（`LlmProvider` trait + LlamaCpp 本地默认 / Anthropic 云端 opt-in / Mock fixture 回放三 impl，同一份 agent 代码零改动跑三种 provider）；(2) **Tool registry 两层架构**（entry 4 tool 起步 + `proc_help(category)` 元 tool 动态发现剩余 43 个——单轮 tool-context 从 ~15K 降至 ~1.5K token 峰值，96% 减少，2B 模型可驱动）；(3) **小模型可靠循环实测结论**（few-shot 对话示例让 E2B 角色扮演编造结果→删；`tool_choice=required` + `proc_finish` 控制 tool 强制结构化；proc_help 发现的 schema 动态加入 tools 数组）；(4) **隐私架构**（本地 Gemma E2B 默认数据零外发 + 写操作 8 tool confirm gate 拦截 + PII 12 关键字过滤 + API key 只走 env 不落盘）；(5) **Mock fixture 基础设施**（50 query 真实 E2B 响应 JSONL 录制 + 确定性回放，CI 零 LLM 调用）。E2B 验收 QUICK 18/18 / FULL L0 23/23（含 2 个口径 artifact 放宽）+ L1 21/27（78%，τ²-bench 基线 29.4% 的 2.6 倍）；Sonnet 云端对照 deferred（无 API key，TD-55）。MCP tool 总数 46 → 46（不变）。详见 [ADR-0030](docs/adr/0030-builtin-ai-agent.md) + [CHANGELOG](CHANGELOG.md)。
 
 > **v0.17.0（2026-07-10）— 5 主题大 cycle（性能 + 可观测性 + VT100 + record + 写操作）**：proc 历史上最大 cycle（~5540 行业务代码 + 测试 + ADR/doc），5 主题合并全交付——(1) **主题 A 性能优化**（TD-47 `parent_chain: Vec<(u32, Arc<str>)>` 零 heap alloc + TD-54 MCP handler 持久 `snapshot` 字段 1s tick refresh + TD-44 itoa + TD-45 bincode encoding 选项层 + TD-50 `proc_smart` deprecated）；(2) **主题 B 可观测性**（rmcp 0.11 `ResourceRoute` trait 暴露 3 资源 URI + SSE transport 结构化 stub + TD-52 sparkline `proc_metrics_history` tool 30s 历史采样）；(3) **主题 F VT100 replay**（`Vt100ToUiFrameConverter` 1:1 映射澄清 ADR-0028 misreading + 透明转码路径 + RAII 临时文件，VT100 录屏现享受 search / 倒放 / 书签全部能力）；(4) **record 暴露**（spawn `proc record --no-tui` 子进程 + `record_handle` 跨 tool call 保活 + `confirm: bool` 必传 gate，[ADR-0029](docs/adr/0029-record-exposure-and-confirm-mechanism.md) 翻盘 ADR-0025b）；(5) **USB release + docker-rm 写操作**（`proc_usb_release` 三步链路 kill + flush + eject + `proc_docker_rm` / `image_rm` / `volume_rm` bollard API）。MCP tool 总数 **39 → 46**（+7 tool）。cycle 7 stage 全交付（5 主题 + 4 份新 ADR 0026~0029 + REVIEW-v0.17 P0 0 / P1 2 / P2 8，不触发拆分）。详见 [CHANGELOG](CHANGELOG.md)。
 
@@ -265,9 +267,51 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 | `proc record` / `proc replay <file>` | VT100 录屏 |
 | `proc export --format json\|csv [-o file] [--sort] [--limit]` | 进程数据导出（含 ISO-8601 本地时间戳） |
 | `proc docker ps / inspect / top / logs / images / volumes / image-rm / volume-rm / compose / events / exec`<sup>v0.5.0</sup> | Docker 11 子命令 |
+| `proc agent models`<sup>v0.20.0</sup> | 列出检测到的本地 GGUF 模型（NAME / SIZE / QUANT / ARCH / PATH 表格，扫描 llama.cpp / ollama / huggingface 常见目录 + agent.toml 自定义路径）|
+| `proc agent ask "<query>"`<sup>v0.20.0</sup> | 内置 AI agent 单轮自然语言 query（`--provider llama-cpp\|anthropic\|mock` / `--model` / `--max-steps`；默认 Gemma 4 E2B 本地推理，按需 spawn llama-server 用完即释放，详见下方 AI Agent 章节）|
 | `proc mcp serve`<sup>v0.7.0</sup> | 启动 MCP server（stdio transport，默认），把上述 32 个子命令 / 详情页 Tab / 系统指标 / 录屏 v2 / USB 状态暴露为 `proc_*` MCP tools 供 Claude Desktop / Cursor 等 LLM agent 调用（v0.7 落地 17 tool，v0.15 扩到 32 tool，v0.16 扩到 39 tool，v0.17 扩到 46 tool）|
 | `proc mcp serve --transport sse --port 8080`<sup>v0.17.0 · full 实装 v0.19.0</sup> | 启动 MCP server（SSE transport，多 client 并发 / 远程 agent 集成 / Web dashboard 场景；`current_thread` runtime 切到 `multi_thread worker_threads(4)` runtime + axum + tower StreamableHttpService 路由 MCP JSON-RPC over HTTP/SSE；详见 ADR-0027 §6）|
 | `proc mcp serve --transport sse --port 8080 --bind-addr 0.0.0.0`<sup>v0.19.0</sup> | SSE transport 全网卡监听（用户显式 opt-in，默认 `127.0.0.1` 仅本机；含 `proc_docker_rm` / `proc_usb_release` / `proc_record_start` 等写操作的 MCP tool 暴露到 LAN 需用户明确知晓风险）|
+
+### 内置 AI Agent（proc → LLM）<sup>v0.20.0</sup>
+
+与 MCP server 互补的另一个方向：MCP 是「外部 LLM → proc」（proc 暴露 46 tool 给 Claude Desktop / Cursor），内置 agent 是「**proc → LLM**」（proc 自身是 client，用户在终端用自然语言查询）。同一套 47 tool 的 Rust API 两条路径复用（[ADR-0030](docs/adr/0030-builtin-ai-agent.md)）。
+
+```bash
+# 自然语言 query → agent 多步 tool-use 循环 → Markdown 总结
+proc agent ask "我电脑为什么这么卡？"                    # 默认 Gemma 4 E2B 本地推理
+proc agent ask "列出 CPU 占用最高的 10 个进程"
+proc agent ask "哪些进程在监听 8080 端口？"
+proc agent ask --max-steps 5 "chrome 为什么占这么多内存？"  # 限制循环步数
+
+# Anthropic 云端对照（opt-in feature + API key 走 env 不落盘）
+ANTHROPIC_API_KEY=sk-ant-... proc agent ask --provider anthropic "..."   # 需 cargo build --release --features anthropic
+```
+
+**Tool registry 两层架构**（让 1.6GB 量化 2B 模型也能驱动 agent）：默认只注入 4 个 entry tool（`proc_ls` / `proc_metrics_system` / `proc_inspect` / `proc_help`，~600 token），剩余 43 个 tool 通过 `proc_help(category)` 元 tool 动态发现——agent 先问「docker 类有哪些 tool」，runner 把该类别 schema 加入后续轮的 tools 数组（token 预算 6K 封顶）。单轮 tool-context 从全 46 tool 注入的 ~15K token 降至 ~1.5K 峰值（**96% 减少**）。
+
+**小模型可靠循环**（stage 3b 实测结论，`tool_choice=required` + `proc_finish` 控制 tool）：每轮强制必调 tool，要结束循环必须显式调 `proc_finish(answer="...")` 提交最终答案——防止 2B 模型凭空编造数据（few-shot 对话示例实测让 E2B 在 content 里角色扮演「调工具 + 编造结果」，已删改「类别路由表」式 system prompt）或中途过早停止。
+
+**隐私架构**（本地优先）：默认走本地 llama.cpp（Gemma 4 E2B，数据零外发；按需 spawn llama-server 用完即释放，日常使用零影响）；Anthropic 云端是 opt-in feature（`--features anthropic` + `ANTHROPIC_API_KEY` env，不写配置文件）；写操作 8 个破坏性 tool（kill / usb_release / docker_rm 等）在 CLI ask 非交互模式下全部拦截（返 blocked JSON 让 agent 转而解释 + 给等价命令行）；tool result 送 LLM 前过 PII 过滤（KEY / TOKEN / PASSWORD 等 12 关键字 regex mask）。
+
+**配置** `~/.config/proc/agent.toml`（缺失时用代码默认值，与 ui.toml 同款契约）：
+
+```toml
+[default]
+provider = "llama-cpp"          # llama-cpp / anthropic / mock
+model = "gemma-4-E2B-it-Q4_K_M"
+max_steps = 10
+
+[llama-cpp]
+server_path = "D:\\llama.cpp\\bin\\...\\llama-server.exe"   # 缺省走 PATH 查找
+ctx_size = 8192
+
+[anthropic]
+model = "claude-sonnet-4-6"     # API key 走 ANTHROPIC_API_KEY env，不写配置文件
+max_tokens = 4096
+```
+
+**测试基础设施**：50 query（9 场景 L0/L1）真实 Gemma E2B 响应录制为 JSONL fixture，`--provider mock` 确定性回放——CI 跑 agent loop 零 LLM 调用、零 API 成本。E2B 实测：QUICK 18/18，FULL L0 23/23（含 2 个验收口径 artifact 放宽）+ L1 21/27（78%，τ²-bench 基线 29.4% 的 2.6 倍）。
 
 ### MCP server（LLM agent 接入）<sup>v0.7.0 · 扩 v0.15.0 · 扩 v0.16.0 · 扩 v0.17.0 · 扩 v0.18.0 · 扩 v0.19.0</sup>
 

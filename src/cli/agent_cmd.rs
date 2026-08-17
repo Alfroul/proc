@@ -55,24 +55,30 @@ fn run_agent_ask(
         .or_else(|| config.default.provider.clone())
         .unwrap_or_else(|| "llama-cpp".to_string());
 
-    // 决策 H：anthropic 拦到 stage 4（provider 本体 stage 4 实装，先拦防 todo!() panic）。
-    if provider_name == "anthropic" {
-        return Err(
-            "AnthropicProvider 在 v0.20 stage 4 落地（cargo build --features anthropic + \
-             ANTHROPIC_API_KEY）"
-                .to_string(),
-        );
-    }
-
     // 决策 C：grammar 逃生舱——agent.toml [llama-cpp] grammar_file = "tool_call"
     // 显式启用才进 ReAct 循环（默认不启用，OpenAI tools 协议解析可靠）。
     let grammar = (config.llama_cpp.grammar_file.as_deref() == Some("tool_call"))
         .then(|| crate::agent::grammars::TOOL_CALL_GRAMMAR.to_string());
 
+    // anthropic 时 temperature 用 [anthropic] 段（其余采样参数 provider 侧按
+    // Anthropic「至多一个」约束取 temperature 优先，top_p / top_k 不会外发）。
+    let temperature = if provider_name == "anthropic" {
+        #[cfg(feature = "anthropic")]
+        {
+            config.anthropic.temperature
+        }
+        #[cfg(not(feature = "anthropic"))]
+        {
+            config.llama_cpp.temperature
+        }
+    } else {
+        config.llama_cpp.temperature
+    };
+
     let options = AgentOptions {
         max_steps,
         grammar,
-        temperature: config.llama_cpp.temperature,
+        temperature,
         top_p: config.llama_cpp.top_p,
         top_k: config.llama_cpp.top_k,
     };
@@ -135,6 +141,41 @@ fn run_agent_ask(
             {
                 return Err(
                     "llama-cpp feature 未启用（默认 build 已含；最小化 build 请用 --provider mock)"
+                        .to_string(),
+                );
+            }
+        }
+        "anthropic" => {
+            #[cfg(feature = "anthropic")]
+            {
+                // model 解析（决策 H 同款链）：--model > [anthropic].model >
+                // [default].model > 代码默认。
+                let model = model_flag
+                    .map(str::to_string)
+                    .or_else(|| config.anthropic.model.clone())
+                    .or_else(|| config.default.model.clone())
+                    .unwrap_or_else(|| crate::agent::anthropic_provider::DEFAULT_MODEL.to_string());
+                let provider = crate::agent::anthropic_provider::AnthropicProvider::from_env(
+                    model,
+                    config.anthropic.max_tokens.unwrap_or(4096),
+                )
+                .map_err(|e| e.to_string())?;
+                eprintln!(
+                    "{} provider: anthropic（model: {}）",
+                    "·".dimmed(),
+                    provider.model
+                );
+                AgentRunner::new(
+                    Arc::new(provider),
+                    crate::agent::tools::catalog::default_registry(),
+                    options,
+                )
+            }
+            #[cfg(not(feature = "anthropic"))]
+            {
+                return Err(
+                    "anthropic feature 未启用（cargo build --release --features anthropic + \
+                     ANTHROPIC_API_KEY）"
                         .to_string(),
                 );
             }

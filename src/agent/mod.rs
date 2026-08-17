@@ -32,6 +32,7 @@ pub mod provider;
 #[cfg(feature = "mock-provider")]
 pub mod record_fixture;
 pub mod runner;
+pub mod sse;
 pub mod tool_registry;
 pub mod tools;
 pub mod types;
