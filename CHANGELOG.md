@@ -7,7 +7,15 @@
 
 ## [Unreleased]
 
-v0.21 候选方向（[REVIEW-v0.20](docs/reviews/REVIEW-v0.20.md) §v0.21+ 候选方向段）：**TUI AgentPanel + streaming chat（方向 F）+ Eval/Observability（方向 C）双主题 cycle**（brainstorm 既定计划，v0.20 `stream()` 三 provider 就绪是前置）；L2 多步 ReAct fixture 启用；TD-55~57（Sonnet 对照补验 / Anthropic model ID / nudge 路径）视 `ANTHROPIC_API_KEY` 可得性穿插；更强本地模型复测 L1（agent.toml 换模型即支持）。
+### v0.21 stage 1 — TUI AgentPanel 骨架铺设（Spike，ADR-0031）
+
+- **ADR-0031**（新）：TUI AgentPanel + AgentSession 流式会话架构——D1 独立会话层（专用线程 + 自有 tokio Runtime + std mpsc 桥接同步 TUI）/ D2 `run_streaming` 流式变体（complete 路径零改动）/ D3 写操作 confirm 通道（dispatch 双模式）/ D4 多轮滑动窗口 `MAX_HISTORY_TURNS=12` / D5 按需 spawn 延续 / D6 streaming 渲染 tick 节流
+- **`src/agent/session.rs`**（新声明式骨架）：`SessionEvent` 8 变体（QueryStarted / TextDelta / ToolStart / ToolFinished / ConfirmRequested / TurnFinished / SessionFinished / Error）+ `ConfirmRequest`（tool_name + arguments + 影响摘要 + oneshot reply）+ `ConfirmDecision`（Approved/Denied）+ `AgentSession` / `SessionHandle` 空 struct（实装留 stage 2）
+- **`AppMode::Agent` 第 10 变体** + AgentPanelController 空骨架（`AgentPanelMode` 三态状态机 Idle/Streaming/AwaitingConfirm）+ 全屏占位渲染 `src/tui/agent_panel.rs`
+- **入口 = 命令面板唯一通道**：原计划 `A`（Shift+A）键与既有全局绑定「打开告警弹窗」（v0.7）冲突，按 stage doc 风险 2 预授权 fallback 走 Ctrl+P 搜「AI Agent」进入（`switch_to_agent_panel` 条目）；Ctrl+D / Esc 退出回进程列表；help_panel 加 AI Agent 区段
+- **测试**：`tests/test_agent_v0_21_stage_1.rs` 15 个 stub 测试（session 类型 / oneshot round-trip / palette 模糊搜索 E2E 切模式 / A 键告警弹窗回归锚 / TestBackend 渲染 / CLI ask + MCP 46 tool 回归锚）；全量回归 1533 → **1548 passed / 0 failed / 6 ignored（默认档）+ 1572（anthropic 档）**
+
+v0.21 候选方向（[REVIEW-v0.20](docs/reviews/REVIEW-v0.20.md) §v0.21+ 候选方向段）：**TUI AgentPanel + streaming chat（方向 F）+ 写操作 confirm 通道单主主题 cycle**（brainstorm 拍板 2026-08-18：C 拆到 v0.22）；L2 多步 fixture 手动演示进 stage 3 验收；TD-55~57 视 `ANTHROPIC_API_KEY` 可得性穿插。
 
 ## [0.20.0] - 2026-08-17
 

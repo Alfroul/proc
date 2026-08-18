@@ -1,3 +1,4 @@
+pub mod agent_panel;
 pub mod alert_badge;
 pub mod app_group_view;
 // v0.7 阶段 3：Ctrl+P 命令面板（nucleo fuzzy + modal 浮层）。

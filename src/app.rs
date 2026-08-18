@@ -38,6 +38,7 @@ use crate::replay::{ReplayAction, ReplayController};
 use crate::security::{BackgroundScorer, SecurityScore};
 use crate::tree::TreeNode;
 use crate::tui::command_palette::{CommandAction, CommandPalette, PaletteHandleResult};
+use crate::view_models::AgentPanelController;
 use crate::view_models::DockerPanel;
 use crate::view_models::DockerPanelController;
 use crate::view_models::MonitorPanel;
@@ -86,6 +87,9 @@ pub struct App {
     pub usb_panel: UsbPanelController,
     pub monitor_panel: MonitorPanelController,
     pub docker_panel: DockerPanelController,
+    // v0.21：AI Agent 面板（ADR-0031）。stage 1 占位（空骨架 + 退出键）；
+    // stage 2 接 AgentSession，stage 3 接键位状态机 + streaming 渲染。
+    pub agent_panel: AgentPanelController,
 
     // v0.6.0 阶段 5：后台采集 worker（port / usb / net_flow / dns_log）统一由
     // `WorkerManager` 持有，详见 `src/workers/manager.rs`。Docker logs worker
@@ -283,6 +287,7 @@ impl App {
             usb_panel: UsbPanelController::new(UsbPanel::new()),
             monitor_panel: MonitorPanelController::new(MonitorPanel::new()),
             docker_panel,
+            agent_panel: AgentPanelController::new(),
             workers,
             dns_log_recent: VecDeque::new(),
             flows: Vec::new(),
@@ -851,6 +856,13 @@ impl App {
                     return;
                 }
                 AppMode::Help => PanelAction::Noop,
+                AppMode::Agent => {
+                    // v0.21 stage 1：退出键内联处理（controller.handle_key 是
+                    // todo!()，stage 3 才接线完整状态机）。
+                    let _ = ctx;
+                    self.handle_agent_key(key);
+                    return;
+                }
             }
         };
 
@@ -1006,6 +1018,21 @@ impl App {
         if let Some(err_msg) = switch_with_err {
             self.switch_mode(AppMode::DockerPanel);
             self.container_exec_exit_msg = Some(err_msg);
+        }
+    }
+
+    /// v0.21 stage 1：Agent 面板占位键位——仅退出（Ctrl+D / Esc 回 ProcessList）。
+    /// stage 3 接线 [`AgentPanelController::handle_key`] 完整状态机（输入 / 发送 /
+    /// y·n confirm / 滚动；Streaming 态 Esc 优先中断生成而非退出）。
+    fn handle_agent_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.switch_mode(AppMode::ProcessList);
+            }
+            KeyCode::Esc => {
+                self.switch_mode(AppMode::ProcessList);
+            }
+            _ => {}
         }
     }
 
@@ -2308,7 +2335,7 @@ impl App {
     fn keyboard_captured_by_inner_mode(&self) -> bool {
         matches!(
             self.mode,
-            AppMode::Replay | AppMode::ContainerExec | AppMode::Help
+            AppMode::Replay | AppMode::ContainerExec | AppMode::Help | AppMode::Agent
         )
     }
 

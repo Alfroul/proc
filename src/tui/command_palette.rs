@@ -319,6 +319,15 @@ fn default_items() -> &'static [CommandItem] {
             hint: "6",
             action: CommandAction::SwitchPanel(AppMode::DockerPanel),
         },
+        // v0.21：AI Agent 面板（ADR-0031）。入口仅命令面板——`A` 键已被
+        // 「打开告警弹窗」占用（stage 1 实测确认，brainstorm 决策 8 注记更新）。
+        CommandItem {
+            id: "switch_to_agent_panel",
+            label: "Switch to AI Agent Panel",
+            category: "Panel",
+            hint: "Ctrl+P",
+            action: CommandAction::SwitchPanel(AppMode::Agent),
+        },
         CommandItem {
             id: "switch_to_process_list_view",
             label: "Process List View (flat)",

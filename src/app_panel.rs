@@ -21,6 +21,10 @@ pub enum AppMode {
     ContainerExec,
     Replay,
     Help,
+    /// v0.21：AI Agent 面板（ADR-0031）。命令面板（Ctrl+P 搜「AI Agent」）进入，
+    /// `Ctrl+D` / `Esc` 退出回 ProcessList。stage 1 为占位渲染，会话层 stage 2、
+    /// 面板交互 stage 3 实装。
+    Agent,
 }
 
 /// Inspector 内部 Tab（阶段 13，ADR-0004；阶段 1 扩为 6 变体）。

@@ -32,6 +32,7 @@ pub mod provider;
 #[cfg(feature = "mock-provider")]
 pub mod record_fixture;
 pub mod runner;
+pub mod session;
 pub mod sse;
 pub mod tool_registry;
 pub mod tools;
@@ -46,5 +47,8 @@ pub use provider::{
     Usage,
 };
 pub use runner::{AgentOptions, AgentRunner, RunnerOutcome, StepTrace, StopCause};
+pub use session::{
+    AgentSession, ConfirmDecision, ConfirmRequest, MAX_HISTORY_TURNS, SessionEvent, SessionHandle,
+};
 pub use tool_registry::ToolRegistry;
 pub use types::{Message, Role, ToolCall, ToolCategory, ToolResult, ToolSchema};

@@ -167,6 +167,16 @@ const SECTIONS: &[HelpSection] = &[
             ("Home / End", "跳到顶部 / 底部"),
         ],
     },
+    HelpSection {
+        title: "AI Agent 面板（v0.21 开发中）",
+        rows: &[
+            (
+                "Ctrl+P",
+                "命令面板搜「AI Agent」进入（A 键已被告警弹窗占用）",
+            ),
+            ("Ctrl+D / Esc", "退出面板回进程列表"),
+        ],
+    },
 ];
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {

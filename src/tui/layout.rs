@@ -18,7 +18,7 @@ const TAB_NAMES: [&str; 6] = [
 
 fn tab_index(mode: &AppMode) -> usize {
     match mode {
-        AppMode::ProcessList | AppMode::ProcessDetail | AppMode::Help => 0,
+        AppMode::ProcessList | AppMode::ProcessDetail | AppMode::Help | AppMode::Agent => 0,
         AppMode::PortMap => 2,
         AppMode::UsbAssistant => 3,
         AppMode::MonitorPanel => 4,
@@ -249,6 +249,11 @@ fn draw_middle(f: &mut Frame, app: &App, area: Rect) {
         crate::tui::help_panel::draw(f, area, app);
         return;
     }
+    // v0.21：Agent 全屏面板（与 Help 同档，占主区不渲染进程表）。
+    if app.mode == AppMode::Agent {
+        crate::tui::agent_panel::draw(f, area, app);
+        return;
+    }
     match app.mode {
         AppMode::ProcessList | AppMode::Replay => {
             let show_right = app.mode != AppMode::Replay
@@ -314,6 +319,8 @@ fn draw_main_panel(f: &mut Frame, app: &App, area: Rect) {
         }
         // Help mode is rendered by draw_middle before this function is reached.
         AppMode::Help => {}
+        // v0.21：Agent mode 同 Help，由 draw_middle 提前渲染（全屏占位面板）。
+        AppMode::Agent => {}
     }
 }
 
@@ -334,6 +341,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             " ↑↓移动  Enter展开/详情  g切换视图  a异常  f过滤  s排序  d诊断  DDNS日志  /搜索  k终止  q退出"
         }
         AppMode::Replay => " Space播放/暂停  ←→快退/快进  +/-速度  q退出回放",
+        AppMode::Agent => " Ctrl+D/Esc 退出（对话/流式/确认交互 v0.21 stage 3 实装）",
         AppMode::Help => " ↑↓/PgUp/PgDn滚动  Esc/q/? 返回  Home/End 顶/底",
         AppMode::ProcessList
             if app.process_panel.panel.process_view_mode
