@@ -66,6 +66,183 @@ pub const WRITE_TOOL_NAMES: &[&str] = &[
 /// 收紧到 8K chars；ctx 同步升到 16384（agent.toml）双保险。
 pub const MAX_TOOL_RESULT_CHARS: usize = 8_000;
 
+// ---------------------------------------------------------------------------
+// confirm 双模式（v0.21 stage 2，ADR-0031 D3）
+// ---------------------------------------------------------------------------
+
+/// 是否写 tool（`WRITE_TOOL_NAMES` 包装；runner 流式 confirm 路径用）。
+pub fn is_write_tool(name: &str) -> bool {
+    WRITE_TOOL_NAMES.contains(&name)
+}
+
+/// 写操作影响摘要（ConfirmRequest.summary，风险 5 mitigate 1——确认框
+/// 强制展示「会动什么」；参数缺失走 fallback 形态）。
+pub fn confirm_summary(tool_name: &str, arguments: &Value) -> String {
+    let arg_str = |k: &str| arguments.get(k).and_then(|v| v.as_str());
+    let u32_str = |k: &str| arguments.get(k).and_then(|v| v.as_u64());
+    match tool_name {
+        "proc_kill" => match u32_str("pid") {
+            Some(pid) => format!("终止进程 PID {pid}"),
+            None => fallback_summary(tool_name, arguments),
+        },
+        "proc_pkill" => match arg_str("name").or_else(|| arg_str("pattern")) {
+            Some(name) => format!("按名称「{name}」终止全部匹配进程"),
+            None => fallback_summary(tool_name, arguments),
+        },
+        "proc_usb_release" => match arg_str("drive") {
+            Some(drive) => {
+                let pids: Vec<String> = arguments
+                    .get("kill_pids")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_u64().map(|n| n.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if pids.is_empty() {
+                    format!("强制弹出 U 盘 {drive}:（刷缓存 + 弹出，不杀进程）")
+                } else {
+                    format!(
+                        "强制弹出 U 盘 {drive}:（杀进程 {} + 刷缓存 + 弹出）",
+                        pids.join(",")
+                    )
+                }
+            }
+            None => fallback_summary(tool_name, arguments),
+        },
+        "proc_docker_rm" => match arg_str("container_id").or_else(|| arg_str("name")) {
+            Some(id) => format!("删除 Docker 容器 {id}（不可逆）"),
+            None => fallback_summary(tool_name, arguments),
+        },
+        "proc_docker_image_rm" => match arg_str("image_id").or_else(|| arg_str("name")) {
+            Some(id) => format!("删除 Docker 镜像 {id}（不可逆）"),
+            None => fallback_summary(tool_name, arguments),
+        },
+        "proc_docker_volume_rm" => match arg_str("volume_name").or_else(|| arg_str("name")) {
+            Some(id) => format!("删除 Docker 卷 {id}（数据永久丢失，不可逆）"),
+            None => fallback_summary(tool_name, arguments),
+        },
+        "proc_record_start" => "启动录屏子进程（录制屏幕内容，含进程名 / DNS 名）".to_string(),
+        "proc_record_stop" => "停止录屏子进程并落盘 .prec 文件".to_string(),
+        _ => fallback_summary(tool_name, arguments),
+    }
+}
+
+fn fallback_summary(tool_name: &str, arguments: &Value) -> String {
+    format!("写操作 {tool_name}（参数：{arguments}）")
+}
+
+/// blocked 拦截的 ToolResult 包装（Denied / 无通道路径共用；runner 流式
+/// confirm 路径用，`blocked_json` 保持私有）。
+pub fn blocked_tool_result(call: &ToolCall) -> crate::agent::types::ToolResult {
+    let value = blocked_json(&call.name);
+    crate::agent::types::ToolResult {
+        tool_call_id: call.id.clone(),
+        content: value.to_string(),
+        is_error: true,
+    }
+}
+
+/// 写 tool 真实执行（Approved 路径；调用方已注入 `confirm: true`）。
+///
+/// record_start/stop 需要跨调用子进程保活的持久 handle（ADR-0029），agent
+/// 侧暂不支持（brainstorm 决策 8：推迟 v0.22+ 评估）。
+fn execute_write_tool(name: &str, arguments: &Value) -> (Value, bool) {
+    let v = match name {
+        "proc_kill" => {
+            let Some(pid) = u32_of(arguments, "pid") else {
+                return (err_json("pid is required"), true);
+            };
+            crate::mcp::handler::make_kill_json(pid, bool_of(arguments, "force").unwrap_or(false))
+        }
+        "proc_pkill" => {
+            let Some(target) = str_of(arguments, "name").or_else(|| str_of(arguments, "pattern"))
+            else {
+                return (err_json("name is required"), true);
+            };
+            crate::mcp::handler::make_pkill_json(
+                target,
+                bool_of(arguments, "force").unwrap_or(false),
+                bool_of(arguments, "dry_run").unwrap_or(false),
+            )
+        }
+        "proc_usb_release" => {
+            let Some(drive) = str_of(arguments, "drive") else {
+                return (err_json("drive is required"), true);
+            };
+            let kill_pids: Vec<u32> = arguments
+                .get("kill_pids")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_u64().and_then(|n| u32::try_from(n).ok()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            crate::mcp::handler::record::make_usb_release_json(
+                true,
+                drive,
+                &kill_pids,
+                bool_of(arguments, "dry_run"),
+            )
+        }
+        "proc_docker_rm" => {
+            let Some(id) = str_of(arguments, "container_id").or_else(|| str_of(arguments, "name"))
+            else {
+                return (err_json("container_id is required"), true);
+            };
+            crate::mcp::handler::record::make_docker_rm_json(
+                true,
+                id,
+                bool_of(arguments, "force"),
+                bool_of(arguments, "volumes"),
+            )
+        }
+        "proc_docker_image_rm" => {
+            let Some(id) = str_of(arguments, "image_id").or_else(|| str_of(arguments, "name"))
+            else {
+                return (err_json("image_id is required"), true);
+            };
+            crate::mcp::handler::record::make_docker_image_rm_json(
+                true,
+                id,
+                bool_of(arguments, "force"),
+                bool_of(arguments, "prune_children"),
+            )
+        }
+        "proc_docker_volume_rm" => {
+            let Some(id) = str_of(arguments, "volume_name").or_else(|| str_of(arguments, "name"))
+            else {
+                return (err_json("volume_name is required"), true);
+            };
+            crate::mcp::handler::record::make_docker_volume_rm_json(
+                true,
+                id,
+                bool_of(arguments, "force"),
+            )
+        }
+        "proc_record_start" | "proc_record_stop" => err_json(
+            "该 tool 需要跨调用子进程保活的持久状态，agent 侧暂不支持\
+             （v0.21 决策 8，推迟 v0.22+ 评估）；请向用户解释并给出等价 CLI 命令",
+        ),
+        _ => return (err_json(format!("unknown write tool '{name}'")), true),
+    };
+    (v, false)
+}
+
+/// confirm Approved 后的写 tool 执行入口：返回值与 [`execute_tool`] 同款
+/// 契约（截断 + PII 过滤）。仅在 runner 流式路径 confirm 通过后可达。
+pub fn execute_confirmed_tool(call: &ToolCall) -> crate::agent::types::ToolResult {
+    let (value, is_error) = execute_write_tool(&call.name, &call.arguments);
+    let content = truncate_result(&apply_pii_filter(&value.to_string()));
+    crate::agent::types::ToolResult {
+        tool_call_id: call.id.clone(),
+        content,
+        is_error,
+    }
+}
+
 /// proc_ls 缺省 limit（agent 版；MCP 版 None = 全量）。
 const DEFAULT_LS_LIMIT: usize = 20;
 

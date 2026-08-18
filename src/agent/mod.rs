@@ -17,6 +17,7 @@
 //!
 //! 详见 `docs/adr/0030-builtin-ai-agent.md`。
 
+pub mod builder;
 pub mod config;
 pub mod gguf_scan;
 pub mod grammars;
@@ -41,14 +42,18 @@ pub mod types;
 #[cfg(feature = "anthropic")]
 pub mod anthropic_provider;
 
+pub use builder::{ProviderSpec, build_runner};
 pub use config::AgentConfig;
 pub use provider::{
     CompleteOptions, CompleteResponse, Delta, LlmError, LlmProvider, ProviderStream, StopReason,
     Usage,
 };
-pub use runner::{AgentOptions, AgentRunner, RunnerOutcome, StepTrace, StopCause};
+pub use runner::{
+    AgentOptions, AgentRunner, ConfirmHook, RunnerOutcome, StepTrace, StopCause, StreamEvent,
+};
 pub use session::{
-    AgentSession, ConfirmDecision, ConfirmRequest, MAX_HISTORY_TURNS, SessionEvent, SessionHandle,
+    AgentSession, ConfirmDecision, ConfirmRequest, MAX_HISTORY_TURNS, SessionCommand, SessionEvent,
+    SessionHandle, truncate_history,
 };
 pub use tool_registry::ToolRegistry;
 pub use types::{Message, Role, ToolCall, ToolCategory, ToolResult, ToolSchema};

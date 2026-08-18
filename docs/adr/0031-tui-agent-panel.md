@@ -31,6 +31,14 @@ proc 的主入口是 TUI（`AppMode` 10 变体 + `PanelController` 模式成熟�
 2. `ConfirmRequest` derive Debug 可行（`oneshot::Sender` 实现 Debug），stage doc 风险 4 的兜底（手写 Debug）未触发。
 3. `AppMode` 实际 9 变体 → 加 `Agent` 后 10 个（brainstorm 文案「10 变体 → 11 变体」是 miscount，代码为准）。
 
+## stage 2 落地注记（Slice A 业务实装，2026-08-18）
+
+1. **ConfirmHook 签名简化**：runner 自建 oneshot（reply 放进 `ConfirmRequest` 发出），hook 只负责发事件（`Fn(ConfirmRequest)`）——rx 由 runner 持有 await，session 层闭包无需包装 rx（规划稿的 `Fn(ConfirmRequest) -> Receiver` 少一层间接）。
+2. **confirm 真实执行复用 MCP 写 helper**：`execute_confirmed_tool`（Approved 后注入 `confirm: true`）调 `make_kill_json` / `make_pkill_json` / `make_usb_release_json` / `make_docker_{rm,image_rm,volume_rm}_json`；record_start/stop 需跨调用子进程保活持久 handle（ADR-0029），Approved 也返「不支持」（决策 8）。安全边界：`spawn_execute(confirmed_write: bool)` 仅 confirm Approved 后置位，无通道时一律走既有 `execute_tool` blocked 拦截。
+3. **E2B 流式冒烟实测通过**（风险 3 闭环）：真实 llama-server（b8685 + gemma-4-E2B）`run_streaming` 2 query（proc_ls tool 轮 + 多轮 history 追问）35.7s 无 Err、事件面有产出、最终回答非空——stream + `tool_choice=required` + proc_finish 组合下 tool_calls 分片与 EndTurn 行为正常，stage 3 无需降级方案。
+4. **session 线程可观测性**：`SessionHandle::is_exited`（线程退出标志）+ events 通道随线程终结断开（drain 返 None）——stage 3 面板可感知会话死亡；confirm 挂起时 drop 的收尾链（cancel → Interrupted → Sender 断开 → 线程退出）由 D 组集成测试带超时断言覆盖。
+5. **`StopCause::Interrupted` 新变体**：`SessionFinished{stop}` 复用（Interrupted 不入 history，已完成轮保留）；`label()` 返 `"interrupted"`。
+
 ## Consequences
 
 - AppMode 10 变体（ProcessList / PortMap / UsbAssistant / MonitorPanel / DockerPanel / ProcessDetail / ContainerExec / Replay / Help / Agent）；App 加 `agent_panel: AgentPanelController` 字段。

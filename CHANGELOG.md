@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+### v0.21 stage 2 — AgentSession 会话层 + run_streaming 流式 + confirm 协议层（Slice A）
+
+- **`AgentRunner::run_streaming`**（`src/agent/runner.rs`）：消费 `provider.stream()` 逐 delta 的流式 ReAct 变体——`StreamEvent` 事件面（TextDelta / ToolStart / ToolFinished / TurnFinished）、proc_finish / max_steps / 动态扩 tools / 空响应 nudge 与 complete 路径逐分支对齐、cancel 检查点 3 处（turn 开头 / 每 delta 后 / confirm await）命中返新增 `StopCause::Interrupted`；**既有 complete 路径（`run` / `run_with_progress`）零改动**——CLI ask 保持非流式
+- **写操作 confirm 通道**（`src/agent/tools/dispatch.rs`）：dispatch 双模式——confirm hook 存在时写 tool 走 `ConfirmRequest`（影响摘要 `confirm_summary`：kill→PID / pkill→名称 / usb_release→盘符 / docker×3→容器镜像卷名）+ oneshot y/n 决策，Approved 注入 `confirm: true` 经 `execute_confirmed_tool` 真实执行（复用 MCP 写 helper；record_start/stop 按决策 8 返「不支持」），Denied / Sender drop 返 blocked JSON；无通道（CLI ask）保持既有 blocked 拦截语义不变
+- **`AgentSession` 会话层实装**（`src/agent/session.rs`）：专用 `std::thread` + 线程内自建 tokio Runtime + `std::sync::mpsc` 双通道桥接同步 TUI（WorkerManager 同款模式，v0.20 风险 6 闭环）；多轮 conversation history 滑动窗口（`MAX_HISTORY_TURNS=12` 轮）；`SessionHandle`（`send_query` / `interrupt` / `drain_event` / `is_exited` / `shutdown`）+ Drop 收尾链——confirm 挂起时任何时序 drop 不挂死（集成测试带超时断言）
+- **provider 构造链抽共享**（`src/agent/builder.rs` 新）：`build_runner`（CLI flag > agent.toml > 代码默认，三 provider cfg-gate）+ `ProviderSpec`（CLI stderr / stage 3 面板状态行共用）；`agent_cmd.rs` 改调 builder，CLI ask 行为不变
+- **测试**：`tests/test_agent_v0_21_stage_2.rs` 35 CI 测试（ScriptedStreamProvider 流式脚本全覆盖，零 LLM 调用：run_streaming 核心 9 / confirm 协议 7 / dispatch 函数 7 / session 端到端 8 / builder 杂项 4）+ E2B 流式冒烟 `#[ignore]`（真实 llama-server 2 query 通过——stream + required + proc_finish 组合实测，风险 3 闭环）；全量回归 1548 → **1583 passed / 0 failed / 7 ignored（默认档）+ 1607（anthropic 档）**
+
 ### v0.21 stage 1 — TUI AgentPanel 骨架铺设（Spike，ADR-0031）
 
 - **ADR-0031**（新）：TUI AgentPanel + AgentSession 流式会话架构——D1 独立会话层（专用线程 + 自有 tokio Runtime + std mpsc 桥接同步 TUI）/ D2 `run_streaming` 流式变体（complete 路径零改动）/ D3 写操作 confirm 通道（dispatch 双模式）/ D4 多轮滑动窗口 `MAX_HISTORY_TURNS=12` / D5 按需 spawn 延续 / D6 streaming 渲染 tick 节流

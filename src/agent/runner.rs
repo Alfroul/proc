@@ -13,13 +13,19 @@
 //!   （stage 3a 实测）；grammar 逃生舱经 [`AgentOptions::grammar`] 显式启用
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use futures_util::StreamExt;
 use serde_json::Value;
+use tokio::sync::oneshot;
 
 use super::prompts::SYSTEM_PROMPT;
-use super::provider::{CompleteOptions, CompleteResponse, LlmError, LlmProvider, ToolChoice};
+use super::provider::{
+    CompleteOptions, CompleteResponse, Delta, LlmError, LlmProvider, ToolChoice,
+};
+use super::session::{ConfirmDecision, ConfirmRequest};
 use super::tool_registry::ToolRegistry;
-use super::tools::dispatch::execute_tool;
+use super::tools::dispatch::{self, execute_tool};
 use super::types::{Message, Role, ToolResult, ToolSchema};
 
 /// loop 内部控制 tool 名（决策 I）：模型调它提交最终答案并结束循环。
@@ -129,6 +135,9 @@ pub enum StopCause {
     MaxSteps,
     /// 空响应 nudge 重试后仍空（决策 D）。
     EmptyAfterRetry,
+    /// 用户中断（v0.21 run_streaming：cancel flag 命中；当前 run 丢弃、
+    /// session 层已完成 history 保留）。
+    Interrupted,
 }
 
 /// 单个 tool call 的执行 trace（验收「expected tool 被调用」断言 + CLI 渲染）。
@@ -155,6 +164,28 @@ pub enum StepEvent<'a> {
     /// 开始执行一个 tool call。
     ToolStart(&'a str, &'a Value),
 }
+
+/// 流式事件（v0.21 `run_streaming` 的 sink 增量；session 层转 `SessionEvent`）。
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// assistant 文本增量（透传 provider 的 `Delta::Text`）。
+    TextDelta(String),
+    /// 开始执行一个 tool call。
+    ToolStart { name: String, arguments: Value },
+    /// 一个 tool call 执行完成。
+    ToolFinished {
+        name: String,
+        is_error: bool,
+        result_chars: usize,
+    },
+    /// 一轮 LLM 流式调用结束（多轮 ReAct 的轮边界）。
+    TurnFinished,
+}
+
+/// confirm hook：runner 自建 oneshot（reply 放进 request），hook 只负责把
+/// `ConfirmRequest` 发出去（session 层 send `SessionEvent::ConfirmRequested`），
+/// rx 由 runner 持有 await 用户 y/n 决策。
+pub type ConfirmHook<'a> = &'a (dyn Fn(ConfirmRequest) + Send + Sync);
 
 pub struct AgentRunner {
     provider: Arc<dyn LlmProvider>,
@@ -314,6 +345,303 @@ impl AgentRunner {
         })
     }
 
+    /// 流式变体（v0.21 ADR-0031 D2）：消费 `provider.stream()` 逐 delta 产出。
+    ///
+    /// proc_finish / max_steps / 动态扩 tools / 空响应 nudge 与 complete 路径
+    /// 语义对齐；`history` 由 session 层维护（runner 无状态）。cancel 检查点
+    /// 3 处：每 turn 开头 / 流消费每个 delta 后 / confirm await 期间——命中即
+    /// 返 `StopCause::Interrupted`（已完成 steps 保留在 trace）。
+    pub async fn run_streaming(
+        &self,
+        query: &str,
+        history: &[Message],
+        sink: &(dyn Fn(StreamEvent) + Send + Sync),
+        confirm: Option<ConfirmHook<'_>>,
+        cancel: &AtomicBool,
+    ) -> Result<RunnerOutcome, LlmError> {
+        if query.trim().is_empty() {
+            return Err(LlmError::Config("query 不能为空".to_string()));
+        }
+
+        let system = build_system_prompt();
+        let mut messages = vec![Message::new(Role::System, system)];
+        messages.extend(history.iter().cloned());
+        messages.push(Message::new(Role::User, query.to_string()));
+
+        let mut tools: Vec<_> = self.registry.entry_tools().into_iter().cloned().collect();
+        tools.push(finish_tool_schema());
+        let options = CompleteOptions {
+            grammar: self.options.grammar.clone(),
+            temperature: self.options.temperature,
+            top_p: self.options.top_p,
+            top_k: self.options.top_k,
+            max_tokens: Some(1024),
+            tool_choice: Some(ToolChoice::Required),
+            ..Default::default()
+        };
+
+        let mut steps: Vec<StepTrace> = Vec::new();
+        let mut nudged = false;
+        let mut last_assistant_text: Option<String> = None;
+
+        for _step in 0..self.options.max_steps as usize {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(interrupted_outcome(steps));
+            }
+
+            let Some((text, calls)) = self
+                .stream_turn(&mut messages, &tools, &options, sink, cancel, &mut nudged)
+                .await?
+            else {
+                return Ok(interrupted_outcome(steps));
+            };
+
+            if !text.trim().is_empty() {
+                last_assistant_text = Some(text.clone());
+            }
+            messages.push(Message {
+                role: Role::Assistant,
+                content: (!text.is_empty()).then(|| text.clone()),
+                tool_calls: calls.clone(),
+                tool_results: Vec::new(),
+            });
+
+            // 决策 I：proc_finish 控制 tool——模型显式提交最终答案结束循环。
+            if let Some(answer) = extract_finish_answer(&calls) {
+                return Ok(RunnerOutcome {
+                    final_text: answer,
+                    steps,
+                    stop: StopCause::EndTurn,
+                });
+            }
+
+            let real_calls: Vec<_> = calls
+                .iter()
+                .filter(|c| c.name != FINISH_TOOL_NAME)
+                .cloned()
+                .collect();
+            if !real_calls.is_empty() {
+                expand_tools_for_help_calls(&self.registry, &real_calls, &mut tools);
+                let results = self
+                    .execute_tool_calls_streaming(&real_calls, &mut steps, sink, confirm, cancel)
+                    .await;
+                messages.push(Message {
+                    role: Role::Tool,
+                    content: None,
+                    tool_calls: Vec::new(),
+                    tool_results: results,
+                });
+                continue;
+            }
+
+            return Ok(match last_assistant_text {
+                Some(text) => RunnerOutcome {
+                    final_text: text,
+                    steps,
+                    stop: StopCause::EndTurn,
+                },
+                None => RunnerOutcome {
+                    final_text: "模型未产出有效回答（空响应重试后仍为空）。".to_string(),
+                    steps,
+                    stop: StopCause::EmptyAfterRetry,
+                },
+            });
+        }
+
+        // max_steps 兜底：最后一条 assistant 文本优先，否则 trace 摘要。
+        let final_text = last_assistant_text.unwrap_or_else(|| {
+            let tools = if steps.is_empty() {
+                "（无）".to_string()
+            } else {
+                steps
+                    .iter()
+                    .map(|s| s.tool_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            format!(
+                "已达到最大步数（{}），未能生成最终总结。已执行 tool：{tools}",
+                self.options.max_steps
+            )
+        });
+        Ok(RunnerOutcome {
+            final_text,
+            steps,
+            stop: StopCause::MaxSteps,
+        })
+    }
+
+    /// 消费一轮 `provider.stream()`。返回 `None` = cancel 命中（调用方走
+    /// Interrupted 收尾）。空响应（text 空 + 无 calls）nudge 重试一次（决策 D）。
+    #[allow(clippy::type_complexity)]
+    async fn stream_turn(
+        &self,
+        messages: &mut Vec<Message>,
+        tools: &[ToolSchema],
+        options: &CompleteOptions,
+        sink: &(dyn Fn(StreamEvent) + Send + Sync),
+        cancel: &AtomicBool,
+        nudged: &mut bool,
+    ) -> Result<Option<(String, Vec<super::types::ToolCall>)>, LlmError> {
+        loop {
+            let mut text = String::new();
+            let mut calls = Vec::new();
+            let mut stream =
+                self.provider
+                    .stream(messages.clone(), tools.to_vec(), options.clone());
+            let mut cancelled = false;
+            while let Some(delta) = stream.next().await {
+                match delta? {
+                    Delta::Text(t) => {
+                        text.push_str(&t);
+                        sink(StreamEvent::TextDelta(t));
+                    }
+                    Delta::ToolCall(c) => calls.push(c),
+                    // MockProvider fixture 回放含 ToolResult delta——runner 自己
+                    // 执行 tool，忽略。
+                    Delta::ToolResult(_) | Delta::EndTurn { .. } => {}
+                }
+                if cancel.load(Ordering::Relaxed) {
+                    cancelled = true;
+                    break;
+                }
+            }
+            drop(stream);
+            if cancelled {
+                return Ok(None);
+            }
+            sink(StreamEvent::TurnFinished);
+
+            if text.trim().is_empty() && calls.is_empty() && !*nudged {
+                messages.push(Message {
+                    role: Role::Assistant,
+                    content: None,
+                    tool_calls: Vec::new(),
+                    tool_results: Vec::new(),
+                });
+                messages.push(Message::new(
+                    Role::User,
+                    "你上一条回复是空的。请基于已获得的信息直接回答用户的问题；\
+                     如果还需要数据，请调用 tool。",
+                ));
+                *nudged = true;
+                continue;
+            }
+            return Ok(Some((text, calls)));
+        }
+    }
+
+    /// 流式路径的 tool 执行（confirm 感知）：写 tool + confirm hook → 确认
+    /// 流程（Approved → confirm:true 真执行 / Denied → blocked JSON）；其余
+    /// 与 complete 路径同款 spawn_blocking。
+    async fn execute_tool_calls_streaming(
+        &self,
+        calls: &[super::types::ToolCall],
+        steps: &mut Vec<StepTrace>,
+        sink: &(dyn Fn(StreamEvent) + Send + Sync),
+        confirm: Option<ConfirmHook<'_>>,
+        cancel: &AtomicBool,
+    ) -> Vec<ToolResult> {
+        let mut results = Vec::with_capacity(calls.len());
+        for call in calls {
+            sink(StreamEvent::ToolStart {
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            });
+            let result = self.execute_one_tool(call, confirm, cancel).await;
+            let trace = StepTrace {
+                tool_name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                is_error: result.is_error,
+                result_chars: result.content.len(),
+            };
+            sink(StreamEvent::ToolFinished {
+                name: call.name.clone(),
+                is_error: trace.is_error,
+                result_chars: trace.result_chars,
+            });
+            steps.push(trace);
+            results.push(result);
+        }
+        results
+    }
+
+    async fn execute_one_tool(
+        &self,
+        call: &super::types::ToolCall,
+        confirm: Option<ConfirmHook<'_>>,
+        cancel: &AtomicBool,
+    ) -> ToolResult {
+        let Some(hook) = confirm.filter(|_| dispatch::is_write_tool(&call.name)) else {
+            return self.spawn_execute(call, &call.arguments, false).await;
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        hook(ConfirmRequest {
+            tool_name: call.name.clone(),
+            arguments: call.arguments.clone(),
+            summary: dispatch::confirm_summary(&call.name, &call.arguments),
+            reply: reply_tx,
+        });
+
+        match await_confirm_decision(reply_rx, cancel).await {
+            Some(ConfirmDecision::Approved) => {
+                // Approved 即用户代传 confirm: true（ADR-0008/0029 契约）。
+                let mut args = if call.arguments.is_object() {
+                    call.arguments.clone()
+                } else {
+                    serde_json::json!({})
+                };
+                if let Some(obj) = args.as_object_mut() {
+                    obj.insert("confirm".to_string(), Value::Bool(true));
+                }
+                self.spawn_execute(call, &args, true).await
+            }
+            // Denied / reply Sender 被 drop（面板退出未答复）→ blocked JSON。
+            Some(ConfirmDecision::Denied) => dispatch::blocked_tool_result(call),
+            // cancel 命中：run 随即 Interrupted 收尾，该占位不会被 LLM 消费。
+            None => crate::agent::types::ToolResult {
+                tool_call_id: call.id.clone(),
+                content: "{\"ok\":false,\"error\":\"已中断\"}".to_string(),
+                is_error: true,
+            },
+        }
+    }
+
+    /// spawn_blocking 执行（决策 J 配套：dispatch 同步层内嵌 block_on 的
+    /// helper 在 async 上下文会 panic）。`confirmed_write=true` 仅在 confirm
+    /// Approved 后由调用方置位——写 tool 真实执行（`execute_confirmed_tool`）；
+    /// 其余一律走既有 `execute_tool`（写 tool 在其中被 blocked 拦截）。
+    async fn spawn_execute(
+        &self,
+        call: &super::types::ToolCall,
+        args: &Value,
+        confirmed_write: bool,
+    ) -> ToolResult {
+        let registry = Arc::clone(&self.registry);
+        let moved = super::types::ToolCall {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: args.clone(),
+        };
+        match tokio::task::spawn_blocking(move || {
+            if confirmed_write {
+                dispatch::execute_confirmed_tool(&moved)
+            } else {
+                execute_tool(&registry, &moved)
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(join_err) => crate::agent::types::ToolResult {
+                tool_call_id: call.id.clone(),
+                content: format!("{{\"ok\":false,\"error\":\"tool 执行线程 panic: {join_err}\"}}"),
+                is_error: true,
+            },
+        }
+    }
+
     async fn execute_tool_calls(
         &self,
         calls: &[super::types::ToolCall],
@@ -359,6 +687,33 @@ fn is_empty_response(resp: &CompleteResponse) -> bool {
     resp.message.tool_calls.is_empty() && resp.message.content.as_deref().is_none_or(str::is_empty)
 }
 
+fn interrupted_outcome(steps: Vec<StepTrace>) -> RunnerOutcome {
+    RunnerOutcome {
+        final_text: "已中断".to_string(),
+        steps,
+        stop: StopCause::Interrupted,
+    }
+}
+
+/// await 用户 y/n 决策。返回 `None` = cancel 命中（整个 run 走 Interrupted
+/// 收尾）；reply Sender 被 drop（面板退出未答复）视同 Denied——两个方向都
+/// 不允许 runner 协程悬挂（风险 2）。
+async fn await_confirm_decision(
+    mut rx: oneshot::Receiver<ConfirmDecision>,
+    cancel: &AtomicBool,
+) -> Option<ConfirmDecision> {
+    loop {
+        tokio::select! {
+            res = &mut rx => return Some(res.unwrap_or(ConfirmDecision::Denied)),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                if cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 /// system prompt 组装（决策 F）：`{{SYSTEM_SNAPSHOT}}` → 运行时轻量快照。
 pub fn build_system_prompt() -> String {
     SYSTEM_PROMPT.replace("{{SYSTEM_SNAPSHOT}}", &snapshot_summary())
@@ -399,6 +754,7 @@ impl StopCause {
             Self::EndTurn => "end_turn",
             Self::MaxSteps => "max_steps",
             Self::EmptyAfterRetry => "empty_after_retry",
+            Self::Interrupted => "interrupted",
         }
     }
 }
