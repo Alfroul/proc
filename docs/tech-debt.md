@@ -709,6 +709,18 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.20 stage 4 决策**：归档 v0.21+（随 TD-55 顺带覆盖）。
 
+### TD-58（REVIEW-v0.21 P2）：`test_alert::test_metric_extract_process_cpu` 并发 flaky（观察项）
+
+**位置**：`tests/test_alert.rs::test_metric_extract_process_cpu`
+
+**现状**：v0.21 stage 1 开工基线验证首跑 1 failed（全量并发场景），重跑 / 单独跑 / anthropic 档均过。根因是真实 `SystemSnapshot` 采集在 CI 并发下偶尔慢（CPU 利用率断言依赖采集窗口），环境时序敏感非回归。v0.21 stage 2 注记 A2 同款根因——该决策已把 A2 测试改用 `proc_help(meta)` 零 IO 查询规避（CI 并发下稳定）。
+
+**影响**：偶发（整个 v0.21 cycle 4 stage 基线验证仅再现 1 次）。失败时重跑即过，不阻断开发；但「首跑红」会消耗排查时间。
+
+**修复方案**（再现时实施）：改零 IO 断言（与 stage 2 A2 决策同款——mock 采集路径或放宽断言窗口），或测试加 retry 语义。
+
+**v0.21 stage 4 决策**：观察项，不修。理由：(1) 单次再现 + 重跑即过，修复优先级低于任何功能项；(2) 修复方案明确（A2 同款），再现时半天内闭环。连续 cycle 再现才升级为必修。
+
 ---
 
 ## 历史回顾

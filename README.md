@@ -273,9 +273,25 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 | `proc mcp serve --transport sse --port 8080`<sup>v0.17.0 · full 实装 v0.19.0</sup> | 启动 MCP server（SSE transport，多 client 并发 / 远程 agent 集成 / Web dashboard 场景；`current_thread` runtime 切到 `multi_thread worker_threads(4)` runtime + axum + tower StreamableHttpService 路由 MCP JSON-RPC over HTTP/SSE；详见 ADR-0027 §6）|
 | `proc mcp serve --transport sse --port 8080 --bind-addr 0.0.0.0`<sup>v0.19.0</sup> | SSE transport 全网卡监听（用户显式 opt-in，默认 `127.0.0.1` 仅本机；含 `proc_docker_rm` / `proc_usb_release` / `proc_record_start` 等写操作的 MCP tool 暴露到 LAN 需用户明确知晓风险）|
 
-### 内置 AI Agent（proc → LLM）<sup>v0.20.0</sup>
+### 内置 AI Agent（proc → LLM）<sup>v0.20.0 · 扩 v0.21.0</sup>
 
-与 MCP server 互补的另一个方向：MCP 是「外部 LLM → proc」（proc 暴露 46 tool 给 Claude Desktop / Cursor），内置 agent 是「**proc → LLM**」（proc 自身是 client，用户在终端用自然语言查询）。同一套 47 tool 的 Rust API 两条路径复用（[ADR-0030](docs/adr/0030-builtin-ai-agent.md)）。
+与 MCP server 互补的另一个方向：MCP 是「外部 LLM → proc」（proc 暴露 46 tool 给 Claude Desktop / Cursor），内置 agent 是「**proc → LLM**」（proc 自身是 client，用户在终端用自然语言查询）。同一套 47 tool 的 Rust API 两条路径复用（[ADR-0030](docs/adr/0030-builtin-ai-agent.md)）。两个入口：**TUI Agent 面板**（v0.21，多轮流式 + y/n 确认，见下）+ **CLI `proc agent ask`**（v0.20，单轮批处理）。
+
+**TUI Agent 面板**<sup>v0.21.0</sup>（[ADR-0031](docs/adr/0031-tui-agent-panel.md)）——第 10 个主面板，交互式对话 agent：streaming 流式逐字输出 + tool 步骤实时显示 + 写操作 y/n 确认 + 多轮追问：
+
+```bash
+proc                                    # 启动 TUI
+# Ctrl+P 命令面板搜「AI Agent」→ 进入 AI Agent 面板
+# 输入 query 回车 → streaming 流式回答（tool 调用步骤行实时出现；Esc 中断）
+# 「杀掉 chrome」→ 底部高亮确认框（影响摘要 + [y] 执行 [n] 拒绝）
+#    → y 真实执行 / n 拒绝并让 agent 解释 + 给等价命令行
+# 连续追问支持多轮上下文（最近 12 轮滑动窗口）；PgUp/PgDn 滚动历史；Ctrl+D 退出面板
+# llama-server 进面板首次 query 才 spawn、退出面板即清理（日常使用零影响）
+```
+
+会话架构（同步 TUI 主循环 × async agent 的桥接）：AgentSession 专用线程 + 自有 tokio Runtime + std mpsc 事件通道，TUI tick 内批量 drain 渲染（流式增量按 tick 边界聚合，不逐 delta 重绘）；退出面板 teardown 有界等待（pending 确认自动拒绝 → 中断 → shutdown → Drop kill llama-server，无孤儿进程）。
+
+**CLI 单轮**（v0.20）：
 
 ```bash
 # 自然语言 query → agent 多步 tool-use 循环 → Markdown 总结
@@ -292,7 +308,7 @@ ANTHROPIC_API_KEY=sk-ant-... proc agent ask --provider anthropic "..."   # 需 c
 
 **小模型可靠循环**（stage 3b 实测结论，`tool_choice=required` + `proc_finish` 控制 tool）：每轮强制必调 tool，要结束循环必须显式调 `proc_finish(answer="...")` 提交最终答案——防止 2B 模型凭空编造数据（few-shot 对话示例实测让 E2B 在 content 里角色扮演「调工具 + 编造结果」，已删改「类别路由表」式 system prompt）或中途过早停止。
 
-**隐私架构**（本地优先）：默认走本地 llama.cpp（Gemma 4 E2B，数据零外发；按需 spawn llama-server 用完即释放，日常使用零影响）；Anthropic 云端是 opt-in feature（`--features anthropic` + `ANTHROPIC_API_KEY` env，不写配置文件）；写操作 8 个破坏性 tool（kill / usb_release / docker_rm 等）在 CLI ask 非交互模式下全部拦截（返 blocked JSON 让 agent 转而解释 + 给等价命令行）；tool result 送 LLM 前过 PII 过滤（KEY / TOKEN / PASSWORD 等 12 关键字 regex mask）。
+**隐私架构**（本地优先）：默认走本地 llama.cpp（Gemma 4 E2B，数据零外发；按需 spawn llama-server 用完即释放，日常使用零影响）；Anthropic 云端是 opt-in feature（`--features anthropic` + `ANTHROPIC_API_KEY` env，不写配置文件）；写操作 8 个破坏性 tool（kill / usb_release / docker_rm 等）双通道——CLI ask 非交互模式全部拦截（返 blocked JSON 让 agent 转而解释 + 给等价命令行），TUI 面板升级为 y/n 确认框（影响摘要强制展示，y 即用户代传 `confirm: true` 真实执行，n 保持拦截语义）；tool result 送 LLM 前过 PII 过滤（KEY / TOKEN / PASSWORD 等 12 关键字 regex mask）。
 
 **配置** `~/.config/proc/agent.toml`（缺失时用代码默认值，与 ui.toml 同款契约）：
 

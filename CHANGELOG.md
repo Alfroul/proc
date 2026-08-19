@@ -5,7 +5,36 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.21.0] - 2026-08-19
+
+### v0.21.0 cycle 完结 — TUI AgentPanel + streaming chat + 写操作 confirm 通道 cycle
+
+v0.21 cycle 是 proc 首个「UI 消费层」单主主题 cycle（~5750 行级改动：src +1951 / tests +2409 / docs +1368），4 stage 节奏（1 Spike + 2 Slice + Review+收尾合并段，vs v0.20 的 5 stage——单主题无跨领域切换）。**agent 交互从 CLI 单轮非流式升级为 TUI 面板多轮流式 + y/n confirm**——Ctrl+P 搜「AI Agent」进面板即流式对话；agent 要执行写操作（杀进程 / 弹 U 盘 / 删容器）时面板弹确认框（影响摘要强制展示），y 真执行 / n 拒绝并解释。v0.20 就绪的 `stream()` 三 provider 首次获得真实 UI 消费方。MCP tool 46 不变 / agent catalog 47 不变（本 cycle 零 tool 变更）+ 1 份新 ADR-0031（D1~D6 + 三段 stage 落地注记）+ Cargo deps +0。详见 [REVIEW-v0.21](docs/reviews/REVIEW-v0.21.md)（P0 0 / P1 0 / P2 1 归档 TD-58 + TD-55~57 仍 open）。
+
+**4 项交付落地范围**：
+
+- **项 1 AgentSession 会话层**（stage 2）：专用 `std::thread` + 自有 tokio Runtime + `std::sync::mpsc` 双通道桥接同步 TUI 主循环（WorkerManager 同款模式，v0.20 风险 6「跨 runtime 集成」的答案）+ 多轮 conversation history 滑动窗口（`MAX_HISTORY_TURNS=12`）+ `SessionHandle` 五方法 + Drop 收尾链（confirm 挂起时任何时序 drop 不挂死）
+- **项 2 `run_streaming` 流式变体**（stage 2）：消费 `provider.stream()` 逐 delta（TextDelta 透传 / ToolCall 聚合），proc_finish / max_steps / 动态扩 tools / 空响应 nudge 与 complete 路径逐分支对齐，cancel 检查点 3 处命中返 `StopCause::Interrupted`；既有 complete 路径零改动（CLI ask 保持非流式）
+- **项 3 写操作 confirm 通道**（stage 2 逻辑层 + stage 3 UI）：dispatch 双模式——confirm hook 存在时写 tool 走 `ConfirmRequest`（影响摘要 + oneshot y/n），Approved 注入 `confirm: true` 真实执行（复用 MCP 写 helper，ADR-0008/0029 契约），Denied / Sender drop 返 blocked JSON；CLI ask 无通道保持既有拦截语义不变
+- **项 4 TUI AgentPanel**（stage 3）：AgentPanelController 三态状态机（Idle / Streaming / AwaitingConfirm）+ `ChatEntry` 对话流 + `apply_event` 纯状态迁移 + 全屏渲染（底部锚定滚动区 / 输入框 / 高亮确认框 / provider·步骤·用时状态行）+ App 生命周期（进面板建 session、退面板 teardown 有界等待防 llama-server 孤儿）+ TextDelta 按 tick 批量 append（D6 节流）
+
+**关键数字**：
+
+| 指标 | v0.20.0 基线 | v0.21.0 落地 |
+|---|---|---|
+| 全量回归 | 1533 passed / 0 failed / 6 ignored（默认）+ 1557（anthropic）| **1607 passed / 0 failed / 8 ignored（默认）+ 1631（anthropic）**（+74 CI 测试，另 +2 个 `#[ignore]` E2B 真实测试）|
+| agent 入口 | CLI `proc agent ask`（单轮非流式）| **+ TUI AgentPanel**（多轮流式 + y/n confirm + Esc 中断；CLI ask 保持不变）|
+| AppMode | 9 变体 | **10 变体**（`Agent`；palette 唯一入口——`A` 键与告警弹窗冲突实测后 fallback）|
+| MCP tool / agent catalog | 46 / 47 + proc_finish | **不变**（纯 UI 消费层 cycle）|
+| E2B 验收 | complete 非流式 L0 23/23 + L1 21/27 | **流式冒烟 2 query 通过**（stream + required + proc_finish 组合首次实测）+ **App 层端到端 65.8s 通过**（L0 流式 + 多轮 + confirm n 路径 + teardown 全链路）|
+| Cargo deps | reqwest + tokio-stream | **+0**（全用既有）|
+| ADR | 0030 | **新 ADR-0031**（D1~D6）|
+
+### v0.21.0 阶段 4 — Review + 收尾（REVIEW-v0.21 + CHANGELOG + README TUI Agent 章节 + tag v0.21.0）
+
+- **Docs**: `docs/reviews/REVIEW-v0.21.md`（新）—— 4 stage 四维度审查 + stage 3 实测观察归档 3 条（全局键拦截层 vs 文本输入面板的踩坑修复 / llama-server 连接级故障自愈 / E2B 写操作发现链边界——模型能力边界非面板缺陷，v0.22 eval 素材）+ TD 候选评估（test_alert flaky 归档 TD-58 观察项）+ cycle 数据汇总 + v0.22+ 候选方向；`docs/tech-debt.md` 加 TD-58
+- **Docs**: `README.md` —— 内置 AI Agent 章节扩 TUI 面板路径（palette 入口 / streaming / y·n confirm / 多轮 / Esc 中断 / Ctrl+D 退出清理）；`docs/stages/v0.21-brainstorm.md` stage 4 ✅ + cycle 总结段
+- **Changed**: `Cargo.toml`（0.20.0 → 0.21.0）+ `git tag v0.21.0`
 
 ### v0.21 stage 3 — TUI AgentPanel 面板实装（Slice B，UI 消费层）
 
