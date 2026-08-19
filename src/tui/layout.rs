@@ -341,7 +341,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             " ↑↓移动  Enter展开/详情  g切换视图  a异常  f过滤  s排序  d诊断  DDNS日志  /搜索  k终止  q退出"
         }
         AppMode::Replay => " Space播放/暂停  ←→快退/快进  +/-速度  q退出回放",
-        AppMode::Agent => " Ctrl+D/Esc 退出（对话/流式/确认交互 v0.21 stage 3 实装）",
+        AppMode::Agent => {
+            " Enter 发送  Esc 中断/退出  y·n 写操作确认  PgUp/PgDn 滚动  Ctrl+D 退出面板"
+        }
         AppMode::Help => " ↑↓/PgUp/PgDn滚动  Esc/q/? 返回  Home/End 顶/底",
         AppMode::ProcessList
             if app.process_panel.panel.process_view_mode

@@ -10,7 +10,9 @@ pub mod process_panel_controller;
 pub mod usb_panel;
 pub mod usb_panel_controller;
 
-pub use agent_panel_controller::{AgentPanel, AgentPanelController, AgentPanelMode};
+pub use agent_panel_controller::{
+    AgentAction, AgentPanel, AgentPanelController, AgentPanelMode, ChatEntry, short_provider_label,
+};
 pub use docker_panel::DockerPanel;
 pub use docker_panel_controller::DockerPanelController;
 pub use monitor_panel::MonitorPanel;

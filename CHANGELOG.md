@@ -7,6 +7,13 @@
 
 ## [Unreleased]
 
+### v0.21 stage 3 — TUI AgentPanel 面板实装（Slice B，UI 消费层）
+
+- **AgentPanelController 状态机**（`src/view_models/agent_panel_controller.rs`）：Idle（输入编辑 + Enter 发送）/ Streaming（Esc 中断，输入锁定）/ AwaitingConfirm（y/n 确认）三态 + 中文输入缓冲（crossterm Char 事件）+ 键位（Enter / Esc / y / n / PgUp / PgDn / Ctrl+D）+ `ChatEntry` 对话流缓冲（User / AssistantStreaming（TextDelta append 目标）/ AssistantFinal（proc_finish answer 落段）/ ToolCall（Start 建回填）/ Confirm / Error / Notice）+ `AgentPanel::apply_event` 纯状态迁移（SessionEvent → 面板状态）+ `resolve_confirm`（reply oneshot 由面板持有，y/n / 退出共用）+ 副作用经 `PanelAction::Agent(AgentAction)` 出带（SendQuery / Interrupt / ExitPanel）
+- **全屏渲染**（`src/tui/agent_panel.rs`）：对话流滚动区（底部锚定 `scroll_from_bottom` 偏移，PgUp 钉住不跟随）+ 输入框（Streaming 态锁定提示）+ 状态行（provider/model 短标签 · 步骤 · 用时 · 模式 · 键位）+ AwaitingConfirm 高亮确认框（summary 强制展示 + `[y] 执行 [n] 拒绝`）；TextDelta 按 tick 批量 append + 既有 pending_redraw（D6 节流）
+- **App 集成**（`src/app.rs`）：`agent_session` 字段生命周期 = 进面板 `build_session`（构造链与 CLI ask 共享 `build_parts`）/ 退面板 teardown（pending confirm 发 Denied → interrupt → shutdown → 有界等 ≤3s → Drop kill llama-server，App::shutdown 同款防孤儿）；`tick` 每帧 drain SessionEvent 分发到面板（会话死亡感知）；handle_key Agent 分支接 controller 完整状态机（stage 1 内联退出键删除）；**Agent 模式豁免全局键**（E2B 实测踩坑修复：数字 1-6 切面板 / R 录屏 / D 清崩溃 / t·c·A·? tab-switch 在面板分发前拦截——含数字的 query 会把面板切走，现 Agent 模式下输入框捕获全部字符，附回归锚测试）
+- **测试**：`tests/test_agent_panel.rs` 24 CI 测试（A 键位 7 / B apply_event 5 / C session 端到端含 confirm 双路径 4 / D TestBackend 渲染 3 / E App 集成 5，ScriptedStreamProvider 零 LLM）+ E2B 端到端 `#[ignore]` **实测通过**（65.8s，App 层全链路真实 llama-server：L0 流式 + proc_ls tool 轮 + 多轮追问 + proc_help 发现 proc_kill → 确认框 n 拒绝 → teardown；另观察到 llama-server 中途连接失败时面板 Error 提示后 provider 惰性重 spawn 自愈）；全量回归 1583 → **1607 passed / 0 failed / 8 ignored（默认档）+ 1631（anthropic 档）**
+
 ### v0.21 stage 2 — AgentSession 会话层 + run_streaming 流式 + confirm 协议层（Slice A）
 
 - **`AgentRunner::run_streaming`**（`src/agent/runner.rs`）：消费 `provider.stream()` 逐 delta 的流式 ReAct 变体——`StreamEvent` 事件面（TextDelta / ToolStart / ToolFinished / TurnFinished）、proc_finish / max_steps / 动态扩 tools / 空响应 nudge 与 complete 路径逐分支对齐、cancel 检查点 3 处（turn 开头 / 每 delta 后 / confirm await）命中返新增 `StopCause::Interrupted`；**既有 complete 路径（`run` / `run_with_progress`）零改动**——CLI ask 保持非流式

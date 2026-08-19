@@ -210,6 +210,9 @@ pub enum PanelAction {
     Kill(KillRequest),
     /// 复制到剪贴板（Inspector y / Docker copy-id 等）。
     Clipboard(String),
+    /// v0.21 stage 3：Agent 面板副作用（发 query / 中断 / 退出面板）——
+    /// App 持 SessionHandle 执行（controller 是纯状态机不持会话）。
+    Agent(crate::view_models::AgentAction),
 }
 
 impl From<KeyResult> for PanelAction {

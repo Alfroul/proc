@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use super::config::AgentConfig;
 use super::model_registry::ModelRegistry;
+use super::provider::LlmProvider;
 use super::runner::{AgentOptions, AgentRunner};
+use super::tool_registry::ToolRegistry;
 
 /// 构造产物的 provider 描述（CLI 打印 / 面板状态行「provider/model」段）。
 #[derive(Debug, Clone)]
@@ -28,6 +30,40 @@ pub fn build_runner(
     model_flag: Option<&str>,
     max_steps: u32,
 ) -> Result<(AgentRunner, ProviderSpec), String> {
+    let (provider, registry, options, spec) = build_parts(provider_flag, model_flag, max_steps)?;
+    Ok((AgentRunner::new(provider, registry, options), spec))
+}
+
+/// v0.21 stage 3：TUI AgentPanel 进面板时建会话（与 CLI ask 共用构造链；
+/// llama-server 仍惰性 spawn 于首次 query——D5 按需 spawn 延续）。
+pub fn build_session(
+    provider_flag: Option<&str>,
+    model_flag: Option<&str>,
+    max_steps: u32,
+) -> Result<(super::session::SessionHandle, ProviderSpec), String> {
+    let (provider, registry, options, spec) = build_parts(provider_flag, model_flag, max_steps)?;
+    Ok((
+        super::session::AgentSession::spawn(provider, registry, options),
+        spec,
+    ))
+}
+
+/// 构造链主体（build_runner / build_session 共享）：resolve provider 三件套
+/// （provider / registry / options）+ 描述。`AgentRunner` 三字段私有且
+/// `ToolRegistry` 非 Clone，共享 parts 是唯一不破坏既有 API 的复用路径。
+fn build_parts(
+    provider_flag: Option<&str>,
+    model_flag: Option<&str>,
+    max_steps: u32,
+) -> Result<
+    (
+        Arc<dyn LlmProvider>,
+        ToolRegistry,
+        AgentOptions,
+        ProviderSpec,
+    ),
+    String,
+> {
     let config = AgentConfig::load();
     let provider_name = provider_flag
         .map(str::to_string)
@@ -66,7 +102,7 @@ pub fn build_runner(
 
     // 显式类型标注：--no-default-features 下所有分支都提前 return Err，
     // match 各臂 divergent 时类型推断缺锚点。
-    let runner: AgentRunner = match provider_name.as_str() {
+    let provider: Arc<dyn LlmProvider> = match provider_name.as_str() {
         "mock" => {
             #[cfg(feature = "mock-provider")]
             {
@@ -76,7 +112,7 @@ pub fn build_runner(
                     .clone()
                     .unwrap_or_else(|| "tests/fixtures/agent".to_string());
                 let provider = super::mock_provider::MockProvider::new(PathBuf::from(dir));
-                AgentRunner::new(Arc::new(provider), registry, options)
+                Arc::new(provider)
             }
             #[cfg(not(feature = "mock-provider"))]
             {
@@ -91,7 +127,7 @@ pub fn build_runner(
                 let server_path = resolve_server_path(&config)?;
                 let model_path = resolve_model_path(&config, model_flag)?;
                 let spec = ProviderSpec {
-                    name: provider_name,
+                    name: provider_name.clone(),
                     detail: format!(
                         "llama-server: {} | model: {}",
                         server_path.display(),
@@ -109,10 +145,7 @@ pub fn build_runner(
                     model_path,
                     spawn_opts,
                 );
-                return Ok((
-                    AgentRunner::new(Arc::new(provider), registry, options),
-                    spec,
-                ));
+                return Ok((Arc::new(provider), registry, options, spec));
             }
             #[cfg(not(feature = "llama-cpp"))]
             {
@@ -141,10 +174,7 @@ pub fn build_runner(
                     name: provider_name.clone(),
                     detail: model,
                 };
-                return Ok((
-                    AgentRunner::new(Arc::new(provider), registry, options),
-                    spec,
-                ));
+                return Ok((Arc::new(provider), registry, options, spec));
             }
             #[cfg(not(feature = "anthropic"))]
             {
@@ -167,7 +197,7 @@ pub fn build_runner(
         name: provider_name,
         detail: "mock fixtures 回放".to_string(),
     };
-    Ok((runner, spec))
+    Ok((provider, registry, options, spec))
 }
 
 /// llama-server 路径解析：agent.toml `[llama-cpp].server_path` > PATH 查找 > 报错。

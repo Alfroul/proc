@@ -18,6 +18,7 @@ pub use crate::app_panel::{AppGroupSortField, AppMode, KillRequest, MonitorAddSu
 // v0.14 stage 4：扩 re-export `ReplayDirection`（与 ReplaySpeed 对称）。
 pub use crate::replay::{ReplayDirection, ReplaySpeed, TimelineState};
 
+use crate::agent::session::{ConfirmDecision, SessionHandle};
 use crate::alert::AlertManager;
 use crate::app_panel::{Panel, PanelAction, PanelContext};
 use crate::classify;
@@ -38,6 +39,7 @@ use crate::replay::{ReplayAction, ReplayController};
 use crate::security::{BackgroundScorer, SecurityScore};
 use crate::tree::TreeNode;
 use crate::tui::command_palette::{CommandAction, CommandPalette, PaletteHandleResult};
+use crate::view_models::AgentAction;
 use crate::view_models::AgentPanelController;
 use crate::view_models::DockerPanel;
 use crate::view_models::DockerPanelController;
@@ -49,6 +51,7 @@ use crate::view_models::ProcessPanel;
 use crate::view_models::ProcessPanelController;
 use crate::view_models::UsbPanel;
 use crate::view_models::UsbPanelController;
+use crate::view_models::short_provider_label;
 
 /// v0.7.0 阶段 3：App 的按键分发层。
 ///
@@ -87,9 +90,12 @@ pub struct App {
     pub usb_panel: UsbPanelController,
     pub monitor_panel: MonitorPanelController,
     pub docker_panel: DockerPanelController,
-    // v0.21：AI Agent 面板（ADR-0031）。stage 1 占位（空骨架 + 退出键）；
-    // stage 2 接 AgentSession，stage 3 接键位状态机 + streaming 渲染。
+    // v0.21：AI Agent 面板（ADR-0031）。stage 3：controller 状态机 + streaming
+    // 渲染消费 agent_session 事件流；session 生命周期 = 进面板建 / 退面板
+    // teardown Drop kill llama-server（D5 按需 spawn 延续）。
     pub agent_panel: AgentPanelController,
+    /// Agent 会话句柄（进入面板时 build_session；None = 构造失败或未进入）。
+    pub agent_session: Option<SessionHandle>,
 
     // v0.6.0 阶段 5：后台采集 worker（port / usb / net_flow / dns_log）统一由
     // `WorkerManager` 持有，详见 `src/workers/manager.rs`。Docker logs worker
@@ -288,6 +294,7 @@ impl App {
             monitor_panel: MonitorPanelController::new(MonitorPanel::new()),
             docker_panel,
             agent_panel: AgentPanelController::new(),
+            agent_session: None,
             workers,
             dns_log_recent: VecDeque::new(),
             flows: Vec::new(),
@@ -700,9 +707,11 @@ impl App {
         // v0.6.0 阶段 3：worker 崩溃 banner — 按 D 清空。
         // v0.7.0 阶段 3：palette 激活时让位 —— 'D' 喂给 palette 输入框（fuzzy 搜
         // "dismiss" 仍可触发 DismissCrashes action）。
+        // v0.21 stage 3：Agent 面板让位 —— 'D' 是输入框字符。
         if key.code == KeyCode::Char('D')
             && !self.active_crashes.is_empty()
             && self.active_layer != AppLayer::Palette
+            && self.mode != AppMode::Agent
         {
             self.dismiss_all_crashes();
             return;
@@ -744,12 +753,15 @@ impl App {
         }
 
         // Global recording toggle
-        if key.code == KeyCode::Char('R') {
+        // v0.21 stage 3：Agent 面板内 'R' 是输入框字符（录屏开关退面板再按）。
+        if key.code == KeyCode::Char('R') && self.mode != AppMode::Agent {
             self.toggle_recording();
             return;
         }
 
         // Global tab switching (only when no search/submenu active)
+        // v0.21 stage 3：Agent 面板豁免 —— 输入框必须能打数字 1-6 / t / c / A / ?
+        // （否则含数字的 query 会把面板切走，E2B 实测踩坑）。
         let any_search = self.process_panel.panel.search.is_active()
             || self.process_panel.panel.tree_search.is_active()
             || self.process_panel.panel.app_group_search.is_active()
@@ -757,6 +769,7 @@ impl App {
             || self.inspector.inspection_search.is_active();
         if !any_search
             && !self.kill_confirm
+            && self.mode != AppMode::Agent
             && self.monitor_panel.panel.add_submenu.is_none()
             && self.try_handle_tab_switch(key)
         {
@@ -856,13 +869,9 @@ impl App {
                     return;
                 }
                 AppMode::Help => PanelAction::Noop,
-                AppMode::Agent => {
-                    // v0.21 stage 1：退出键内联处理（controller.handle_key 是
-                    // todo!()，stage 3 才接线完整状态机）。
-                    let _ = ctx;
-                    self.handle_agent_key(key);
-                    return;
-                }
+                // v0.21 stage 3：controller 键位状态机（Enter 发送 / Esc 中断或
+                // 退出 / y·n confirm / PgUp PgDn 滚动），副作用经 AgentAction 出带。
+                AppMode::Agent => self.agent_panel.handle_key(key, &mut ctx),
             }
         };
 
@@ -881,6 +890,7 @@ impl App {
             PanelAction::Clipboard(s) => {
                 let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(s));
             }
+            PanelAction::Agent(a) => self.dispatch_agent_action(a),
             PanelAction::Noop | PanelAction::ToggleRecording => {}
         }
 
@@ -929,6 +939,14 @@ impl App {
                 self.port_panel.panel.port_entries.clone();
             // v0.6.0 阶段 5：详情页初始化整体封装到 InspectorController::open。
             self.inspector.open(&ports_snapshot);
+        }
+        // v0.21 stage 3：Agent 会话生命周期——进面板建 session（D5 惰性
+        // spawn 延续），出面板 teardown Drop kill llama-server。
+        if mode == AppMode::Agent && self.mode != AppMode::Agent {
+            self.enter_agent_session();
+        }
+        if self.mode == AppMode::Agent && mode != AppMode::Agent {
+            self.teardown_agent_session();
         }
         self.mode = mode;
         self.process_panel.panel.search.clear();
@@ -1021,18 +1039,104 @@ impl App {
         }
     }
 
-    /// v0.21 stage 1：Agent 面板占位键位——仅退出（Ctrl+D / Esc 回 ProcessList）。
-    /// stage 3 接线 [`AgentPanelController::handle_key`] 完整状态机（输入 / 发送 /
-    /// y·n confirm / 滚动；Streaming 态 Esc 优先中断生成而非退出）。
-    fn handle_agent_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.switch_mode(AppMode::ProcessList);
+    /// v0.21 stage 3：AgentAction 副作用执行（controller 是纯状态机，App 持
+    /// SessionHandle）。ExitPanel 的 teardown 由 switch_mode 的「出 Agent」分支做。
+    fn dispatch_agent_action(&mut self, action: AgentAction) {
+        match action {
+            AgentAction::SendQuery(q) => {
+                match self.agent_session.as_ref() {
+                    Some(s) if s.send_query(&q) => {}
+                    Some(_) => {
+                        self.agent_panel.panel_mut().entries.push(
+                            crate::view_models::ChatEntry::Error(
+                                "会话已终结，无法发送（退出面板重进）".to_string(),
+                            ),
+                        );
+                    }
+                    None => {
+                        self.agent_panel.panel_mut().entries.push(
+                            crate::view_models::ChatEntry::Error(
+                                "会话不可用（provider 构造失败，见上方错误）".to_string(),
+                            ),
+                        );
+                    }
+                }
+                self.pending_redraw = true;
             }
-            KeyCode::Esc => {
-                self.switch_mode(AppMode::ProcessList);
+            AgentAction::Interrupt => {
+                if let Some(s) = self.agent_session.as_ref() {
+                    s.interrupt();
+                }
             }
-            _ => {}
+            AgentAction::ExitPanel => self.switch_mode(AppMode::ProcessList),
+        }
+    }
+
+    /// v0.21 stage 3：进入面板建会话（D5：llama-server 仍惰性 spawn 于首次
+    /// query——这里只起 session 线程）。构造失败降级 Error entry 不阻塞进入。
+    fn enter_agent_session(&mut self) {
+        match crate::agent::build_session(None, None, 10) {
+            Ok((handle, spec)) => {
+                self.agent_session = Some(handle);
+                self.agent_panel
+                    .panel_mut()
+                    .reset_for_new_session(short_provider_label(&spec.name, &spec.detail));
+            }
+            Err(e) => {
+                self.agent_session = None;
+                self.agent_panel
+                    .panel_mut()
+                    .reset_for_new_session(String::new());
+                self.agent_panel
+                    .panel_mut()
+                    .entries
+                    .push(crate::view_models::ChatEntry::Error(format!(
+                        "会话构造失败：{e}"
+                    )));
+            }
+        }
+    }
+
+    /// v0.21 stage 3：拆会话——pending confirm 发 Denied（风险 2 收尾语义）→
+    /// interrupt + shutdown + 有界等线程退出（cancel 检查点密集通常 <100ms；
+    /// ≤3s 上限防 UI 卡死）→ Drop kill llama-server。幂等（None 安全）。
+    fn teardown_agent_session(&mut self) {
+        if self.agent_panel.panel.pending_confirm.is_some() {
+            self.agent_panel
+                .panel_mut()
+                .resolve_confirm(ConfirmDecision::Denied);
+        }
+        if let Some(s) = self.agent_session.take() {
+            s.interrupt();
+            s.shutdown();
+            let deadline = Instant::now() + std::time::Duration::from_secs(3);
+            while !s.is_exited() && Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        self.agent_panel.panel_mut().mode = crate::view_models::AgentPanelMode::Idle;
+        self.pending_redraw = true;
+    }
+
+    /// v0.21 stage 3：Agent 面板每帧 drain（不进 REFRESH_INTERVAL 门——流式
+    /// 响应性）。D6 节流：本 tick 全部事件批量 apply 后单次 pending_redraw。
+    fn tick_agent(&mut self) {
+        let Some(session) = self.agent_session.as_ref() else {
+            return;
+        };
+        let mut changed = false;
+        while let Some(ev) = session.drain_event() {
+            changed |= self.agent_panel.panel_mut().apply_event(ev);
+        }
+        // 会话死亡感知（stage 2 注记 4）：事件排空后线程已退出但状态仍挂着。
+        if session.is_exited()
+            && self.agent_panel.panel.mode != crate::view_models::AgentPanelMode::Idle
+        {
+            self.agent_panel.panel_mut().mark_session_dead();
+            changed = true;
+        }
+        if changed {
+            self.pending_redraw = true;
         }
     }
 
@@ -1529,6 +1633,11 @@ impl App {
 
         // v0.6.0 阶段 3：drain worker crash → banner。每帧都跑，第一时间反馈。
         self.poll_crashes();
+
+        // v0.21 stage 3：Agent 面板每帧 drain SessionEvent（流式响应性，D6）。
+        if self.mode == AppMode::Agent {
+            self.tick_agent();
+        }
 
         // Replay mode
         if self.mode == AppMode::Replay {
@@ -2186,6 +2295,9 @@ impl App {
     }
 
     pub fn shutdown(&mut self) {
+        // v0.21 stage 3：Agent 会话有界收尾（mid-run 退出防 llama-server 孤儿——
+        // session 线程被进程退出强杀时 LlamaServerHandle::Drop 不会执行）。
+        self.teardown_agent_session();
         for handle in &self.monitor_panel.panel.watchdog_handles {
             handle.stop();
         }

@@ -39,6 +39,14 @@ proc 的主入口是 TUI（`AppMode` 10 变体 + `PanelController` 模式成熟�
 4. **session 线程可观测性**：`SessionHandle::is_exited`（线程退出标志）+ events 通道随线程终结断开（drain 返 None）——stage 3 面板可感知会话死亡；confirm 挂起时 drop 的收尾链（cancel → Interrupted → Sender 断开 → 线程退出）由 D 组集成测试带超时断言覆盖。
 5. **`StopCause::Interrupted` 新变体**：`SessionFinished{stop}` 复用（Interrupted 不入 history，已完成轮保留）；`label()` 返 `"interrupted"`。
 
+## stage 3 落地注记（Slice B 面板实装，2026-08-19）
+
+1. **副作用通道走 `PanelAction::Agent(AgentAction)`**：controller 保持 ADR-0012 的 `(key, ctx) -> PanelAction` 签名（与既有 5 个 controller 一致），Agent 专有副作用收进单一变体（SendQuery / Interrupt / ExitPanel）——App 持 `SessionHandle` 执行，controller 是纯状态机（confirm 的 reply send 例外：oneshot 通道由面板 `pending_confirm` 持有，y/n 在 `resolve_confirm` 内直接回传不经 App）。
+2. **`build_session` 共享构造链**：`AgentRunner` 三字段私有且 `ToolRegistry` 非 Clone，`AgentSession::spawn` 需要 provider/registry/options 三件套——抽 `build_parts` 内部函数让 `build_runner`（CLI ask，签名行为不变）与 `build_session`（TUI 进面板）共享。
+3. **会话生命周期防 llama-server 孤儿**：退出面板 / App shutdown 时 teardown = pending confirm 发 Denied → interrupt → shutdown → 轮询 `is_exited` ≤3s → Drop（cancel 检查点密集通常 <100ms）——进程退出强杀线程时 `LlamaServerHandle::Drop` 不会执行，有界等待是唯一防线。
+4. **`AgentPanel::apply_event` 是纯状态迁移**：SessionEvent → `ChatEntry` 对话流缓冲（TextDelta 末段 append / tool 后新段；proc_finish answer 不经 TextDelta，SessionFinished 时落 AssistantFinal；Interrupted 落 Notice 不落占位文本）——测试可脱离 App 直接驱动。
+5. **E2B 端到端自动化**（`test_f_e2b_app_e2e_smoke` `#[ignore]`，实测通过 65.8s）：App 层全链路（type → Enter → `app.tick()` drain 循环）真实 llama-server 验证 streaming + 多轮 + confirm n 路径 + teardown；y 真执行路径与视觉手感留人工验收。**实测踩坑 1 修复**：Agent 模式必须豁免全局键（数字 1-6 tab-switch / R 录屏 / D 清崩溃）——否则含数字的 query 在面板分发前被切走面板；**实测观察 2 条**：llama-server 中途连接失败时面板 Error 提示后 provider 惰性重 spawn 自愈；E2B 对写操作若不经 proc_help 发现链（entry 工具集不含写 tool）倾向文字解释——确认框的触发依赖两层架构发现路径，属模型能力边界非面板缺陷。
+
 ## Consequences
 
 - AppMode 10 变体（ProcessList / PortMap / UsbAssistant / MonitorPanel / DockerPanel / ProcessDetail / ContainerExec / Replay / Help / Agent）；App 加 `agent_panel: AgentPanelController` 字段。

@@ -168,13 +168,17 @@ const SECTIONS: &[HelpSection] = &[
         ],
     },
     HelpSection {
-        title: "AI Agent 面板（v0.21 开发中）",
+        title: "AI Agent 面板",
         rows: &[
             (
                 "Ctrl+P",
                 "命令面板搜「AI Agent」进入（A 键已被告警弹窗占用）",
             ),
-            ("Ctrl+D / Esc", "退出面板回进程列表"),
+            ("Enter", "发送 query（多轮流式对话）"),
+            ("Esc", "生成中中断 / 空闲退出 / 确认框拒绝"),
+            ("y / n", "写操作确认框：执行 / 拒绝"),
+            ("PgUp / PgDn", "对话流滚动"),
+            ("Ctrl+D", "退出面板（会话与 llama-server 随之清理）"),
         ],
     },
 ];
