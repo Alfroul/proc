@@ -943,3 +943,37 @@ async fn test_agent_stage3b_record_real_fixtures() {
     // Delta serde 通道 sanity（fixture 行是 Delta 序列化格式）。
     let _ = Delta::Text("x".into());
 }
+
+// ===========================================================================
+// v0.22 stage 1 锚测试：QUERY_TABLE（冻结锚）与 queries.toml L0/L1 逐字一致
+// ===========================================================================
+
+/// 冻结锚不漂（brainstorm 风险 5 mitigate 1）：QUERY_TABLE 是 v0.20 验收的冻结
+/// 证据（永不演进），`src/agent/eval/queries.toml` 是 eval 演进数据源——本测试
+/// 锁 50 条 scenario/level/query/expected 逐字相等，改一处漏一处即红。
+#[test]
+fn test_query_table_matches_eval_toml() {
+    let specs = proc::agent::eval::load_eval_queries().expect("queries.toml 加载 + 校验");
+    let l0l1: Vec<&proc::agent::eval::QuerySpec> = specs.iter().filter(|q| q.level < 2).collect();
+    assert_eq!(
+        l0l1.len(),
+        QUERY_TABLE.len(),
+        "L0/L1 应与 QUERY_TABLE 同为 {} 条",
+        QUERY_TABLE.len()
+    );
+    for (i, ((scenario, level, query, expected), spec)) in
+        QUERY_TABLE.iter().zip(l0l1.iter()).enumerate()
+    {
+        assert_eq!(spec.scenario, *scenario, "第 {i} 条 scenario 不一致");
+        assert_eq!(spec.level, *level, "第 {i} 条 level 不一致");
+        assert_eq!(
+            spec.text, *query,
+            "第 {i} 条 query 文本不一致（冻结锚漂移）"
+        );
+        assert_eq!(
+            spec.expected_tools,
+            &[*expected],
+            "第 {i} 条 expected tool 不一致"
+        );
+    }
+}

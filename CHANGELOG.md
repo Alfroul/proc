@@ -5,6 +5,17 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### v0.22 stage 1 — eval harness 骨架铺设（Spike，ADR-0032）
+
+- **ADR-0032**（新）：`proc agent eval` 评测 harness + session observability——D1 eval runner = CLI 子命令（report-only 不 gate，L0/L1 硬线保留在既有 `#[ignore]` 验收测试）/ D2 70 query 数据文件编译进 binary（include_str! 与 GBNF 同款）/ D3 判定与失败分类确定性（保序子序列 + text_ok 含退化检测，不上 LLM-as-judge）/ D4 L2 双口径不设硬线（full-chain + chain-step）/ D5 observability 在 session 层旁路（SessionEvent 形状零改动）+ **markdown 报告样式草案附录**（条形图 + 失败模式直方图 + compare 对比表，stage 2 实施以此为准不重新设计）
+- **`src/agent/eval/queries.toml`**（新）：70 query 基准表——L0 23 + L1 27 逐字迁移 v0.20 stage 3b `QUERY_TABLE`（锚测试锁一致，冻结锚不漂）+ L2 20 迁移 fixtures seed query + expected tool 链 authoring（每条 2-3 个有序 tool，保序子序列口径，逐条对照 seed 工具链意图）
+- **`src/agent/eval/mod.rs`**（新）：`QuerySpec` / `FailureMode`（Pass + 7 失败变体，含 2026-08-20 实测新增 **OutputDegraded 优先归类**）/ `QueryResult` / `EvalReport` / `LevelSummary` 类型锁定（serde schema 即结果 JSON contract）+ `load_eval_queries()` 加载校验（分布 23-27-20 / 去重 / scenario 域 / L2 链长 / catalog 47 名单）+ 判定纯函数三件：`classify_failure`（8 变体确定性判定）/ `tools_subsequence_hit`（保序子序列双指针）/ `is_degraded_output`（特殊 token 字面量名单 + 连续重复阈值——E2B 输出退化实测的 eval 侧防线）；runner 执行循环留 stage 2
+- **CLI**：`AgentSub` 2 → 4 变体——`Eval`（level / scenario / quick / attempts / max_steps / output / compare flags）+ `SessionInfo`（path）；dispatch 两分支友好拦截（打印「stage 2/3 实装」正常退出，非 panic）
+- **测试**：`tests/test_agent_v0_22_stage_1.rs` 22 个（加载校验 6 / serde roundtrip 3 / classify 8 变体 / 退化口径 2 / 子序列 / CLI stub 2）+ `test_agent_v0_20_stage_3b.rs` 追加 QUERY_TABLE 冻结锚测试；全量回归 1607 → **1636 passed / 0 failed / 8 ignored（默认档）+ 1660 / 0 / 9（anthropic 档）**（+29：22 集成 + 1 锚 + 6 单元）
+- 零新 deps（serde / serde_json / toml 全既有）；MCP tool 46 / agent catalog 47 不变（零 tool 变更干净基线）
+
 ## [0.21.0] - 2026-08-19
 
 ### v0.21.0 cycle 完结 — TUI AgentPanel + streaming chat + 写操作 confirm 通道 cycle

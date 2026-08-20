@@ -297,6 +297,8 @@ pub enum Command {
 ///
 /// - `models`：列出检测到的本地 GGUF 模型（stage 2 实装）
 /// - `ask`：单轮 query，agent 多步 tool-use loop（stage 3b 实装）
+/// - `eval`：评测 harness，70 query 基准实跑 + 报告（v0.22 stage 2 实装）
+/// - `session-info`：session log 指标提取（v0.22 stage 3 实装）
 #[derive(Subcommand, Debug)]
 pub enum AgentSub {
     /// 列出检测到的本地 LLM 模型（GGUF scanner，默认扫描 llama.cpp / Ollama /
@@ -323,6 +325,43 @@ pub enum AgentSub {
         /// agent loop 最大步数
         #[arg(long, default_value_t = 10)]
         max_steps: u32,
+    },
+
+    /// v0.22：评测 harness（ADR-0032）——70 query 基准实跑 + 结果 JSON/md 报告。
+    Eval {
+        /// 只跑指定 level（逗号分隔，如 0,2；默认全部）
+        #[arg(long)]
+        level: Option<String>,
+
+        /// 只跑指定 scenario（可重复；默认全部）
+        #[arg(long)]
+        scenario: Vec<String>,
+
+        /// QUICK 模式：每 (scenario, level) 抽 1 条 ≈ 27 query
+        #[arg(long)]
+        quick: bool,
+
+        /// 每 query 最大尝试次数（默认 2）
+        #[arg(long, default_value_t = 2)]
+        attempts: u8,
+
+        /// agent loop 最大步数（默认 10）
+        #[arg(long, default_value_t = 10)]
+        max_steps: u8,
+
+        /// 结果 JSON 输出路径（默认 eval-<provider>-<timestamp>.json）
+        #[arg(long)]
+        output: Option<String>,
+
+        /// 对比模式：并列多个结果 JSON 产出对比报告（不实跑）
+        #[arg(long, num_args = 2..)]
+        compare: Vec<String>,
+    },
+
+    /// v0.22：session log 指标提取（ADR-0032 D5）——TTFT / 生成时长 / confirm 行为。
+    SessionInfo {
+        /// session JSONL 文件路径
+        path: String,
     },
 }
 

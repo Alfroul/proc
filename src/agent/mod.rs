@@ -19,6 +19,7 @@
 
 pub mod builder;
 pub mod config;
+pub mod eval;
 pub mod gguf_scan;
 pub mod grammars;
 #[cfg(feature = "llama-cpp")]
@@ -44,6 +45,7 @@ pub mod anthropic_provider;
 
 pub use builder::{ProviderSpec, build_runner, build_session};
 pub use config::AgentConfig;
+pub use eval::{EvalReport, FailureMode, QueryResult, QuerySpec, load_eval_queries};
 pub use provider::{
     CompleteOptions, CompleteResponse, Delta, LlmError, LlmProvider, ProviderStream, StopReason,
     Usage,

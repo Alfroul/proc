@@ -1,0 +1,446 @@
+# proc agent eval 的 70 query 基准表（ADR-0032 D2，include_str! 编译进 binary）。
+# L0 23 + L1 27 逐字迁移自 v0.20 stage 3b QUERY_TABLE（锚测试锁一致，冻结锚不漂）；
+# L2 20 迁移自 tests/fixtures/agent/*-l2.jsonl 的 query 原文 + expected tool 链 authoring。
+#
+# L2 链口径（brainstorm 风险 3 mitigate）：链是「关键路径」非「唯一路径」——判定用
+# 保序子序列（允许中间插其他 tool，不要求相邻）；每条 2-3 个 tool；发现链类 query
+# 以 proc_help 开头，诊断类以具体 tool 开头；逐条对照 seed fixture 的 tool call 意图，
+# 不自创 query 语义里不存在的 tool。
+
+# ── 场景 1：performance-diagnose（L0 3 + L1 5 + L2 2）────────────────────────
+
+[[query]]
+scenario = "performance-diagnose"
+level = 0
+text = "列出 CPU 占用最高的 10 个进程"
+expected_tools = ["proc_ls"]
+
+[[query]]
+scenario = "performance-diagnose"
+level = 0
+text = "当前系统 CPU 和内存使用率是多少"
+expected_tools = ["proc_metrics_system"]
+
+[[query]]
+scenario = "performance-diagnose"
+level = 0
+text = "内存使用最多的 5 个进程"
+expected_tools = ["proc_ls"]
+
+[[query]]
+scenario = "performance-diagnose"
+level = 1
+text = "我电脑为什么这么卡？"
+expected_tools = ["proc_metrics_system"]
+
+[[query]]
+scenario = "performance-diagnose"
+level = 1
+text = "CPU 使用率为什么这么高？"
+expected_tools = ["proc_metrics_system"]
+
+[[query]]
+scenario = "performance-diagnose"
+level = 1
+text = "内存快满了，哪些进程占用最多？"
+expected_tools = ["proc_metrics_system"]
+
+[[query]]
+scenario = "performance-diagnose"
+level = 1
+text = "磁盘 I/O 异常活跃，是什么进程造成的？"
+expected_tools = ["proc_metrics_disk_io"]
+
+[[query]]
+scenario = "performance-diagnose"
+level = 1
+text = "GPU 温度为什么这么高？"
+expected_tools = ["proc_metrics_gpu"]
+
+[[query]]
+scenario = "performance-diagnose"
+level = 2
+text = "从最近 30s 历史看 CPU 是什么时候飙起来的？"
+expected_tools = ["proc_metrics_history", "proc_ls"]
+
+[[query]]
+scenario = "performance-diagnose"
+level = 2
+text = "检查所有 critical 告警并给出处理建议"
+expected_tools = ["proc_monitor_list", "proc_metrics_system"]
+
+# ── 场景 2：process-diagnose（L0 3 + L1 4 + L2 3）────────────────────────────
+
+[[query]]
+scenario = "process-diagnose"
+level = 0
+text = "PID 1234 是什么进程？"
+expected_tools = ["proc_inspect"]
+
+[[query]]
+scenario = "process-diagnose"
+level = 0
+text = "chrome.exe 的完整进程信息"
+expected_tools = ["proc_ls"]
+
+[[query]]
+scenario = "process-diagnose"
+level = 0
+text = "显示 explorer.exe 的环境变量"
+expected_tools = ["proc_inspect"]
+
+[[query]]
+scenario = "process-diagnose"
+level = 1
+text = "chrome.exe 为什么占用这么多内存？"
+expected_tools = ["proc_inspect"]
+
+[[query]]
+scenario = "process-diagnose"
+level = 1
+text = "PID 5678 加载了哪些 DLL？"
+expected_tools = ["proc_inspect"]
+
+[[query]]
+scenario = "process-diagnose"
+level = 1
+text = "哪些进程在监听 8080 端口？"
+expected_tools = ["proc_port"]
+
+[[query]]
+scenario = "process-diagnose"
+level = 1
+text = "PID 1234 打开了哪些文件句柄？"
+expected_tools = ["proc_inspect"]
+
+[[query]]
+scenario = "process-diagnose"
+level = 2
+text = "分析 PID 1234 的网络连接和最近 DNS 查询"
+expected_tools = ["proc_inspect", "proc_flows", "proc_dns"]
+
+[[query]]
+scenario = "process-diagnose"
+level = 2
+text = "找出所有 Office 进程，检查父子链是否正常"
+expected_tools = ["proc_ls", "proc_tree"]
+
+[[query]]
+scenario = "process-diagnose"
+level = 2
+text = "列出所有签名验证失败的进程并解释原因"
+expected_tools = ["proc_ls", "proc_inspect"]
+
+# ── 场景 3：docker（L0 3 + L1 3 + L2 4）─────────────────────────────────────
+
+[[query]]
+scenario = "docker"
+level = 0
+text = "列出所有 Docker 容器"
+expected_tools = ["proc_docker_ps"]
+
+[[query]]
+scenario = "docker"
+level = 0
+text = "nginx 容器的健康状态"
+expected_tools = ["proc_docker_inspect"]
+
+[[query]]
+scenario = "docker"
+level = 0
+text = "本地有哪些 Docker 镜像？"
+expected_tools = ["proc_docker_images"]
+
+[[query]]
+scenario = "docker"
+level = 1
+text = "postgres 容器为什么 unhealthy？"
+expected_tools = ["proc_docker_inspect"]
+
+[[query]]
+scenario = "docker"
+level = 1
+text = "redis 容器最近的日志有什么异常？"
+expected_tools = ["proc_docker_logs"]
+
+[[query]]
+scenario = "docker"
+level = 1
+text = "哪些 Docker 镜像没在用可以删？"
+expected_tools = ["proc_docker_images"]
+
+[[query]]
+scenario = "docker"
+level = 2
+text = "web-app 容器为什么一直 restart？"
+expected_tools = ["proc_docker_inspect", "proc_docker_logs"]
+
+[[query]]
+scenario = "docker"
+level = 2
+text = "postgres 容器内正在跑什么查询？"
+expected_tools = ["proc_docker_top", "proc_docker_logs"]
+
+[[query]]
+scenario = "docker"
+level = 2
+text = "哪些 Docker 卷没被任何容器使用？"
+expected_tools = ["proc_docker_volumes", "proc_docker_ps"]
+
+[[query]]
+scenario = "docker"
+level = 2
+text = "Docker 最近 5 分钟事件流有什么异常？"
+expected_tools = ["proc_docker_events", "proc_docker_inspect"]
+
+# ── 场景 4：usb（L0 3 + L1 3 + L2 4）────────────────────────────────────────
+
+[[query]]
+scenario = "usb"
+level = 0
+text = "E 盘当前的占用情况"
+expected_tools = ["proc_eject_status"]
+
+[[query]]
+scenario = "usb"
+level = 0
+text = "E 盘能不能安全弹出？"
+expected_tools = ["proc_eject_status"]
+
+[[query]]
+scenario = "usb"
+level = 0
+text = "谁在占用 F 盘？"
+expected_tools = ["proc_eject_status"]
+
+[[query]]
+scenario = "usb"
+level = 1
+text = "E 盘为什么不能弹出？列出占用进程"
+expected_tools = ["proc_eject_status"]
+
+[[query]]
+scenario = "usb"
+level = 1
+text = "杀掉占用 E 盘的进程后能弹了吗？"
+expected_tools = ["proc_eject_status"]
+
+[[query]]
+scenario = "usb"
+level = 1
+text = "帮我安全释放 E 盘"
+expected_tools = ["proc_usb_release"]
+
+[[query]]
+scenario = "usb"
+level = 2
+text = "USB 设备状态异常，分步诊断"
+expected_tools = ["proc_eject_status", "proc_inspect"]
+
+[[query]]
+scenario = "usb"
+level = 2
+text = "多个 USB 设备同时被占用，规划释放顺序"
+expected_tools = ["proc_eject_status", "proc_help"]
+
+[[query]]
+scenario = "usb"
+level = 2
+text = "eject_status → kill → eject_status 反馈循环演示"
+expected_tools = ["proc_eject_status", "proc_kill", "proc_eject_status"]
+
+[[query]]
+scenario = "usb"
+level = 2
+text = "检测所有 USB 设备并生成健康报告"
+expected_tools = ["proc_eject_status", "proc_smart"]
+
+# ── 场景 5：security（L0 3 + L1 3 + L2 4）───────────────────────────────────
+
+[[query]]
+scenario = "security"
+level = 0
+text = "列出安全分低于 50 的进程"
+expected_tools = ["proc_ls"]
+
+[[query]]
+scenario = "security"
+level = 0
+text = "chrome.exe 的签名状态"
+expected_tools = ["proc_inspect"]
+
+[[query]]
+scenario = "security"
+level = 0
+text = "哪些进程未签名？"
+expected_tools = ["proc_ls"]
+
+[[query]]
+scenario = "security"
+level = 1
+text = "PID 1234 为什么安全分这么低？"
+expected_tools = ["proc_inspect"]
+
+[[query]]
+scenario = "security"
+level = 1
+text = "哪些进程的父子链可疑？"
+expected_tools = ["proc_ls"]
+
+[[query]]
+scenario = "security"
+level = 1
+text = "临时目录下运行的进程有哪些？"
+expected_tools = ["proc_ls"]
+
+[[query]]
+scenario = "security"
+level = 2
+text = "检查所有从 %TEMP% 启动的未签名进程"
+expected_tools = ["proc_ls", "proc_inspect"]
+
+[[query]]
+scenario = "security"
+level = 2
+text = "分析某可疑进程的完整画像"
+expected_tools = ["proc_inspect", "proc_tree", "proc_flows"]
+
+[[query]]
+scenario = "security"
+level = 2
+text = "Word 启动了 cmd，是不是 macro 攻击？"
+expected_tools = ["proc_tree", "proc_inspect"]
+
+[[query]]
+scenario = "security"
+level = 2
+text = "全系统安全审计，找出 top 10 最高风险进程"
+expected_tools = ["proc_ls", "proc_inspect"]
+
+# ── 场景 6：recording（L0 2 + L1 2 + L2 1）──────────────────────────────────
+
+[[query]]
+scenario = "recording"
+level = 0
+text = "录屏文件 recording.prec 的元数据"
+expected_tools = ["proc_replay_info"]
+
+[[query]]
+scenario = "recording"
+level = 0
+text = "录屏里有多少个异常事件？"
+expected_tools = ["proc_replay_info"]
+
+[[query]]
+scenario = "recording"
+level = 1
+text = "在录屏里搜 CPU > 80% 的时刻"
+expected_tools = ["proc_replay_search"]
+
+[[query]]
+scenario = "recording"
+level = 1
+text = "书签 #3 那个时刻系统发生了什么？"
+expected_tools = ["proc_bookmarks_list"]
+
+[[query]]
+scenario = "recording"
+level = 2
+text = "回放录屏，找出 chrome 卡顿的瞬间并解释"
+expected_tools = ["proc_replay_info", "proc_replay_search"]
+
+# ── 场景 7：flow（L0 2 + L1 2 + L2 1）───────────────────────────────────────
+
+[[query]]
+scenario = "flow"
+level = 0
+text = "当前所有 TLS 连接的 SNI 列表"
+expected_tools = ["proc_flows"]
+
+[[query]]
+scenario = "flow"
+level = 0
+text = "哪些进程在连接非标准端口？"
+expected_tools = ["proc_flows"]
+
+[[query]]
+scenario = "flow"
+level = 1
+text = "TCP 重传率为什么这么高？"
+expected_tools = ["proc_port"]
+
+[[query]]
+scenario = "flow"
+level = 1
+text = "chrome 在和哪些远程服务器通信？"
+expected_tools = ["proc_flows"]
+
+[[query]]
+scenario = "flow"
+level = 2
+text = "找出端口扫描特征的进程"
+expected_tools = ["proc_flows", "proc_inspect"]
+
+# ── 场景 8：monitor（L0 2 + L1 3；L2 seed 为空文件保结构，无条目）──────────
+
+[[query]]
+scenario = "monitor"
+level = 0
+text = "当前有哪些 active 告警？"
+expected_tools = ["proc_monitor_list"]
+
+[[query]]
+scenario = "monitor"
+level = 0
+text = "列出当前所有监控配置"
+expected_tools = ["proc_monitor_list"]
+
+[[query]]
+scenario = "monitor"
+level = 1
+text = "添加监控：CPU > 90% 持续 3 分钟告警"
+expected_tools = ["proc_monitor_add"]
+
+[[query]]
+scenario = "monitor"
+level = 1
+text = "监控 cargo dev 进程，挂了自动重启"
+expected_tools = ["proc_monitor_add"]
+
+[[query]]
+scenario = "monitor"
+level = 1
+text = "删除 ID 为 2 的监控配置"
+expected_tools = ["proc_monitor_remove"]
+
+# ── 场景 9：dns（L0 2 + L1 2 + L2 1）────────────────────────────────────────
+
+[[query]]
+scenario = "dns"
+level = 0
+text = "最近 10 分钟访问过哪些域名？"
+expected_tools = ["proc_dns"]
+
+[[query]]
+scenario = "dns"
+level = 0
+text = "chrome 最近查询了哪些 DNS？"
+expected_tools = ["proc_dns"]
+
+[[query]]
+scenario = "dns"
+level = 1
+text = "哪些进程在访问广告 / 追踪域名？"
+expected_tools = ["proc_dns"]
+
+[[query]]
+scenario = "dns"
+level = 1
+text = "DNS 查询频率有异常吗？"
+expected_tools = ["proc_dns"]
+
+[[query]]
+scenario = "dns"
+level = 2
+text = "找出查询过 DGA 风格可疑域名的进程"
+expected_tools = ["proc_dns", "proc_inspect"]

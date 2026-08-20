@@ -25,6 +25,7 @@
 | [0029](./0029-record-exposure-and-confirm-mechanism.md) | record 暴露 + 写操作 confirm 机制 | Accepted | v0.17.0 阶段 1 |
 | [0030](./0030-builtin-ai-agent.md) | 内置 AI agent + Tool registry 两层架构 | Accepted | v0.20.0 阶段 1 |
 | [0031](./0031-tui-agent-panel.md) | TUI AgentPanel + AgentSession 流式会话架构 | Accepted | v0.21.0 阶段 1 |
+| [0032](./0032-eval-harness.md) | `proc agent eval` 评测 harness + session observability | Accepted | v0.22.0 阶段 1 |
 
 ## ADR 模板
 
