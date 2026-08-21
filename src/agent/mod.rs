@@ -45,7 +45,10 @@ pub mod anthropic_provider;
 
 pub use builder::{ProviderSpec, build_runner, build_session};
 pub use config::AgentConfig;
-pub use eval::{EvalReport, FailureMode, QueryResult, QuerySpec, load_eval_queries};
+pub use eval::{
+    EvalReport, EvalRunFile, EvalRunMeta, FailureMode, LevelSummary, QueryResult, QuerySpec,
+    build_report, load_eval_queries, parse_levels, run_eval, select_queries,
+};
 pub use provider::{
     CompleteOptions, CompleteResponse, Delta, LlmError, LlmProvider, ProviderStream, StopReason,
     Usage,

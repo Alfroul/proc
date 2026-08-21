@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+### v0.22 stage 2 — `proc agent eval` runner 实装（Slice A，ADR-0032）
+
+- **`src/agent/eval/runner.rs`**（新）：`run_eval` 执行循环——逐 query 走 complete 路径（`runner.run()`，与 stage_3b 验收同款）+ attempts 重试（Pass 即停 / 失败与 LlmError 重试，记录末次 attempt 状态）+ per-query 计时 + **单 query LlmError 用尽 attempts 不中断后续** + `progress` 回调（CLI 侧 PASS/FAIL 进度行 + **结果 JSON 每 query 全量重写实时落盘**——中途崩已跑数据不丢）；`parse_levels` / `select_queries`（level/scenario 过滤 + QUICK 每 (scenario,level) 抽 1 条 = 26 query，monitor 无 L2 seed）+ `build_report` 聚合（L2 full-chain + chain-step 双口径的单一实现，compare 与单 run 报告共用）+ `EvalRunMeta` / `EvalRunFile` 结果 JSON 顶层（timestamp/provider/attempts/max_steps/git describe + results + report）+ UTC 时间戳与 `git_describe` helper（不引 chrono，record.rs 同款 civil 算法）
+- **`src/agent/eval/report.rs`**（新）：markdown 报告**按 ADR-0032 附录样式草案实施不重新设计**——单 run 报告（meta 头 + 通过率 per-level 表含 10 格条形图 + L2 双口径行 + 失败模式直方图 20 格刻度 + 失败 query 明细表）+ `render_compare_markdown` 对比报告（run × 指标并列表 + 失败模式迁移 a/b/Δ 表，≥3 run 取首末）
+- **CLI**：`AgentSub::Eval` + `--provider` / `--model` flags（ask 变体同款接 builder 构造链）；`run_agent_eval` 实装——compare 模式（读 N 份结果 JSON 打印对比报告，不实跑）+ 实跑模式（QUICK/FULL 头行 + stage_3b 同款 PASS/FAIL 进度行扩展 attempt/耗时 + 收尾写 JSON + md 双产物，默认文件名 `eval-<provider>-<yyyyMMdd-HHmmss>.json/.md`）
+- **`FailureMode::label()`**：snake_case 短标签（与 serde 命名一致，直方图 / 进度行 / 报告共用）
+- **`classify_failure` 优先级实测修正**：LlmError → **MaxSteps** → OutputDegraded → …（原 OutputDegraded 最优先）——max_steps 的兜底文案是 runner 合成的重复 tool 名列表（模型循环调同一 tool 至上限时 `proc_ls, proc_ls, …`×10 天然触发重复退化检测，mock CLI 冒烟实测 3/3 误判）；OutputDegraded 只归类**模型产出**的退化文本（EndTurn 路径「tool 命中但文本退化仍记失败」不变），stage-1 既有测试零破坏 + stage-2 正反测试锁定
+- **测试**：`tests/test_agent_v0_22_stage_2.rs` 24 个（ScriptedProvider 驱动分类 8 变体全覆盖 + retry_then_pass / 末次 attempt 记录 / LlmError 不中断 / progress 序列 + max_steps 合成文案正反锁定 + parse_levels / select_queries 边界 + build_report 双口径数字断言 + render 单/对比报告 + EvalRunFile roundtrip + LevelSummary 字段锁定 + MockProvider seed 全管线 L0 子集）；`tests/test_agent_v0_22_stage_1.rs` CLI stub 测试改走 compare 模式 dispatch（Eval 加 provider/model 字段 + 无参 eval 现在会真跑）；全量回归 1636 → **1660 passed / 0 failed / 8 ignored（默认档）**（+24）；E2B 冒烟 performance-diagnose L0 **3/3 PASS（28s）**
+- 零新 deps；MCP tool 46 / agent catalog 47 不变；`run` / `run_streaming` / dispatch 零改动（complete 路径纯消费）
+
 ### v0.22 stage 1 — eval harness 骨架铺设（Spike，ADR-0032）
 
 - **ADR-0032**（新）：`proc agent eval` 评测 harness + session observability——D1 eval runner = CLI 子命令（report-only 不 gate，L0/L1 硬线保留在既有 `#[ignore]` 验收测试）/ D2 70 query 数据文件编译进 binary（include_str! 与 GBNF 同款）/ D3 判定与失败分类确定性（保序子序列 + text_ok 含退化检测，不上 LLM-as-judge）/ D4 L2 双口径不设硬线（full-chain + chain-step）/ D5 observability 在 session 层旁路（SessionEvent 形状零改动）+ **markdown 报告样式草案附录**（条形图 + 失败模式直方图 + compare 对比表，stage 2 实施以此为准不重新设计）

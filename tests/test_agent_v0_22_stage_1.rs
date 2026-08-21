@@ -426,7 +426,7 @@ fn test_subsequence_hit_ordered() {
 
 #[test]
 fn test_cli_eval_stub_friendly() {
-    // 无参解析：flags 全默认
+    // 无参解析：flags 全默认（stage 2 起 Eval 含 --provider/--model）
     let cli = proc::cli::Cli::try_parse_from(["proc", "agent", "eval"]).unwrap();
     match cli.command {
         Some(proc::cli::Command::Agent {
@@ -439,6 +439,8 @@ fn test_cli_eval_stub_friendly() {
                     max_steps,
                     ref output,
                     ref compare,
+                    ref provider,
+                    ref model,
                 },
         }) => {
             assert!(level.is_none());
@@ -448,10 +450,50 @@ fn test_cli_eval_stub_friendly() {
             assert_eq!(max_steps, 10);
             assert!(output.is_none());
             assert!(compare.is_empty());
+            assert!(provider.is_none());
+            assert!(model.is_none());
         }
         other => panic!("expected Agent(Eval), got {other:?}"),
     }
-    // dispatch 友好拦截（打印 stage 2 提示后正常返回，非 panic）
+    // dispatch（compare 模式）：读两份临时结果 JSON 产对比报告后正常返回
+    // （不实跑、不 panic——stage 2 起无参 eval 会真跑，dispatch 验证改走 compare）
+    let mk_run = |passed: usize| {
+        let results: Vec<_> = (0..passed)
+            .map(|_| proc::agent::eval::QueryResult {
+                scenario: "usb".to_string(),
+                level: 0,
+                query: "q".to_string(),
+                expected_tools: vec!["proc_ls".to_string()],
+                passed: true,
+                failure_mode: proc::agent::eval::FailureMode::Pass,
+                chain_steps_hit: 1,
+                actual_tools: vec!["proc_ls".to_string()],
+                stop_cause: "end_turn".to_string(),
+                final_text_head: "ok".to_string(),
+                duration_ms: 1,
+                attempts_used: 1,
+            })
+            .collect();
+        proc::agent::eval::EvalRunFile {
+            meta: proc::agent::eval::EvalRunMeta {
+                timestamp: "2026-08-20T00:00:00Z".to_string(),
+                provider: "mock".to_string(),
+                provider_detail: "test".to_string(),
+                attempts: 1,
+                max_steps: 10,
+                git_describe: "vtest".to_string(),
+                quick: false,
+                query_count: passed,
+            },
+            report: proc::agent::eval::build_report(&results),
+            results,
+        }
+    };
+    let dir = std::env::temp_dir();
+    let a = dir.join(format!("proc-eval-stub-a-{}.json", std::process::id()));
+    let b = dir.join(format!("proc-eval-stub-b-{}.json", std::process::id()));
+    std::fs::write(&a, serde_json::to_string(&mk_run(1)).unwrap()).unwrap();
+    std::fs::write(&b, serde_json::to_string(&mk_run(2)).unwrap()).unwrap();
     let sub = proc::cli::def::AgentSub::Eval {
         level: None,
         scenario: vec![],
@@ -459,9 +501,16 @@ fn test_cli_eval_stub_friendly() {
         attempts: 2,
         max_steps: 10,
         output: None,
-        compare: vec![],
+        compare: vec![
+            a.to_string_lossy().into_owned(),
+            b.to_string_lossy().into_owned(),
+        ],
+        provider: None,
+        model: None,
     };
     proc::cli::agent_cmd::run_agent(&sub);
+    let _ = std::fs::remove_file(&a);
+    let _ = std::fs::remove_file(&b);
 }
 
 #[test]

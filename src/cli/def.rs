@@ -356,6 +356,14 @@ pub enum AgentSub {
         /// 对比模式：并列多个结果 JSON 产出对比报告（不实跑）
         #[arg(long, num_args = 2..)]
         compare: Vec<String>,
+
+        /// 指定 provider（llama-cpp / anthropic / mock；默认走 agent.toml [default].provider）
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// 指定模型（默认走 agent.toml [default].model）
+        #[arg(long)]
+        model: Option<String>,
     },
 
     /// v0.22：session log 指标提取（ADR-0032 D5）——TTFT / 生成时长 / confirm 行为。

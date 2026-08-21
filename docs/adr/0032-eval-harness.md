@@ -25,6 +25,17 @@ v0.21 cycle 完结时（tag `v0.21.0`，2026-08-19），agent 能力的测量与
 - **D4：L2 双口径不设硬线**——full-chain（expected 链全部命中 / 20）+ chain-step（链步命中数 / 总链步数）双口径报告。E2B 预期低通过率（L1 三步链已暴露边界），设线只会 flaky；数据价值 > 门槛价值，更强模型复测（v0.23+）时这组数字才是对比基线。
 - **D5：observability 在 session 层旁路**——SessionLogEntry 时间戳包装记录（**SessionEvent 8 变体形状零改动**，apply_event 测试零破坏）+ SessionRecorder 写 JSONL（`dirs_config_dir()/sessions/<yyyyMMdd-HHmmss>-<provider>.jsonl`，agent.toml `[session].log` 默认 true 可关，写入失败静默降级）+ `analyze_session_log` 指标提取（TTFT / 生成时长 / delta 数 / tool 轮数 / confirm 行为，JSONL 后处理零运行时开销）+ `proc agent session-info` 薄 CLI 展示。运行时 UI 零改动；不做轮转/清理（不预实现）。
 
+## stage 2 落地注记（Slice A runner 实装，2026-08-20）
+
+1. **attempts 语义沿用 stage_3b 验收**：Pass 即停；Ok-but-Fail 与 Err 都重试；**记录末次 attempt 状态**（attempt 1 失败 + attempt 2 LlmError → 最终记 LlmError）——`attempts_used` = 实际尝试次数。LlmError 半结果 `final_text_head = "LLM error: {e}"` 截断，不经 `classify_failure`（无 RunnerOutcome 可分类，直接置 `LlmError`）。
+2. **实时落盘 = progress 回调内全量重写**：CLI 闭包每 query 完成时重写整个 JSON（meta + 已完成 results + 重建 report）。70 query 末态几百 KB、总写量 ~20MB 级——简单正确优先，append-only 优化不预实现。
+3. **QUICK 实际 26 条非 27**：每 (scenario, level) 抽 1 条，但 monitor 无 L2 query（fixtures `monitor-l2.jsonl` 空文件保结构，L2 迁移源无此组）——9×2 + 8 = 26。brainstorm「≈27」是约数，测试锁 26。
+4. **`FailureMode::label()`**：snake_case 短标签与 serde 命名一致（直方图 / 进度行 / 报告 / compare 共用），取代 Debug 格式（CamelCase）——JSON 与报告文本口径统一。
+5. **时间戳 UTC**：meta `timestamp` 用 ISO UTC（`Z` 后缀）、文件名 `yyyyMMdd-HHmmss` 同 UTC——不引 chrono（`record.rs` 同款决策，附录样例的 `+08:00` 本地时区是有意小偏差）。`git_describe` 子进程失败 fallback `v{CARGO_PKG_VERSION}`。
+6. **compare 模式打印 stdout**：对比报告不落盘（用户重定向归档），run 标签取文件名；失败模式迁移表取首/末 run（≥3 run 同款）。单 run 模式 JSON + md 双产物（`--output` 的 `.json` stem 换 `.md`）。
+7. **MockProvider 回放多轮语义确认（CLI 冒烟实测）**：complete() 按 query hash 每轮返回同一 assembled 响应，而录制 fixture 的 `response_deltas` 只覆盖**首轮流**（实测 performance-diagnose-l0 每条 = Text + 单 ToolCall + EndTurn，proc_finish 只出现在 request 的 system prompt 文本里）——runner 的 required+proc_finish 循环下回放会重复执行同一 tool 至 max_steps，分类 `MaxSteps`。这是录制粒度与 complete() 组装语义的固有错配，不是缺陷：**MockProvider 在 eval 中的用途是管线确定性验证（CI 结构断言 + CLI 冒烟），通过率数据必须来自真实 provider**（E2B QUICK/FULL）。
+8. **分类优先级实测修正（MaxSteps 提前）**：原始顺序 OutputDegraded 最优先，但 max_steps 的兜底文案是 runner 合成的 tool 名列表——模型重复调同一 tool 至上限时该列表（`proc_ls, proc_ls, …`×10）天然触发重复退化检测，误判 `OutputDegraded`（mock CLI 冒烟实测 3/3 全中）。修正为 LlmError → **MaxSteps** → OutputDegraded → …：OutputDegraded 只归类**模型产出**的退化文本（EndTurn 路径），runner 合成文案不进该口径；「tool 命中但文本退化仍记失败」的 EndTurn 场景（brainstorm 风险 6）不变。stage-1 既有测试零破坏（end_turn 场景锁的优先级），stage-2 加正反测试锁定。
+
 ## Consequences
 
 - `AgentSub` 2 → 4 变体（Eval / SessionInfo）

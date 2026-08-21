@@ -35,17 +35,189 @@ pub fn run_agent(sub: &AgentSub) {
                 std::process::exit(1);
             }
         }
-        AgentSub::Eval { .. } => {
-            // v0.22 stage 2 实装（数据文件与类型已就位，见 src/agent/eval/）。
-            eprintln!(
-                "proc agent eval：v0.22 stage 2 实装（数据文件与类型已就位，见 src/agent/eval/）"
-            );
+        AgentSub::Eval {
+            level,
+            scenario,
+            quick,
+            attempts,
+            max_steps,
+            output,
+            compare,
+            provider,
+            model,
+        } => {
+            if let Err(e) = run_agent_eval(
+                level.as_deref(),
+                scenario,
+                *quick,
+                *attempts,
+                *max_steps as u32,
+                output.as_deref(),
+                compare,
+                provider.as_deref(),
+                model.as_deref(),
+            ) {
+                eprintln!("{} {}", "错误:".red(), e);
+                std::process::exit(1);
+            }
         }
         AgentSub::SessionInfo { .. } => {
             // v0.22 stage 3 实装（session log 落地后可用）。
             eprintln!("proc agent session-info：v0.22 stage 3 实装（session log 落地后可用）");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// eval（v0.22 stage 2，ADR-0032）
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn run_agent_eval(
+    level: Option<&str>,
+    scenarios: &[String],
+    quick: bool,
+    attempts: u8,
+    max_steps: u32,
+    output: Option<&str>,
+    compare: &[String],
+    provider_flag: Option<&str>,
+    model_flag: Option<&str>,
+) -> Result<(), String> {
+    use crate::agent::eval::report::{render_compare_markdown, render_markdown};
+    use crate::agent::eval::runner::{self, EvalRunFile, EvalRunMeta};
+    use crate::agent::eval::{build_report, parse_levels, select_queries};
+
+    // compare 模式：读 N 份结果 JSON → 对比报告打印 stdout（不实跑）。
+    if !compare.is_empty() {
+        let mut runs = Vec::with_capacity(compare.len());
+        for path in compare {
+            let content =
+                std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {e}", path))?;
+            let run: EvalRunFile = serde_json::from_str(&content).map_err(|e| {
+                format!(
+                    "解析 {} 失败: {e}（应为 proc agent eval 的结果 JSON）",
+                    path
+                )
+            })?;
+            runs.push(run);
+        }
+        let labels: Vec<String> = compare
+            .iter()
+            .map(|p| {
+                std::path::Path::new(p)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.clone())
+            })
+            .collect();
+        println!("{}", render_compare_markdown(&runs, &labels));
+        return Ok(());
+    }
+
+    // 实跑模式：加载 + 过滤 + 构造 runner（ask 同款 builder 链）。
+    let levels = level.map(parse_levels).transpose()?;
+    let all = crate::agent::eval::load_eval_queries()?;
+    let selected = select_queries(&all, &levels.unwrap_or_default(), scenarios, quick)?;
+    let (runner, spec) = crate::agent::builder::build_runner(provider_flag, model_flag, max_steps)?;
+
+    let l0 = selected.iter().filter(|q| q.level == 0).count();
+    let l1 = selected.iter().filter(|q| q.level == 1).count();
+    let l2 = selected.iter().filter(|q| q.level == 2).count();
+    eprintln!(
+        "== eval: {} 模式，{} query（L0 {l0} / L1 {l1} / L2 {l2}），attempts={attempts}，max_steps={max_steps} ==",
+        if quick { "QUICK" } else { "FULL" },
+        selected.len(),
+    );
+    eprintln!("{} provider: {}", "·".dimmed(), spec.detail);
+
+    let meta = EvalRunMeta {
+        timestamp: runner::utc_timestamp_iso(),
+        provider: spec.name.clone(),
+        provider_detail: spec.detail.clone(),
+        attempts,
+        max_steps,
+        git_describe: runner::git_describe(),
+        quick,
+        query_count: selected.len(),
+    };
+    let json_path = output.map(str::to_string).unwrap_or_else(|| {
+        format!(
+            "eval-{}-{}.json",
+            spec.name,
+            runner::utc_timestamp_compact()
+        )
+    });
+    let md_path = {
+        let mut stem = std::path::PathBuf::from(&json_path);
+        stem.set_extension("md");
+        stem.to_string_lossy().into_owned()
+    };
+
+    // CLI 自建 current_thread runtime（ask 同款）。
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime 创建失败: {e}"))?;
+
+    // 每 query 实时落盘：progress 回调全量重写 JSON（中途崩已跑数据不丢，
+    // brainstorm 风险 1 mitigate 3）。
+    let mut so_far: Vec<crate::agent::eval::QueryResult> = Vec::new();
+    let results = rt.block_on(runner::run_eval(
+        &runner,
+        &selected,
+        attempts,
+        &mut |r, _idx, _total| {
+            so_far.push(r.clone());
+            eprintln!(
+                "[L{}] {}: {} (tools: [{}], {} 步, stop: {}, attempt {}/{}, {:.1}s)",
+                r.level,
+                r.scenario,
+                if r.passed { "PASS" } else { "FAIL" },
+                r.actual_tools.join(","),
+                r.actual_tools.len(),
+                r.stop_cause,
+                r.attempts_used,
+                attempts,
+                r.duration_ms as f64 / 1000.0,
+            );
+            let interim = EvalRunFile {
+                meta: meta.clone(),
+                results: so_far.clone(),
+                report: build_report(&so_far),
+            };
+            if let Ok(json) = serde_json::to_string_pretty(&interim) {
+                let _ = std::fs::write(&json_path, json);
+            }
+        },
+    ));
+
+    let run = EvalRunFile {
+        meta: meta.clone(),
+        report: build_report(&results),
+        results,
+    };
+    std::fs::write(
+        &json_path,
+        serde_json::to_string_pretty(&run).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("写入 {} 失败: {e}", json_path))?;
+    std::fs::write(&md_path, render_markdown(&run))
+        .map_err(|e| format!("写入 {} 失败: {e}", md_path))?;
+
+    for ls in &run.report.per_level {
+        if ls.level == 2 {
+            eprintln!(
+                "===== L2: full-chain {}/{}，chain-step {}/{} =====",
+                ls.full_chain, ls.total, ls.chain_steps_hit, ls.chain_steps_total
+            );
+        } else {
+            eprintln!("===== L{}: {}/{} =====", ls.level, ls.passed, ls.total);
+        }
+    }
+    eprintln!("{} 结果 JSON: {json_path}", "·".dimmed());
+    eprintln!("{} 报告: {md_path}", "·".dimmed());
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

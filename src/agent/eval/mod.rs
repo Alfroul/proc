@@ -8,6 +8,11 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod report;
+pub mod runner;
+
+pub use runner::{EvalRunFile, EvalRunMeta, build_report, parse_levels, run_eval, select_queries};
+
 /// 70 query 基准表（ADR-0032 D2，编译进 binary）。
 pub const EVAL_QUERIES_TOML: &str = include_str!("queries.toml");
 
@@ -74,6 +79,22 @@ pub enum FailureMode {
     LlmError,
     /// 文本退化：特殊 token 字面量泄漏 / 高重复（2026-08-20 实测，优先归类）
     OutputDegraded,
+}
+
+impl FailureMode {
+    /// 短标签（与 serde snake_case 一致，报告 / 直方图 / 进度行共用）。
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::NoToolCall => "no_tool_call",
+            Self::WrongTool => "wrong_tool",
+            Self::ChainIncomplete => "chain_incomplete",
+            Self::EmptyAnswer => "empty_answer",
+            Self::MaxSteps => "max_steps",
+            Self::LlmError => "llm_error",
+            Self::OutputDegraded => "output_degraded",
+        }
+    }
 }
 
 /// per-query 结果（结果 JSON 的原子单元）。
@@ -205,17 +226,21 @@ pub struct OutcomeSummary<'a> {
 }
 
 /// 失败模式确定性判定（ADR-0032 D3）。优先级：
-/// OutputDegraded（final_text 退化即整体 fail，即使 tool 命中）→ LlmError →
-/// MaxSteps → EmptyAnswer → NoToolCall → WrongTool/ChainIncomplete → Pass。
+/// LlmError → MaxSteps → OutputDegraded（final_text 退化即整体 fail，即使 tool
+/// 命中）→ EmptyAnswer → NoToolCall → WrongTool/ChainIncomplete → Pass。
+///
+/// MaxSteps 先于 OutputDegraded（stage 2 实测修正）：max_steps 的兜底文案是
+/// runner 合成的 tool 名列表（重复 tool 名天然触发重复检测），不是模型产出
+/// 的退化文本——OutputDegraded 只归类模型文本退化（EndTurn 路径）。
 pub fn classify_failure(outcome: &OutcomeSummary<'_>, expected: &[String]) -> FailureMode {
-    if !outcome.final_text.is_empty() && is_degraded_output(outcome.final_text) {
-        return FailureMode::OutputDegraded;
-    }
     if outcome.llm_error {
         return FailureMode::LlmError;
     }
     if outcome.stop_cause == "max_steps" {
         return FailureMode::MaxSteps;
+    }
+    if !outcome.final_text.is_empty() && is_degraded_output(outcome.final_text) {
+        return FailureMode::OutputDegraded;
     }
     if outcome.final_text.is_empty() || outcome.nudge_fallback {
         return FailureMode::EmptyAnswer;
