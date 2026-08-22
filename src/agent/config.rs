@@ -19,6 +19,8 @@ pub struct AgentConfig {
     pub anthropic: AnthropicConfig,
     #[serde(default)]
     pub mock: MockConfig,
+    #[serde(default)]
+    pub session: SessionConfig,
 }
 
 /// `[default]` — 用户长期偏好（provider / 模型 / loop 深度）。
@@ -69,6 +71,21 @@ pub struct AnthropicConfig {
 #[serde(deny_unknown_fields)]
 pub struct MockConfig {
     pub fixtures_dir: Option<String>,
+}
+
+/// `[session]` — v0.22 stage 3 observability 开关（ADR-0032 D5）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionConfig {
+    /// session JSONL 留档（默认开——本地零上传、单会话几百 KB；false 一键关）。
+    #[serde(default = "default_true")]
+    pub log: bool,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self { log: true }
+    }
 }
 
 fn default_true() -> bool {

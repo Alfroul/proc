@@ -123,6 +123,7 @@ fn spawn_session(provider: ScriptedStreamProvider) -> SessionHandle {
             max_steps: 6,
             ..Default::default()
         },
+        proc::agent::SessionRecorder::disabled(),
     )
 }
 

@@ -7,6 +7,17 @@
 
 ## [Unreleased]
 
+### v0.22 stage 3 — session observability 全套（Slice B，ADR-0032 D5）
+
+- **`src/agent/session_log.rs`**（新）：`SessionLogEntry { seq, ts_rel_ms, #[serde(flatten)] event: LogEvent }`（serde tag="kind" snake_case 10 kind，每行 JSONL 人类可读）+ `SessionRecorder`——session_loop 在事件 send 前包装记录（**SessionEvent 8 变体形状零改动**），seq 0 头条目记 provider + 墙钟起点（Instant 起点 + 墙钟双时间）；写 `~/.config/proc/sessions/<yyyyMMdd-HHmmss>-<provider>.jsonl`（UTC，复用 eval::runner helper）；**TextDelta 聚合**（累计 ≥ `DELTA_MERGE_CHARS=64` chars 落一条，聚合条目 ts 取首 delta 时间——TTFT 精度不受损；pending 段在非 delta 事件前先 flush；per-line flush 崩溃安全，brainstorm 风险 2「不逐 delta 落盘」）；写失败静默降级（`disabled()` no-op，不影响会话）
+- **confirm 决策旁路记录**：`ConfirmDecision` 不在 SessionEvent 流里（oneshot 回传）——session.rs `confirm_with_recorder` 换出 `req.reply` 包一层转发线程，决策到达先记录 `confirm_decision` 再转发原通道给 runner（先记录后转发保证日志序）；面板 drop 未决策 → 包装通道断开线程干净退出（runner 侧 RecvError → Denied 既有语义不变）
+- **指标提取**：`analyze_session_log(path) -> SessionMetrics`（JSONL 后处理零运行时开销）——TTFT（QueryStarted → 首 TextDelta 段）/ 生成时长 / delta 段数与 chars / tool 轮数与 error / confirm 次数 + 决策分布（approved/denied）+ 决策延迟（ConfirmRequested → ConfirmDecision）；query 外事件（空 query 的 Error）只进 totals；`SessionMetrics` / `QueryMetrics` / `MetricsTotals` 三层 + `format_session_metrics` 纯函数格式化
+- **CLI `proc agent session-info <path>`**：薄展示（analyze + 格式化打印）——观测能力的用户可感知出口
+- **接线**：`agent.toml [session].log`（默认 true 可关，`deny_unknown_fields`）+ `AgentSession::spawn` 3 → 4 参（+recorder）+ `build_session` 按配置构造（`build_runner` 不接——session log 是 TUI 面板 session 层诉求）；运行时 UI 零改动
+- **测试**：`tests/test_agent_v0_22_stage_3.rs` 21 CI + 1 E2B `#[ignore]`（recorder seq 单调 / ts 非降 / delta 聚合上限（200×4 chars → ≤14 条）/ 8 变体映射 / 降级不 panic；analyze TTFT·时长·决策延迟数字断言 / 多 query 平均 / 坏行报行号 / query 外 error；session 端到端全生命周期日志序 + **confirm 决策旁路 roundtrip**（Denied 经换出通道透明回传 + 决策条目序先于 session_finished）；CLI parse / 格式化输出 / config 三态；E2B 真实链路 session log 冒烟 14.8s 通过）；既有 2 测试文件 spawn 调用点补 `disabled()`（SessionEvent 形状零改动的验证锚）+ stage-1 CLI stub 测试改真实临时文件 dispatch
+- E2B 冒烟：session log 真实链路（llama-cpp E2B 1 query 12.7s end_turn，正确列出 top 3 进程）+ `session-info` 真文件输出验证；eval 链路 stage 3 改动后回归冒烟 3/3 PASS
+- 零新 deps；MCP tool 46 / agent catalog 47 不变；SessionEvent / ConfirmRequest / SessionCommand / run / run_streaming / dispatch 零改动
+
 ### v0.22 stage 2 — `proc agent eval` runner 实装（Slice A，ADR-0032）
 
 - **`src/agent/eval/runner.rs`**（新）：`run_eval` 执行循环——逐 query 走 complete 路径（`runner.run()`，与 stage_3b 验收同款）+ attempts 重试（Pass 即停 / 失败与 LlmError 重试，记录末次 attempt 状态）+ per-query 计时 + **单 query LlmError 用尽 attempts 不中断后续** + `progress` 回调（CLI 侧 PASS/FAIL 进度行 + **结果 JSON 每 query 全量重写实时落盘**——中途崩已跑数据不丢）；`parse_levels` / `select_queries`（level/scenario 过滤 + QUICK 每 (scenario,level) 抽 1 条 = 26 query，monitor 无 L2 seed）+ `build_report` 聚合（L2 full-chain + chain-step 双口径的单一实现，compare 与单 run 报告共用）+ `EvalRunMeta` / `EvalRunFile` 结果 JSON 顶层（timestamp/provider/attempts/max_steps/git describe + results + report）+ UTC 时间戳与 `git_describe` helper（不引 chrono，record.rs 同款 civil 算法）

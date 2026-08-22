@@ -35,6 +35,7 @@ pub mod provider;
 pub mod record_fixture;
 pub mod runner;
 pub mod session;
+pub mod session_log;
 pub mod sse;
 pub mod tool_registry;
 pub mod tools;
@@ -59,6 +60,10 @@ pub use runner::{
 pub use session::{
     AgentSession, ConfirmDecision, ConfirmRequest, MAX_HISTORY_TURNS, SessionCommand, SessionEvent,
     SessionHandle, truncate_history,
+};
+pub use session_log::{
+    DELTA_MERGE_CHARS, LogEvent, MetricsTotals, QueryMetrics, SessionLogEntry, SessionMetrics,
+    SessionRecorder, analyze_entries, analyze_session_log, format_session_metrics,
 };
 pub use tool_registry::ToolRegistry;
 pub use types::{Message, Role, ToolCall, ToolCategory, ToolResult, ToolSchema};

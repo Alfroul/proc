@@ -36,14 +36,22 @@ pub fn build_runner(
 
 /// v0.21 stage 3：TUI AgentPanel 进面板时建会话（与 CLI ask 共用构造链；
 /// llama-server 仍惰性 spawn 于首次 query——D5 按需 spawn 延续）。
+///
+/// v0.22 stage 3：按 agent.toml `[session].log`（默认 true）构造
+/// SessionRecorder（ADR-0032 D5）。
 pub fn build_session(
     provider_flag: Option<&str>,
     model_flag: Option<&str>,
     max_steps: u32,
 ) -> Result<(super::session::SessionHandle, ProviderSpec), String> {
     let (provider, registry, options, spec) = build_parts(provider_flag, model_flag, max_steps)?;
+    let recorder = if AgentConfig::load().session.log {
+        super::session_log::SessionRecorder::start(&spec.name)
+    } else {
+        super::session_log::SessionRecorder::disabled()
+    };
     Ok((
-        super::session::AgentSession::spawn(provider, registry, options),
+        super::session::AgentSession::spawn(provider, registry, options, recorder),
         spec,
     ))
 }

@@ -21,6 +21,7 @@ use tokio::sync::oneshot;
 
 use super::provider::LlmProvider;
 use super::runner::{AgentOptions, AgentRunner, StopCause, StreamEvent};
+use super::session_log::SessionRecorder;
 use super::tool_registry::ToolRegistry;
 use super::types::{Message, Role};
 
@@ -103,10 +104,14 @@ impl AgentSession {
     /// 起会话线程（专用 thread + 线程内自建 current_thread tokio Runtime——
     /// llama-server 句柄跨调用复用需要常驻 async 上下文，ADR-0031 备选 B
     /// 否决理由）。
+    ///
+    /// v0.22 stage 3：`recorder` 是 session observability 旁路（ADR-0032 D5），
+    /// 关日志时传 [`SessionRecorder::disabled`]。
     pub fn spawn(
         provider: Arc<dyn LlmProvider>,
         registry: ToolRegistry,
         options: AgentOptions,
+        recorder: SessionRecorder,
     ) -> SessionHandle {
         let (events_tx, events_rx) = std_mpsc::channel::<SessionEvent>();
         let (queries_tx, queries_rx) = std_mpsc::channel::<SessionCommand>();
@@ -125,6 +130,7 @@ impl AgentSession {
                     queries_rx,
                     events_tx,
                     thread_cancel,
+                    recorder,
                 );
                 thread_exited.store(true, Ordering::SeqCst);
             })
@@ -146,6 +152,7 @@ fn session_loop(
     queries_rx: std_mpsc::Receiver<SessionCommand>,
     events_tx: std_mpsc::Sender<SessionEvent>,
     cancel: Arc<AtomicBool>,
+    recorder: SessionRecorder,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -153,7 +160,9 @@ fn session_loop(
     {
         Ok(rt) => rt,
         Err(e) => {
-            let _ = events_tx.send(SessionEvent::Error(format!("tokio runtime 创建失败: {e}")));
+            let ev = SessionEvent::Error(format!("tokio runtime 创建失败: {e}"));
+            recorder.log(&ev);
+            let _ = events_tx.send(ev);
             return;
         }
     };
@@ -166,14 +175,19 @@ fn session_loop(
             Ok(SessionCommand::Query(q)) => q,
         };
         if query.trim().is_empty() {
-            let _ = events_tx.send(SessionEvent::Error("query 不能为空".to_string()));
+            let ev = SessionEvent::Error("query 不能为空".to_string());
+            recorder.log(&ev);
+            let _ = events_tx.send(ev);
             continue;
         }
         // 新 query 清掉上一轮的 interrupt 残留（cancel 只作用于当前 run）。
         cancel.store(false, Ordering::Relaxed);
-        let _ = events_tx.send(SessionEvent::QueryStarted(query.clone()));
+        let started = SessionEvent::QueryStarted(query.clone());
+        recorder.log(&started);
+        let _ = events_tx.send(started);
 
         let sink_tx = events_tx.clone();
+        let sink_recorder = recorder.clone();
         let sink = move |ev: StreamEvent| {
             let session_event = match ev {
                 StreamEvent::TextDelta(t) => SessionEvent::TextDelta(t),
@@ -191,11 +205,13 @@ fn session_loop(
                 },
                 StreamEvent::TurnFinished => SessionEvent::TurnFinished,
             };
+            sink_recorder.log(&session_event);
             let _ = sink_tx.send(session_event);
         };
         let confirm_tx = events_tx.clone();
+        let confirm_recorder = recorder.clone();
         let confirm = move |req: ConfirmRequest| {
-            let _ = confirm_tx.send(SessionEvent::ConfirmRequested(req));
+            confirm_with_recorder(&confirm_tx, &confirm_recorder, req);
         };
 
         match rt.block_on(runner.run_streaming(&query, &history, &sink, Some(&confirm), &cancel)) {
@@ -206,17 +222,48 @@ fn session_loop(
                     history.push(Message::new(Role::Assistant, outcome.final_text.clone()));
                     truncate_history(&mut history);
                 }
-                let _ = events_tx.send(SessionEvent::SessionFinished {
+                let finished = SessionEvent::SessionFinished {
                     final_text: outcome.final_text,
                     stop: outcome.stop,
-                });
+                };
+                recorder.log(&finished);
+                let _ = events_tx.send(finished);
             }
             Err(e) => {
-                let _ = events_tx.send(SessionEvent::Error(e.to_string()));
+                let ev = SessionEvent::Error(e.to_string());
+                recorder.log(&ev);
+                let _ = events_tx.send(ev);
             }
         }
     }
     // events_tx 在此 drop——UI 侧 drain_event 会感知 Disconnected（会话终结）。
+}
+
+/// confirm hook 的 session 层包装（v0.22 stage 3 observability，ADR-0032 D5）：
+/// 换出 `req.reply` 包一层转发线程——面板决策到达时先记录
+/// `LogEvent::ConfirmDecision` 再转发原通道给 runner（先记录后转发保证
+/// 日志序：confirm_decision 条目先于 runner 恢复后的任何后续事件）。
+///
+/// 面板 drop 未决策（通道断开）→ 线程干净退出不转发——runner 侧
+/// RecvError → Denied 语义不变。
+fn confirm_with_recorder(
+    confirm_tx: &std_mpsc::Sender<SessionEvent>,
+    recorder: &SessionRecorder,
+    mut req: ConfirmRequest,
+) {
+    let (wrap_tx, wrap_rx) = oneshot::channel();
+    let orig_reply = std::mem::replace(&mut req.reply, wrap_tx);
+    let decision_recorder = recorder.clone();
+    std::thread::spawn(move || {
+        if let Ok(decision) = wrap_rx.blocking_recv() {
+            decision_recorder.log_confirm_decision(matches!(decision, ConfirmDecision::Approved));
+            let _ = orig_reply.send(decision);
+        }
+        // Err = 面板 drop 未决策——通道断开，不转发（runner 侧 RecvError → Denied）。
+    });
+    let event = SessionEvent::ConfirmRequested(req);
+    recorder.log(&event);
+    let _ = confirm_tx.send(event);
 }
 
 /// TUI 侧持有的会话句柄（drain 事件 + 发 query + 中断 + Drop 收尾）。

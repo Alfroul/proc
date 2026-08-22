@@ -744,6 +744,7 @@ fn spawn_session(provider: ScriptedStreamProvider) -> (Arc<ScriptedStreamProvide
             max_steps: 4,
             ..Default::default()
         },
+        proc::agent::SessionRecorder::disabled(),
     );
     (provider, handle)
 }

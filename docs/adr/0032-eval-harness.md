@@ -36,6 +36,16 @@ v0.21 cycle 完结时（tag `v0.21.0`，2026-08-19），agent 能力的测量与
 7. **MockProvider 回放多轮语义确认（CLI 冒烟实测）**：complete() 按 query hash 每轮返回同一 assembled 响应，而录制 fixture 的 `response_deltas` 只覆盖**首轮流**（实测 performance-diagnose-l0 每条 = Text + 单 ToolCall + EndTurn，proc_finish 只出现在 request 的 system prompt 文本里）——runner 的 required+proc_finish 循环下回放会重复执行同一 tool 至 max_steps，分类 `MaxSteps`。这是录制粒度与 complete() 组装语义的固有错配，不是缺陷：**MockProvider 在 eval 中的用途是管线确定性验证（CI 结构断言 + CLI 冒烟），通过率数据必须来自真实 provider**（E2B QUICK/FULL）。
 8. **分类优先级实测修正（MaxSteps 提前）**：原始顺序 OutputDegraded 最优先，但 max_steps 的兜底文案是 runner 合成的 tool 名列表——模型重复调同一 tool 至上限时该列表（`proc_ls, proc_ls, …`×10）天然触发重复退化检测，误判 `OutputDegraded`（mock CLI 冒烟实测 3/3 全中）。修正为 LlmError → **MaxSteps** → OutputDegraded → …：OutputDegraded 只归类**模型产出**的退化文本（EndTurn 路径），runner 合成文案不进该口径；「tool 命中但文本退化仍记失败」的 EndTurn 场景（brainstorm 风险 6）不变。stage-1 既有测试零破坏（end_turn 场景锁的优先级），stage-2 加正反测试锁定。
 
+## stage 3 落地注记（Slice B observability 实装，2026-08-21）
+
+1. **JSONL schema 用 serde tag = "kind" + flatten**：`SessionLogEntry { seq, ts_rel_ms, #[serde(flatten)] event: LogEvent }`——每行形如 `{"seq":0,"ts_rel_ms":0,"kind":"session_start","provider":"llama-cpp",...}`，人类可读且后处理单遍扫描。10 个 kind：session_start / query_started / text_delta / tool_start / tool_finished / confirm_requested / confirm_decision / turn_finished / session_finished / error。
+2. **TextDelta 聚合语义**：累计 ≥ `DELTA_MERGE_CHARS=64` chars 落一条，聚合条目 ts 取**首 delta 时间**——TTFT 精度不受聚合影响（这是把聚合缓冲设计成 `(首 ts, 累计 chars)` 而非 flush 时取 ts 的原因）。pending 段在任一非 delta 事件写入前先 flush（顺序保证）；per-line flush（BufWriter + 每行 flush）让崩溃时已写行完整，Drop 无需特殊收尾。
+3. **confirm 决策旁路记录**：`ConfirmDecision` 不在 SessionEvent 流里（oneshot 回传），session 层 `confirm_with_recorder` 换出 `req.reply` 包一层转发线程——决策到达先记录 `confirm_decision` 再转发原通道给 runner（先记录后转发保证日志序）。面板 drop 未决策 → 包装通道 RecvError → 线程干净退出不转发（runner 侧 RecvError → Denied 既有语义不变）。每个 confirm 请求一个短命线程（用户交互频率，成本可忽略）。
+4. **`AgentSession::spawn` 3 → 4 参**（+ `SessionRecorder`）：3 个调用点（builder / test_agent_panel / test_agent_v0_21_stage_2 各补 `disabled()`）——SessionEvent / ConfirmRequest / SessionCommand 形状零改动，两个既有测试文件全绿即「形状零改动」的验证锚。
+5. **TTFT 的忠实语义**：TextDelta 才计 TTFT；模型直接 tool → proc_finish（无流式文本）的 query TTFT 为 None——E2B 冒烟实测该 query 恰是此形态（tool_calls=1 / turns=2 / delta_events=0）。这不是缺失，是「首 token 时间」对无文本流的忠实表达。
+6. **build_session 双读 agent.toml**：`build_parts` 内部 `AgentConfig::load()` 一次 + `build_session` 为 `[session].log` 再读一次——小文件读两次，比改 `build_parts` 签名串 config 出来干净。
+7. **`start_in_dir` 测试注入**：产品路径 `start()` 固定 `dirs_config_dir()/sessions/`；测试用 `start_in_dir(tempdir)` 隔离（E2B 冒烟例外——真实目录是功能本体的验证）。目录创建 / 打开失败 → `disabled()` 静默降级。
+
 ## Consequences
 
 - `AgentSub` 2 → 4 变体（Eval / SessionInfo）

@@ -7,3 +7,10 @@ plan.md
 docs/handoff-*.md
 docs/internal/
 .claude/
+
+# v0.22 eval 挂机产物（结果 json/md 留本地；归档版入 docs/eval/）
+run-full-eval.sh
+eval-*.json
+eval-*.md
+eval-run.log
+eval-*.out

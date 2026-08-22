@@ -524,9 +524,20 @@ fn test_cli_session_info_stub_friendly() {
         }
         other => panic!("expected Agent(SessionInfo), got {other:?}"),
     }
-    // dispatch 友好拦截（打印 stage 3 提示后正常返回，非 panic）
+    // dispatch（v0.22 stage 3 起真实现）：缺失文件会 exit(1)，改走真实临时
+    // JSONL 文件验证正常返回路径（指标打印细节在 stage 3 测试锁）。
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("s.jsonl");
+    let entry = serde_json::json!({
+        "seq": 0,
+        "ts_rel_ms": 0,
+        "kind": "session_start",
+        "provider": "mock",
+        "wall_start": "2026-08-21T00:00:00Z",
+    });
+    std::fs::write(&file, format!("{entry}\n")).unwrap();
     let sub = proc::cli::def::AgentSub::SessionInfo {
-        path: "s.jsonl".to_string(),
+        path: file.to_string_lossy().into_owned(),
     };
     proc::cli::agent_cmd::run_agent(&sub);
 }

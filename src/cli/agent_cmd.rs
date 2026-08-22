@@ -61,11 +61,26 @@ pub fn run_agent(sub: &AgentSub) {
                 std::process::exit(1);
             }
         }
-        AgentSub::SessionInfo { .. } => {
-            // v0.22 stage 3 实装（session log 落地后可用）。
-            eprintln!("proc agent session-info：v0.22 stage 3 实装（session log 落地后可用）");
+        AgentSub::SessionInfo { path } => {
+            if let Err(e) = run_agent_session_info(path) {
+                eprintln!("{} {}", "错误:".red(), e);
+                std::process::exit(1);
+            }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// session-info（v0.22 stage 3，ADR-0032 D5）
+// ---------------------------------------------------------------------------
+
+fn run_agent_session_info(path: &str) -> Result<(), String> {
+    let metrics = crate::agent::session_log::analyze_session_log(std::path::Path::new(path))?;
+    println!(
+        "{}",
+        crate::agent::session_log::format_session_metrics(&metrics)
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
