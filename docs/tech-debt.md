@@ -721,6 +721,20 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.21 stage 4 决策**：观察项，不修。理由：(1) 单次再现 + 重跑即过，修复优先级低于任何功能项；(2) 修复方案明确（A2 同款），再现时半天内闭环。连续 cycle 再现才升级为必修。
 
+**v0.22 cycle 追踪**：整个 cycle 4 次开工基线验证（stage 1/2/3/4 双档）均未再现。继续观察，原判不动。
+
+### TD-59（REVIEW-v0.22 P2）：session log 累积无轮转 / 清理（观察项）
+
+**位置**：`src/agent/session_log.rs::SessionRecorder::start`（`dirs_config_dir()/sessions/<utc>-<provider>.jsonl`）
+
+**现状**：v0.22 stage 3 落地的 session JSONL 留档默认开启（`agent.toml [session].log = true`），每次 TUI AgentPanel 会话产生一个文件（单会话几百 KB 量级——TextDelta 已按 ≥64 chars 聚合）。目录单调增长，无轮转 / 无清理。
+
+**影响**：日常使用增长缓慢（一次会话一个文件，非 daemon 持续写）；几个月量级可达百 MB 级。非功能缺陷，是 brainstorm 决策 3 明确的延后决策（「不做轮转/清理（不预实现）；累积成问题再治理」）。
+
+**修复方案**（触发时实施，半天内）：最简清理——proc 启动时删 N 天前 sessions 文件（TUI 启动路径一次性 glob + retain），或 sessions 目录体积上限 LRU。不做按大小轮转（会话粒度文件天然是轮转单元）。
+
+**v0.22 stage 4 决策**：归档观察项。触发条件 = 用户磁盘占用可感知 / sessions 目录上万文件。归档目的：不让「不预实现」变成「永不处理」。
+
 ---
 
 ## 历史回顾

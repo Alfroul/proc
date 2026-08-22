@@ -5,7 +5,37 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.22.0] - 2026-08-22
+
+### v0.22.0 cycle 完结 — Eval harness + session Observability cycle
+
+v0.22 cycle 是 proc 首个「测量与观测层」单主主题 cycle（~6000 行级改动：src +2183 / tests +2256 / docs +1543，26 files），4 stage 节奏（1 Spike + 2 Slice + Review+收尾合并段，与 v0.21 同款）。**agent 能力从「可演示」升级为「可测量」**——`proc agent eval` 评测 harness（70 query 基准数据文件化 + per-query 结果 JSON + 确定性失败模式分类 7 变体 + markdown 报告 + `--compare` 跨 run/模型对比）+ session observability 全套（TUI AgentPanel 每次会话自动留档 JSONL + TTFT/生成时长/confirm 指标提取 + `proc agent session-info` CLI）。E2B FULL 70 query 首跑 47m19s 零中断完成并归档——**L0 74% / L1 52% / L2 full-chain 5% + chain-step 28% / output_degraded 30%** 这组 E2B 画像数字成为未来所有模型 / prompt / GBNF 变量的对比基线。MCP tool 46 / agent catalog 47 均不变（零 tool 变更干净基线）+ 1 份新 ADR-0032（D1~D5 + 三段 stage 落地注记 + 报告样式附录）+ Cargo deps +0。详见 [REVIEW-v0.22](docs/reviews/REVIEW-v0.22.md)（P0 0 / P1 0 / P2 2：TD-55~57 仍 open + TD-59 新归档 session log 累积观察项）。
+
+**核心交付落地范围**：
+
+- **项 1 eval 数据文件 + 类型骨架**（stage 1）：`src/agent/eval/queries.toml` 70 query 编译进 binary（L0 23 + L1 27 逐字迁移 QUERY_TABLE + L2 20 seed 迁移 + expected 链 authoring，冻结锚测试锁一致）+ serde 类型锁定（QuerySpec / FailureMode / QueryResult / EvalReport / LevelSummary——schema 即结果 JSON contract）+ 判定纯函数三件（`classify_failure` 8 变体确定性判定 / `tools_subsequence_hit` 保序子序列 / `is_degraded_output` 退化检测——特殊 token 名单 + 重复阈值）
+- **项 2 `proc agent eval` runner**（stage 2）：执行循环（attempts 重试记末次状态 + 单 query LlmError 不中断 + **结果 JSON 每 query 全量重写实时落盘**——中途崩已跑数据不丢）+ 聚合报告单一实现（compare 与单 run 共用）+ markdown 报告（按 ADR-0032 附录样式）+ `--compare` 对比模式 + QUICK 26 条抽样（monitor 无 L2 seed）
+- **项 3 session observability**（stage 3）：`SessionRecorder` JSONL（`~/.config/proc/sessions/`，`[session].log` 默认 true，写失败静默降级，TextDelta ≥64 chars 聚合不逐 delta 落盘）+ **SessionEvent 8 变体形状零改动**（时间戳 session 层旁路包装）+ confirm 决策旁路记录（换出 oneshot + 转发线程，先记录后转发保日志序）+ `analyze_session_log` 指标提取（TTFT / 生成时长 / tool 轮数 / confirm 决策分布与延迟）+ `proc agent session-info` 薄 CLI
+- **项 4 E2B FULL 70 query 实跑 + 归档**（stage 3 末段用户挂机）：QUICK 26 条 18m46s 冒烟 → FULL 47m19s，归档 `docs/eval/e2b-70q-v0.22.md`（结果 json 本地留存 61KB 作 `--compare` 基线列）
+
+**关键数字**：
+
+| 指标 | v0.21.0 基线 | v0.22.0 落地 |
+|---|---|---|
+| 全量回归 | 1607 passed / 0 failed / 8 ignored（默认）+ 1631（anthropic）| **1681 passed / 0 failed / 9 ignored（默认）+ 1705 / 0 / 10（anthropic）**（+74 CI，另 +1 个 `#[ignore]` E2B session log 真实测试）|
+| agent 入口 | CLI ask + TUI 面板 | **+ `proc agent eval` / `proc agent session-info`**（AgentSub 2 → 4 变体）|
+| E2B 能力数据 | QUERY_TABLE 验收（50 query test 形态，L0 23/23 + L1 21/27）| **FULL 70 query eval 报告**：L0 17/23（74%）· L1 14/27（52%）· L2 full-chain 1/20 + chain-step 12/43；失败直方图 output_degraded 21（55%）/ wrong_tool 10 / chain_incomplete 7，零 LlmError 零中断 |
+| session 观测 | 事件流仅进 TUI 跑完即散 | **JSONL 留档 + TTFT/confirm 指标可回溯**（真实链路 E2B 冒烟 12.7s 验证）|
+| MCP tool / agent catalog | 46 / 47 + proc_finish | **不变**（零 tool 变更干净基线——跨 cycle 数据可比）|
+| Cargo deps | reqwest + tokio-stream（v0.20）| **+0**（serde/toml 既有）|
+| ADR | 0031 | **新 ADR-0032**（D1~D5）|
+
+### v0.22.0 阶段 4 — Review + 收尾（REVIEW-v0.22 + CHANGELOG + README eval 章节 + tag v0.22.0）
+
+- **Docs**: `docs/reviews/REVIEW-v0.22.md`（新）—— 4 stage 四维度审查 + 实测观察归档 4 条（OutputDegraded 30% 画像——proc_finish 语法泄漏为主因，GBNF 逃生舱留 v0.23+ 数据决策 / classify 优先级 MaxSteps 修正——合成兜底文案不进退化口径 / QUICK 26 ≠ 27——monitor 无 L2 seed / 挂机 47m vs 4.5-6.5h 预估——时长预估校准）+ 与 v0.20 验收口径差归档（17/23 vs 23/23 非回归：退化检测新口径 + Docker daemon 环境因素）+ cycle 数据汇总 + v0.23+ 候选方向（GBNF 开关 vs 更强模型 / TD-55~57 / record_start/stop 复评 / prompt 措辞 / RAG B / Multi-agent D）；`docs/tech-debt.md` 加 TD-59（session log 累积观察项）+ TD-58 v0.22 追踪（未再现）
+- **Docs**: `README.md` —— 内置 AI Agent 章节扩 eval harness + session 观测路径（sup 标签 `扩 v0.22.0`）；`docs/stages/v0.22-brainstorm.md` stage 4 ✅ + cycle 总结段 + v0.23+ 候选评估
+- **Changed**: `Cargo.toml`（0.21.0 → 0.22.0）+ `git tag v0.22.0`（annotated）
+- **Fixed**: `src/cli/def.rs` QUICK 帮助注释「≈ 27 query」→「= 26 query（monitor 无 L2 seed）」——stage 2 已实测 26 并测试锁定，注释漂移小修（brainstorm 步 11 小修范畴，零行为变更）
 
 ### v0.22 stage 3 — session observability 全套（Slice B，ADR-0032 D5）
 

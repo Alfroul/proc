@@ -273,7 +273,7 @@ VT100 终端完整录屏（v2 格式，保留 RGB 颜色 —— v1 旧版会褪�
 | `proc mcp serve --transport sse --port 8080`<sup>v0.17.0 · full 实装 v0.19.0</sup> | 启动 MCP server（SSE transport，多 client 并发 / 远程 agent 集成 / Web dashboard 场景；`current_thread` runtime 切到 `multi_thread worker_threads(4)` runtime + axum + tower StreamableHttpService 路由 MCP JSON-RPC over HTTP/SSE；详见 ADR-0027 §6）|
 | `proc mcp serve --transport sse --port 8080 --bind-addr 0.0.0.0`<sup>v0.19.0</sup> | SSE transport 全网卡监听（用户显式 opt-in，默认 `127.0.0.1` 仅本机；含 `proc_docker_rm` / `proc_usb_release` / `proc_record_start` 等写操作的 MCP tool 暴露到 LAN 需用户明确知晓风险）|
 
-### 内置 AI Agent（proc → LLM）<sup>v0.20.0 · 扩 v0.21.0</sup>
+### 内置 AI Agent（proc → LLM）<sup>v0.20.0 · 扩 v0.21.0 · 扩 v0.22.0</sup>
 
 与 MCP server 互补的另一个方向：MCP 是「外部 LLM → proc」（proc 暴露 46 tool 给 Claude Desktop / Cursor），内置 agent 是「**proc → LLM**」（proc 自身是 client，用户在终端用自然语言查询）。同一套 47 tool 的 Rust API 两条路径复用（[ADR-0030](docs/adr/0030-builtin-ai-agent.md)）。两个入口：**TUI Agent 面板**（v0.21，多轮流式 + y/n 确认，见下）+ **CLI `proc agent ask`**（v0.20，单轮批处理）。
 
@@ -302,6 +302,27 @@ proc agent ask --max-steps 5 "chrome 为什么占这么多内存？"  # 限制�
 
 # Anthropic 云端对照（opt-in feature + API key 走 env 不落盘）
 ANTHROPIC_API_KEY=sk-ant-... proc agent ask --provider anthropic "..."   # 需 cargo build --release --features anthropic
+```
+
+**Eval harness**<sup>v0.22.0</sup>（[ADR-0032](docs/adr/0032-eval-harness.md)）——`proc agent eval` 70 query 基准评测（L0 单步 23 / L1 单 tool 链 27 / L2 多步链 20），per-query 结果 JSON + 确定性失败模式分类（7 变体，不上 LLM-as-judge）+ markdown 报告：
+
+```bash
+proc agent eval                                  # FULL 70 query（E2B 实测 47m19s）
+proc agent eval --quick                          # QUICK 抽样 26 条（迭代冒烟用）
+proc agent eval --level 2                        # 只跑 L2 多步链
+proc agent eval --scenario docker --attempts 3   # 场景过滤 + 重试次数
+proc agent eval --output my.json                 # 指定结果 JSON（md 报告同 stem 产出）
+proc agent eval --compare a.json b.json          # 跨 run/模型对比报告（不实跑）
+```
+
+E2B 基线（v0.22 首跑，[归档报告](docs/eval/e2b-70q-v0.22.md)）：L0 17/23（74%）· L1 14/27（52%）· L2 full-chain 1/20 + chain-step 12/43（双口径）；失败直方图 output_degraded 21（30%——proc_finish 语法泄漏为主因）/ wrong_tool 10 / chain_incomplete 7。更强模型或 GBNF 开关复测时 `--compare` 一条命令即出对比列。
+
+**Session 观测**<sup>v0.22.0</sup>——TUI Agent 面板每次会话自动留档 JSONL（`~/.config/proc/sessions/`，`agent.toml [session].log = false` 可关；TextDelta 聚合落盘不逐 delta），离线提取 TTFT / 生成时长 / tool 轮数 / confirm 行为指标：
+
+```bash
+proc                                              # TUI 里用一轮 AI Agent 面板
+proc agent session-info ~/.config/proc/sessions/<file>.jsonl
+# 打印：TTFT / 生成时长 / delta 段数 / tool 轮数与 error / confirm 决策分布与延迟 + per-query 表
 ```
 
 **Tool registry 两层架构**（让 1.6GB 量化 2B 模型也能驱动 agent）：默认只注入 4 个 entry tool（`proc_ls` / `proc_metrics_system` / `proc_inspect` / `proc_help`，~600 token），剩余 43 个 tool 通过 `proc_help(category)` 元 tool 动态发现——agent 先问「docker 类有哪些 tool」，runner 把该类别 schema 加入后续轮的 tools 数组（token 预算 6K 封顶）。单轮 tool-context 从全 46 tool 注入的 ~15K token 降至 ~1.5K 峰值（**96% 减少**）。

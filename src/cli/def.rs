@@ -337,7 +337,7 @@ pub enum AgentSub {
         #[arg(long)]
         scenario: Vec<String>,
 
-        /// QUICK 模式：每 (scenario, level) 抽 1 条 ≈ 27 query
+        /// QUICK 模式：每 (scenario, level) 抽 1 条 = 26 query（monitor 无 L2 seed）
         #[arg(long)]
         quick: bool,
 
