@@ -16,6 +16,7 @@
 - **接线**：`agent.toml [session].log`（默认 true 可关，`deny_unknown_fields`）+ `AgentSession::spawn` 3 → 4 参（+recorder）+ `build_session` 按配置构造（`build_runner` 不接——session log 是 TUI 面板 session 层诉求）；运行时 UI 零改动
 - **测试**：`tests/test_agent_v0_22_stage_3.rs` 21 CI + 1 E2B `#[ignore]`（recorder seq 单调 / ts 非降 / delta 聚合上限（200×4 chars → ≤14 条）/ 8 变体映射 / 降级不 panic；analyze TTFT·时长·决策延迟数字断言 / 多 query 平均 / 坏行报行号 / query 外 error；session 端到端全生命周期日志序 + **confirm 决策旁路 roundtrip**（Denied 经换出通道透明回传 + 决策条目序先于 session_finished）；CLI parse / 格式化输出 / config 三态；E2B 真实链路 session log 冒烟 14.8s 通过）；既有 2 测试文件 spawn 调用点补 `disabled()`（SessionEvent 形状零改动的验证锚）+ stage-1 CLI stub 测试改真实临时文件 dispatch
 - E2B 冒烟：session log 真实链路（llama-cpp E2B 1 query 12.7s end_turn，正确列出 top 3 进程）+ `session-info` 真文件输出验证；eval 链路 stage 3 改动后回归冒烟 3/3 PASS
+- **E2B FULL 70 query 挂机完成并归档**（`docs/eval/e2b-70q-v0.22.md`）：QUICK 26 条 18m46s 冒烟 → FULL 47m19s（远低于 4.5-6.5h 预估）；**L0 17/23（74%）· L1 14/27（52%）· L2 full-chain 1/20 + chain-step 12/43（双口径首跑）**；失败直方图 output_degraded 21（55%）/ wrong_tool 10 / chain_incomplete 7，**零 LlmError 零 MaxSteps 零中断**（llama-server 全程稳定）；OutputDegraded 21/70 = 30% 是风险 6 的量化闭环（proc_finish 语法泄漏 + `<eos>` 重复为主因，GBNF 逃生舱留给 v0.23+ 数据决策）；与 v0.20 验收口径差（17/23 vs 23/23）主因是 text_ok 新增退化检测 + Docker daemon 未运行环境因素，非能力回归
 - 零新 deps；MCP tool 46 / agent catalog 47 不变；SessionEvent / ConfirmRequest / SessionCommand / run / run_streaming / dispatch 零改动
 
 ### v0.22 stage 2 — `proc agent eval` runner 实装（Slice A，ADR-0032）
