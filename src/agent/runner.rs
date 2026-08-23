@@ -191,6 +191,11 @@ pub struct AgentRunner {
     provider: Arc<dyn LlmProvider>,
     registry: Arc<ToolRegistry>,
     options: AgentOptions,
+    /// record tool 的跨调用状态（v0.23 stage 2，ADR-0033 D5）。CLI ask / eval
+    /// 走 complete 路径用 default（写 tool 在 dispatch_value 层已拦截，永不
+    /// 触达）；TUI AgentSession 经 [`AgentRunner::with_record_state`] 注入与
+    /// session 线程 / SessionHandle 共享的同一份。
+    record: super::session::RecordState,
 }
 
 impl AgentRunner {
@@ -203,7 +208,14 @@ impl AgentRunner {
             provider,
             registry: Arc::new(registry),
             options,
+            record: super::session::RecordState::default(),
         }
+    }
+
+    /// 注入共享录制状态（TUI AgentSession 路径；builder 模式与既有构造链一致）。
+    pub fn with_record_state(mut self, record: super::session::RecordState) -> Self {
+        self.record = record;
+        self
     }
 
     pub async fn run(&self, query: &str) -> Result<RunnerOutcome, LlmError> {
@@ -619,6 +631,7 @@ impl AgentRunner {
         confirmed_write: bool,
     ) -> ToolResult {
         let registry = Arc::clone(&self.registry);
+        let record = self.record.clone();
         let moved = super::types::ToolCall {
             id: call.id.clone(),
             name: call.name.clone(),
@@ -626,7 +639,7 @@ impl AgentRunner {
         };
         match tokio::task::spawn_blocking(move || {
             if confirmed_write {
-                dispatch::execute_confirmed_tool(&moved)
+                dispatch::execute_confirmed_tool(&moved, &record)
             } else {
                 execute_tool(&registry, &moved)
             }

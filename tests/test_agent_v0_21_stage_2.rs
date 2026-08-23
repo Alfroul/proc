@@ -30,8 +30,8 @@ use proc::agent::provider::{
 };
 use proc::agent::runner::{AgentOptions, AgentRunner, StopCause, StreamEvent};
 use proc::agent::session::{
-    AgentSession, ConfirmDecision, ConfirmRequest, MAX_HISTORY_TURNS, SessionCommand, SessionEvent,
-    SessionHandle, truncate_history,
+    AgentSession, ConfirmDecision, ConfirmRequest, MAX_HISTORY_TURNS, RecordState, SessionCommand,
+    SessionEvent, SessionHandle, truncate_history,
 };
 use proc::agent::tools::{catalog, dispatch};
 use proc::agent::types::{Message, Role, ToolCall};
@@ -593,14 +593,18 @@ async fn test_confirm_cancel_during_await_interrupts() {
 }
 
 #[tokio::test]
-async fn test_confirm_record_tools_unsupported() {
-    // 决策 8：record_start/stop 即使 Approved 也返「不支持」（跨调用子进程
-    // 保活需持久状态，v0.22+ 评估）。
+async fn test_confirm_record_start_approved_executes() {
+    // v0.23 stage 2 语义更新：record_start 经 Approved 后真实执行（RecordState
+    // 持久 handle，ADR-0033 D5）；output 指向 tempdir 无落盘副作用。
+    let output = std::env::temp_dir().join(format!(
+        "proc-v021-record-anchor-{}.prec",
+        std::process::id()
+    ));
     let (_provider, runner) = runner_with(
         ScriptedStreamProvider::new(vec![
             vec![tool_delta(
                 "proc_record_start",
-                json!({ "file_path": "x.prec" }),
+                json!({ "output": output.to_string_lossy(), "confirm": true }),
             )],
             finish_turn("ok"),
         ]),
@@ -618,7 +622,7 @@ async fn test_confirm_record_tools_unsupported() {
         .unwrap();
     assert!(!outcome.steps[0].is_error);
     // content 不在 outcome 里——经 provider 二轮 messages 验证不可达（scripted）。
-    // 断言放 is_error 语义 + 不 panic 即可（content 断言在 C 组 dispatch 直测）。
+    // 断言放 is_error 语义 + 不 panic 即可（content 断言在 v0.23 stage 2 A 组）。
 }
 
 // ===========================================================================
@@ -697,10 +701,10 @@ fn test_blocked_tool_result_shape() {
 #[test]
 fn test_execute_confirmed_tool_kill_missing_pid_is_business_error() {
     // Approved 真执行 + 不存在 PID：走 kill_process 业务路径（非 blocked）。
-    let result = dispatch::execute_confirmed_tool(&call(
-        "proc_kill",
-        json!({ "pid": MISSING_PID, "confirm": true }),
-    ));
+    let result = dispatch::execute_confirmed_tool(
+        &call("proc_kill", json!({ "pid": MISSING_PID, "confirm": true })),
+        &RecordState::default(),
+    );
     let v: Value = serde_json::from_str(&result.content).unwrap();
     assert!(
         v.get("blocked").is_none(),
@@ -715,20 +719,27 @@ fn test_execute_confirmed_tool_kill_missing_pid_is_business_error() {
 
 #[test]
 fn test_execute_confirmed_tool_missing_args_is_error() {
-    let result = dispatch::execute_confirmed_tool(&call("proc_kill", json!({})));
+    let result =
+        dispatch::execute_confirmed_tool(&call("proc_kill", json!({})), &RecordState::default());
     assert!(result.is_error, "参数缺失 → is_error=true");
     let v: Value = serde_json::from_str(&result.content).unwrap();
     assert_eq!(v["ok"], json!(false));
 }
 
 #[test]
-fn test_execute_confirmed_tool_record_unsupported() {
-    let result = dispatch::execute_confirmed_tool(&call(
-        "proc_record_start",
-        json!({ "file_path": "x.prec", "confirm": true }),
-    ));
-    assert!(!result.is_error);
-    assert!(result.content.contains("不支持"), "{}", result.content);
+fn test_execute_confirmed_tool_record_missing_output_is_error() {
+    // v0.23 stage 2 语义更新：record_start 不再返「不支持」，缺 output 参数
+    // 是 dispatch 错误（真实执行语义，ADR-0033 D5）。
+    let result = dispatch::execute_confirmed_tool(
+        &call("proc_record_start", json!({ "confirm": true })),
+        &RecordState::default(),
+    );
+    assert!(result.is_error, "output 缺失 → is_error=true");
+    assert!(
+        result.content.contains("output is required"),
+        "{}",
+        result.content
+    );
 }
 
 // ===========================================================================

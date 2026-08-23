@@ -55,18 +55,25 @@ stage 1 小场景冒烟（附录 B）判定链路兼容性：**结论不兼容**
 - **参考指标**：L2 双口径（多步规划是 E2B 能力边界，v2 缺参引导若生效，L2 反问缺参型失败应向 chain 命中迁移）。
 - **拍板输出**：agent.toml / prompt 推荐值（README/doc 注明）+ 是否写默认值。**无改善或退化则默认配置不动**（system.md 回滚或保持 v1）；改善则 prompt v2 落地即默认（文本进代码本来就是默认路径），GBNF 开关维持注释态推荐（用户配置层，不进代码默认）。
 
-### D5：record_start/stop agent 语义（stage 2 实装输入）
+### D5：record_start/stop agent 语义（stage 2 已实装；「录制范围」措辞按实装修订）
 
 | 维度 | 设计 |
 |---|---|
-| **录制范围** | agent 调 proc_record_start 经 TUI confirm（y）后开始录制**整个终端屏幕**（与手动 R 键同款 VT100 recording v2 / `.prec`），录制期间 AgentPanel 会话继续（用户可见后续对话被录进回放） |
+| **录制范围** | agent 调 proc_record_start 经 TUI confirm（y）后 spawn headless 录屏子进程（`proc record --no-tui`，ratatui TestBackend 合成 120x40 系统仪表盘，与 MCP `proc mcp` 路径同款语义）——录制**后台系统监控画面**（进程列表 / DNS / 指标面板），**不含 AgentPanel 对话与真实终端内容**；输出格式与手动 R 键同款 VT100 recording v2 / `.prec`。（stage 1 原稿「录制整个终端屏幕 / 后续对话被录进回放」与复用路径实装不符，按风险 4 协议以实装为准修订） |
 | **句柄持有** | record handle 由 **AgentSession 层**持有（跨 tool 调用保活——query 之间不丢）；复用 MCP 层 `proc mcp` 既有 record 子进程管理（ADR-0029 record_handle pattern，不重写） |
 | **停止路径 ①** | 模型调 proc_record_stop（confirm y）显式停——返回落盘路径与文件信息，模型可在 answer 里告诉用户 |
-| **停止路径 ②③** | Ctrl+D teardown / 会话异常 shutdown → 自动 stop 落盘（防孤儿录制进程——复用 App::shutdown 防孤儿模式），面板 Notice 提示「录屏已自动保存至 \<path\>」 |
+| **停止路径 ②③** | Ctrl+D teardown / 会话异常 shutdown → 自动 stop 落盘（防孤儿录制进程——复用 App::shutdown 防孤儿模式），Notice 双落点提示「录屏已自动保存至 \<path\>」（AgentPanel ChatEntry + App status_message——面板退出后 status bar 仍可见） |
 | **CLI ask 拦截** | 单轮进程退出录制即死——继续拦截，文案改「录屏 tool 仅 TUI AgentPanel 会话支持（CLI 单轮进程无法保持录制）」 |
 | **eval 口径** | 不受影响（eval complete 路径无 confirm 通道，两 tool 永远 blocked——D6 论证） |
 
-**stage 2 实装清单预览**（设计稿下游，stage 2 doc 编写参考）：`src/agent/session.rs`（AgentSession 持 handle + teardown 钩子）+ `src/agent/tools/dispatch.rs`（`execute_confirmed_tool` 两分支改真实执行 + CLI 拦截文案）+ confirm_summary 已就位不动 + 测试（TUI session 端到端 / 孤儿清理 / CLI 拦截不变锚）。
+**stage 2 实装清单预览 → 落地注记（2026-08-23 实装完成）**：
+
+- `src/agent/session.rs`：新类型 `RecordState`（`child: Arc<Mutex<Option<Child>>>` + `file_path: Arc<Mutex<Option<String>>>` 双槽——file_path 记忆 start 落盘路径）+ `start` / `stop` / `teardown_stop` 三方法（全部薄包 MCP `make_record_start_json` / `make_record_stop_json`）；`AgentSession::spawn` 内建状态（**签名不变，builder.rs 零改动**），session 线程 clone 喂 runner + 循环退出兜底 teardown，`SessionHandle` clone 供 `stop_orphan_recording()`
+- `src/agent/runner.rs`：`AgentRunner` 加 `record` 字段 + `with_record_state` 注入（CLI ask / eval 走 default——complete 路径 dispatch_value 层拦截，永不触达）
+- `src/agent/tools/dispatch.rs`：`execute_confirmed_tool(call, &RecordState)` 两分支真实执行（catalog schema 参数 `output`/`duration`，兼容 MCP 风格 `file_path`/`duration_secs`）；**stop 无参语义**——agent catalog 的 `proc_record_stop` 是 no_params，忽略模型参数以 start 记忆值为准（MCP 版的 file_path 匹配校验在 agent 侧退化；无录制返业务错误非 is_error）；CLI 拦截文案已按上表落地
+- `src/app.rs`：`teardown_agent_session` 在 interrupt/shutdown 前调 `stop_orphan_recording()`（App::shutdown 同路径覆盖 Ctrl+C）；session_loop 退出兜底 `teardown_stop()`（Handle 直接 drop 未走 App teardown 的场景，静默幂等双保险）
+- confirm_summary 两行（dispatch.rs L126-127）已就位不动；测试三组（`tests/test_agent_v0_23_stage_2.rs` 端到端 + handle 级孤儿清理 + CLI 拦截锚，`src/agent/session.rs` 内联单元组 fake child kill / 幂等 / 无录制）
+- **附录 A 修订 2 核对**：「录屏」在写操作枚举中的引导（先调 proc_help 发现 → 正常调用 → blocked 才文字解释）与实装一致，**不动**（措辞引导调用行为，不依赖录制内容语义）
 
 ### D6：record 落地不破 eval 基线的依据归档
 
@@ -160,7 +167,7 @@ status=400 body={"error":{"code":400,"message":"Cannot use custom grammar constr
 ## Migration path
 
 - **v0.23 stage 1 Spike**（本 ADR 落地）：D1~D6 + 附录 A prompt v2 措辞稿 + 附录 B 冒烟实测结论
-- **v0.23 stage 2 Slice A**：record_start/stop agent 侧实装（D5 语义 + 实装清单预览）
+- **v0.23 stage 2 Slice A**（✅ 2026-08-23 完成）：record_start/stop agent 侧实装（D5 语义 + 上方落地注记）
 - **v0.23 stage 3 Slice B**：实验矩阵 2 列 FULL 挂机（prompt v2 / 可选终验）+ `--compare` 矩阵报告 + 归档 `docs/eval/` + 最优配置拍板（D4 标准）
 - **v0.24+**：实验列作 RAG cycle 模型底座决策输入；GBNF 复测挂在 llama-server 升级节点
 

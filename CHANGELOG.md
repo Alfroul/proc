@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+### v0.23 stage 2 — proc_record_start/stop agent 侧实装：RecordState 持久 handle + teardown 防孤儿 + CLI 拦截文案（47 tool 全可用拼图补全）
+
+- **Added**: `src/agent/session.rs` 新类型 **`RecordState`**（`child: Arc<Mutex<Option<Child>>>` 跨 tool 调用保活 + `file_path: Arc<Mutex<Option<String>>>` 记忆 start 落盘路径——agent catalog 的 `proc_record_stop` 是 no_params，stop/teardown 靠记忆值定位文件）+ `start` / `stop` / `teardown_stop` 三方法全部薄包 MCP 既有 `make_record_start_json` / `make_record_stop_json`（ADR-0029 record_handle pattern 复用，不重写）；`AgentSession::spawn` 内建状态（**签名不变，builder.rs 零改动**）——session 线程 clone 喂 runner + 循环退出兜底 teardown，`SessionHandle` clone 暴露 **`stop_orphan_recording()`** teardown 钩子
+- **Added**: `src/agent/runner.rs` —— `AgentRunner` 加 `record` 字段 + `with_record_state` 注入（CLI ask / eval 走 default——complete 路径 `dispatch_value` 层拦截永不触达，D6 不破基线口径不变）
+- **Changed**: `src/agent/tools/dispatch.rs` —— `execute_confirmed_tool(call, &RecordState)` 对 `proc_record_start` / `proc_record_stop` 两分支改**真实执行**（TUI confirm y 后 spawn headless 录屏子进程 / kill + flush 落盘读 metadata；参数映射 catalog `output`/`duration` 兼容 MCP 风格 `file_path`/`duration_secs`；stop 无参语义以记忆值为准，无录制返业务错误非 is_error）；CLI / eval 拦截文案改**「录屏 tool 仅 TUI AgentPanel 会话支持（CLI 单轮进程无法保持录制）」**（其余 6 写 tool 文案逐字不变）；`confirm_summary` 已就位不动；`WRITE_TOOL_NAMES` / catalog 47 / MCP 46 名单零变化
+- **Changed**: `src/app.rs::teardown_agent_session` —— 在 interrupt/shutdown **之前**调 `stop_orphan_recording()`（录制 kill + flush 完成后提示才真实），Notice 双落点（AgentPanel ChatEntry + App status_message——面板退出后 status bar 仍可见；App::shutdown 同路径自动覆盖 Ctrl+C）；session_loop 退出兜底 `teardown_stop()`（Handle 直接 drop 未走 App teardown 的场景，静默幂等双保险）
+- **Docs**: ADR-0033 **D5「录制范围」措辞按实装修订**（stage 1 风险 4 协议兑现）——复用的 `proc record --no-tui` 子进程是 TestBackend 合成 120x40 系统仪表盘（与 MCP 路径同款语义），录后台系统监控画面（进程列表 / DNS / 指标面板），**不含 AgentPanel 对话与真实终端内容**（原稿「整个终端屏幕 / 对话被录进回放」删除）+ 落地注记（session/runner/dispatch/app 四处 + stop 无参语义）；附录 A 修订 2 的「录屏」枚举核对一致不动
+- **Tests**: 新 `tests/test_agent_v0_23_stage_2.rs` 三组（A TUI session 端到端 ×2——confirm Approved 后 start/stop 真实执行经 provider 二轮 messages 断言 / B handle 级孤儿清理 ×1——RecordState 跨线程共享 / C CLI 拦截不变锚 ×2）+ `src/agent/session.rs` 内联单元 ×3（fake child kill + exit_code / 幂等 / 无录制 None）；`tests/test_agent_v0_21_stage_2.rs` 两「不支持」锚测试语义更新（`test_confirm_record_start_approved_executes` / `test_execute_confirmed_tool_record_missing_output_is_error`）+ 2 调用点签名联动
+- **回归**: 全量 **1689 / 0 / 9（默认）+ 1713 / 0 / 10（anthropic）**（+8 测试；一次全量首轮 `test_session_drop_during_confirm_does_not_hang` 在编译+满载下 5s 时序窗口 flaky，复跑全绿 + 单测隔离复跑绿）+ fmt / clippy 双档 / build 双档 / bench --no-run 全过；MCP tool 46 / agent catalog 47 不变
+
 ### v0.23 stage 1 — 架构 Spike：ADR-0033 实验设计 + GBNF 冒烟结论 + prompt v2 措辞稿 + record 语义设计（零业务代码）
 
 - **Docs**: `docs/adr/0033-eval-experiments-and-record-tools.md`（新）—— D1~D6 六决策（D1 实验矩阵：GBNF × prompt 两变量漏斗式 + 文件名区分 run 零代码 / D2 run 记录方案 / D3 GBNF 冒烟降级路径——**实测触发** / D4 最优配置拍板标准 / D5 record_start/stop agent 语义六维表 + stage 2 实装清单预览 / D6 落地不破 eval 基线三重论证）+ 附录 A prompt v2 措辞稿（缺参引导 + 写操作发现链 2 处精确 diff，stage 3 才落地）+ 附录 B GBNF 冒烟判定标准与实测结论；`docs/adr/README.md` 加索引行

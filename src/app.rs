@@ -1107,6 +1107,17 @@ impl App {
                 .resolve_confirm(ConfirmDecision::Denied);
         }
         if let Some(s) = self.agent_session.take() {
+            // v0.23 stage 2（ADR-0033 D5 停止路径②③）：录制进行中自动 stop
+            // 落盘（防孤儿），提示双落点——面板 Notice（仍在面板时）+ App
+            // status_message（面板退出后 status bar 仍可见）。置于 interrupt/
+            // shutdown 之前（kill + flush 完成后提示才真实）。
+            if let Some(notice) = s.stop_orphan_recording() {
+                self.agent_panel
+                    .panel_mut()
+                    .entries
+                    .push(crate::view_models::ChatEntry::Notice(notice.clone()));
+                self.status_message = Some(notice);
+            }
             s.interrupt();
             s.shutdown();
             let deadline = Instant::now() + std::time::Duration::from_secs(3);

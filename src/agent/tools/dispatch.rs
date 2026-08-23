@@ -146,9 +146,13 @@ pub fn blocked_tool_result(call: &ToolCall) -> crate::agent::types::ToolResult {
 
 /// 写 tool 真实执行（Approved 路径；调用方已注入 `confirm: true`）。
 ///
-/// record_start/stop 需要跨调用子进程保活的持久 handle（ADR-0029），agent
-/// 侧暂不支持（brainstorm 决策 8：推迟 v0.22+ 评估）。
-fn execute_write_tool(name: &str, arguments: &Value) -> (Value, bool) {
+/// record_start/stop 经 `RecordState` 跨调用保活子进程（v0.23 stage 2 实装，
+/// ADR-0033 D5——ADR-0029 record_handle pattern 的 AgentSession 层复用）。
+fn execute_write_tool(
+    name: &str,
+    arguments: &Value,
+    record: &crate::agent::session::RecordState,
+) -> (Value, bool) {
     let v = match name {
         "proc_kill" => {
             let Some(pid) = u32_of(arguments, "pid") else {
@@ -222,10 +226,22 @@ fn execute_write_tool(name: &str, arguments: &Value) -> (Value, bool) {
                 bool_of(arguments, "force"),
             )
         }
-        "proc_record_start" | "proc_record_stop" => err_json(
-            "该 tool 需要跨调用子进程保活的持久状态，agent 侧暂不支持\
-             （v0.21 决策 8，推迟 v0.22+ 评估）；请向用户解释并给出等价 CLI 命令",
-        ),
+        "proc_record_start" => {
+            // agent catalog schema：output / duration（兼容 MCP 风格 file_path）。
+            let Some(output) =
+                str_of(arguments, "output").or_else(|| str_of(arguments, "file_path"))
+            else {
+                return (err_json("output is required (recording file path)"), true);
+            };
+            record.start(
+                bool_of(arguments, "confirm").unwrap_or(false),
+                output,
+                u64_of(arguments, "duration").or_else(|| u64_of(arguments, "duration_secs")),
+            )
+        }
+        // agent catalog 是 no_params：忽略模型参数，路径取 start 记忆值。
+        // 无录制是业务错误（ok:false），is_error 不置位（与 kill 同款契约）。
+        "proc_record_stop" => record.stop(),
         _ => return (err_json(format!("unknown write tool '{name}'")), true),
     };
     (v, false)
@@ -233,8 +249,11 @@ fn execute_write_tool(name: &str, arguments: &Value) -> (Value, bool) {
 
 /// confirm Approved 后的写 tool 执行入口：返回值与 [`execute_tool`] 同款
 /// 契约（截断 + PII 过滤）。仅在 runner 流式路径 confirm 通过后可达。
-pub fn execute_confirmed_tool(call: &ToolCall) -> crate::agent::types::ToolResult {
-    let (value, is_error) = execute_write_tool(&call.name, &call.arguments);
+pub fn execute_confirmed_tool(
+    call: &ToolCall,
+    record: &crate::agent::session::RecordState,
+) -> crate::agent::types::ToolResult {
+    let (value, is_error) = execute_write_tool(&call.name, &call.arguments, record);
     let content = truncate_result(&apply_pii_filter(&value.to_string()));
     crate::agent::types::ToolResult {
         tool_call_id: call.id.clone(),
@@ -247,13 +266,22 @@ pub fn execute_confirmed_tool(call: &ToolCall) -> crate::agent::types::ToolResul
 const DEFAULT_LS_LIMIT: usize = 20;
 
 fn blocked_json(name: &str) -> Value {
+    // v0.23 stage 2（ADR-0033 D5）：record 两 tool 在 CLI/eval 的专属文案——
+    // 不是 confirm 通道问题，是单轮进程退出录制即死（TUI AgentSession 持久
+    // handle 才可用）。其余 6 写 tool 文案不变。
+    let error = if name == "proc_record_start" || name == "proc_record_stop" {
+        "录屏 tool 仅 TUI AgentPanel 会话支持（CLI 单轮进程无法保持录制）。\
+         请向用户解释，并建议在 TUI（直接运行 proc 进入 Agent 面板）中使用。"
+    } else {
+        "写操作已拦截：proc agent ask 是非交互单轮模式，没有确认（y/n）通道。\
+         请向用户解释影响并给出等价的 proc 命令行（如 proc kill <pid> / \
+         proc eject --release E:），让用户自己执行。"
+    };
     json!({
         "ok": false,
         "blocked": true,
         "tool": name,
-        "error": "写操作已拦截：proc agent ask 是非交互单轮模式，没有确认（y/n）通道。\
-                  请向用户解释影响并给出等价的 proc 命令行（如 proc kill <pid> / \
-                  proc eject --release E:），让用户自己执行。",
+        "error": error,
     })
 }
 
