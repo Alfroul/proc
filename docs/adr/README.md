@@ -26,6 +26,7 @@
 | [0030](./0030-builtin-ai-agent.md) | 内置 AI agent + Tool registry 两层架构 | Accepted | v0.20.0 阶段 1 |
 | [0031](./0031-tui-agent-panel.md) | TUI AgentPanel + AgentSession 流式会话架构 | Accepted | v0.21.0 阶段 1 |
 | [0032](./0032-eval-harness.md) | `proc agent eval` 评测 harness + session observability | Accepted | v0.22.0 阶段 1 |
+| [0033](./0033-eval-experiments-and-record-tools.md) | eval 变量实验（GBNF × prompt v2）+ proc_record_start/stop agent 侧支持 | Accepted | v0.23.0 阶段 1 |
 
 ## ADR 模板
 

@@ -5,6 +5,15 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### v0.23 stage 1 — 架构 Spike：ADR-0033 实验设计 + GBNF 冒烟结论 + prompt v2 措辞稿 + record 语义设计（零业务代码）
+
+- **Docs**: `docs/adr/0033-eval-experiments-and-record-tools.md`（新）—— D1~D6 六决策（D1 实验矩阵：GBNF × prompt 两变量漏斗式 + 文件名区分 run 零代码 / D2 run 记录方案 / D3 GBNF 冒烟降级路径——**实测触发** / D4 最优配置拍板标准 / D5 record_start/stop agent 语义六维表 + stage 2 实装清单预览 / D6 落地不破 eval 基线三重论证）+ 附录 A prompt v2 措辞稿（缺参引导 + 写操作发现链 2 处精确 diff，stage 3 才落地）+ 附录 B GBNF 冒烟判定标准与实测结论；`docs/adr/README.md` 加索引行
+- **GBNF 冒烟实测结论（判定性负结果）**：llama-server b8685 显式拒绝 grammar + tools 同传（400 `"Cannot use custom grammar constraints with tools."`，performance-diagnose L0 + usb L1 共 12 请求全部零生成）——**GBNF 列移除，stage 3 实验矩阵缩为 2 列**（prompt v2 + 可选终验）；ADR-0030 决策 C 逃生舱状态更新为「tools 协议模式下结构性不可用」；冒烟后 agent.toml 已还原（diff 为空）
+- **record 语义设计稿定稿**（stage 2 实装输入）：AgentSession 层持 handle 跨调用保活 + 三停止路径（显式 stop / teardown 自动 stop 落盘防孤儿 / shutdown）+ CLI ask 拦截文案「仅 TUI AgentPanel 会话支持」+ eval 口径不受影响
+- **回归**：全量 1681 / 0 / 9（默认）+ 1705 / 0 / 10（anthropic）与开工一致（零代码改动）；MCP tool 46 / agent catalog 47 不变
+
 ## [0.22.0] - 2026-08-22
 
 ### v0.22.0 cycle 完结 — Eval harness + session Observability cycle
