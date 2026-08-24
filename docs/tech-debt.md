@@ -685,6 +685,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.20 stage 4 决策**：归档 v0.21+（TD-56 / TD-57 同批验证）。
 
+**v0.23 cycle 追踪**：无 key 第 4 个 cycle open（v0.20/0.21/0.22/0.23，v0.23 brainstorm 决策 3 拍板不跑）；闭环路径不变——有 key 后 `ANTHROPIC_API_KEY=... proc agent eval --provider anthropic --output ...` 一条命令三连闭环（终态确认见 REVIEW-v0.23 观察 4）。
+
 ### TD-56（REVIEW-v0.20 P2-2）：Anthropic model ID 未对真实 API 验证
 
 **位置**：`src/agent/anthropic_provider.rs::DEFAULT_MODEL`（`claude-sonnet-4-6`，brainstorm 决策 9 写入）
@@ -697,6 +699,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.20 stage 4 决策**：归档 v0.21+（与 TD-55 同批）。
 
+**v0.23 cycle 追踪**：无 key 继续 open（随 TD-55 同批，见其追踪行）。
+
 ### TD-57（REVIEW-v0.20 P2-3）：Anthropic nudge 路径连续 user 消息实测缺失
 
 **位置**：`src/agent/anthropic_provider.rs::messages_to_anthropic`（空 assistant 消息跳过逻辑，stage 4 决策 B）
@@ -708,6 +712,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **修复方案**：TD-55 验收跑完后确认（50 query 若无空响应则路径未触发，保留观察）；如需修复在 `messages_to_anthropic` 合并相邻 user 文本消息。
 
 **v0.20 stage 4 决策**：归档 v0.21+（随 TD-55 顺带覆盖）。
+
+**v0.23 cycle 追踪**：无 key 继续 open（随 TD-55 顺带覆盖，见其追踪行）。
 
 ### TD-58（REVIEW-v0.21 P2）：`test_alert::test_metric_extract_process_cpu` 并发 flaky（观察项）
 
@@ -723,6 +729,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.22 cycle 追踪**：整个 cycle 4 次开工基线验证（stage 1/2/3/4 双档）均未再现。继续观察，原判不动。
 
+**v0.23 cycle 追踪**：各 stage 开工基线验证均未再现。继续观察，原判不动（stage 2 一次 `test_session_drop_during_confirm_does_not_hang` 编译+满载 5s 窗口 flaky 系另一测试，复跑绿，不并入本条）。
+
 ### TD-59（REVIEW-v0.22 P2）：session log 累积无轮转 / 清理（观察项）
 
 **位置**：`src/agent/session_log.rs::SessionRecorder::start`（`dirs_config_dir()/sessions/<utc>-<provider>.jsonl`）
@@ -734,6 +742,30 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **修复方案**（触发时实施，半天内）：最简清理——proc 启动时删 N 天前 sessions 文件（TUI 启动路径一次性 glob + retain），或 sessions 目录体积上限 LRU。不做按大小轮转（会话粒度文件天然是轮转单元）。
 
 **v0.22 stage 4 决策**：归档观察项。触发条件 = 用户磁盘占用可感知 / sessions 目录上万文件。归档目的：不让「不预实现」变成「永不处理」。
+
+### TD-60（REVIEW-v0.23 P2）：prompt v3 候选——修订 2（写操作发现链）单独实验
+
+**位置**：`src/agent/prompts/system.md`（终态 v1；v2 措辞稿留 [ADR-0033 附录 A](../adr/0033-eval-experiments-and-record-tools.md) 备查，修订 2 段独立可用）
+
+**现状**：v0.23 stage 3 prompt v2 双列实验（[归档](../eval/promptv2-70q-v0.23.md)）整体拍板「无明确增益 revert 回 v1」——但修订 2（写操作发现链：先 proc_help 发现并正常调用，blocked 后再解释 + 等价命令行）机制单独生效有 3 处证据（#21 列 ② 完整执行演示链 proc_help→proc_eject→proc_eject_status / idx63 两轮一致通过 / idx18 blocked 后行为符合措辞预期）；与修订 1（缺参引导）捆绑实验时整体增益落 E2B 方差带内（±3/±6）无法分离归因，且修订 1 有 L2 回退嫌疑（chain_incomplete +3/+4 两轮同向）。
+
+**影响**：写操作类 query 的发现链引导仍是 v1 措辞（直接解释为主）——REVIEW-v0.21 观察 3 / v0.22 #21 的原始痛点未被本轮实验修复。
+
+**修复方案**（v0.24+ 实施时）：单独 diff 修订 2（不含修订 1）→ QUICK 冒烟 → FULL 三列（基线 / v3 / 复跑方差列），按方差带标尺解读（单列差异 < ±3 通过数不可单独归因）；可与 v0.24 模型底座对比列同矩阵跑摊薄挂机成本。
+
+**v0.23 stage 4 决策**：归档 v0.24+（与 RAG cycle 一并评估）。理由：单变量复验成本一次 FULL ~47m + 措辞稿已备；v3 落地与否由数据说话（与 v2 同款 D4 保守标准）。
+
+### TD-61（REVIEW-v0.23 P2）：GBNF grammar × tools 复测（观察项，挂 llama-server 升级节点）
+
+**位置**：`agent.toml [llama-cpp] grammar_file = "tool_call"`（注释态）→ llama-server 请求体 grammar 字段（`src/agent/builder.rs` 接线）
+
+**现状**：ADR-0033 附录 B 判定性结论——llama-server `b8685` 对 grammar + tools 同传的请求显式 400 拒绝（`"Cannot use custom grammar constraints with tools."`，冒烟 12 请求零生成），**tools 协议模式下结构性不可用**；结论绑定该版本（升级 llama.cpp 后互斥校验若放开可重开）。
+
+**影响**：output_degraded 21 次（E2B 失败大头，proc_finish 泄漏型为主）的零代码修复路径暂时关闭——进一步改善杠杆只剩模型升级（v0.24 RAG cycle 一并决策）。
+
+**修复方案**（触发时实施）：升级 llama.cpp 后按附录 B 判定表重跑冒烟（smoke1 L0 3×2 即可判定——请求校验层错误与场景无关）；若互斥放开，GBNF 单变量列复入对比矩阵（预期消灭 proc_finish 泄漏型退化）。
+
+**v0.23 stage 4 决策**：观察项，挂 llama-server 升级节点，不主动排期。归档目的：不让「结构性不可用」的版本绑定结论变成永久结论。
 
 ---
 

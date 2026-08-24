@@ -317,6 +317,8 @@ proc agent eval --compare a.json b.json          # 跨 run/模型对比报告（
 
 E2B 基线（v0.22 首跑，[归档报告](docs/eval/e2b-70q-v0.22.md)）：L0 17/23（74%）· L1 14/27（52%）· L2 full-chain 1/20 + chain-step 12/43（双口径）；失败直方图 output_degraded 21（30%——proc_finish 语法泄漏为主因）/ wrong_tool 10 / chain_incomplete 7。更强模型或 GBNF 开关复测时 `--compare` 一条命令即出对比列。
 
+v0.23 变量实验（[ADR-0033](docs/adr/0033-eval-experiments-and-record-tools.md)，[实验归档](docs/eval/promptv2-70q-v0.23.md)）——两条候选修复路径均以数据关闭：**GBNF** 逃生舱结构性不可用（llama-server 对 grammar × tools 同传显式 400 拒绝，冒烟 12 请求判定性，结论绑定 llama-server b8685）；**prompt v2** 措辞无明确增益（净通过 33/35 vs 基线 32，落 E2B 方差带内 → 保守 revert 回 v1）。**E2B 方差带首次量化**：同 binary 同配置复跑 6 query 纯翻转——单次 run 的 ±3 通过数 / ±6 失败模式计数在噪声内，`--compare` 单列差异小于此量级不可单独归因（v0.24 模型底座决策的解读标尺）。E2B 画像维持基线，进一步改善的杠杆是模型升级（v0.24 与 RAG 一并评估）。另：v0.23 起 agent catalog **47 tool 全部真实可用**（录屏 tool 在 TUI Agent 面板经 y/n confirm 真实执行；CLI 单轮路径维持拦截——跨调用保活仅 TUI 会话支持）。
+
 **Session 观测**<sup>v0.22.0</sup>——TUI Agent 面板每次会话自动留档 JSONL（`~/.config/proc/sessions/`，`agent.toml [session].log = false` 可关；TextDelta 聚合落盘不逐 delta），离线提取 TTFT / 生成时长 / tool 轮数 / confirm 行为指标：
 
 ```bash

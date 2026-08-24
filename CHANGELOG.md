@@ -5,7 +5,36 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.23.0] - 2026-08-24
+
+### v0.23.0 cycle 完结 — eval 变量实验（双负结果）+ record agent 侧实装 cycle
+
+v0.23 cycle 是 proc 首个「决策型」轻 cycle（净 diff ~2000 行级：src +216/-13 / tests +412/-19 / docs +1384/-1，13 文件）——**v0.22 建成测量层，v0.23 用测量层做受控实验拍板配置**。交付主体是决策 + 数据归档：GBNF / prompt v2 两条候选修复路径以数据双双关闭（GBNF 结构性不可用——llama-server b8685 显式拒绝 grammar × tools 同传，12 请求判定性；prompt v2 无明确增益——净通过增益落 E2B 方差带内，D4 保守拍板 revert 回 v1），**E2B 方差带首次跨 run 量化**（同配置复跑 6 query 纯翻转 → ±3 通过数 / ±6 失败模式计数——未来所有 `--compare` 单列差异的解读标尺）；工程侧补全 agent tool 拼图最后两块（proc_record_start/stop agent 侧实装——RecordState 跨调用保活 + teardown 防孤儿，**47 tool 全部真实可用**，「不支持」清单清零）。E2B 画像（L0 74% / L1 52% / L2 full-chain 5% / degraded 30%）维持 v0.22 基线——进一步改善的杠杆只剩模型升级，推 v0.24 与 RAG cycle 一并决策（brainstorm 决策 2 既定）。MCP tool 46 / agent catalog 47 均不变 + 1 份新 ADR-0033（D1~D6 + 附录 A 措辞稿 + 附录 B 冒烟判定标准）+ Cargo deps +0。详见 [REVIEW-v0.23](docs/reviews/REVIEW-v0.23.md)（P0 0 / P1 0 / P2 4：TD-55~57 仍 open + 新 TD-60 prompt v3 候选 / TD-61 GBNF 复测）。
+
+**核心交付落地范围**：
+
+- **项 1 实验设计 Spike + GBNF 冒烟**（stage 1）：ADR-0033 六决策（D1 矩阵 / D2 run 记录 / D3 冒烟降级 / D4 拍板标准 / D5 record 语义 / D6 不破基线三重论证）+ 附录 A prompt v2 措辞稿 + 附录 B GBNF 冒烟判定标准 4 项与实测结论（判定性负结果：请求级硬校验，矩阵缩 2 列，省一次 ~47m 挂机）
+- **项 2 record_start/stop agent 侧实装**（stage 2）：`RecordState`（child + file_path 双槽）三方法薄包 MCP 既有 helper + `AgentSession::spawn` 内建状态（签名不变）+ teardown 双保险（App 主动 + session_loop 兜底幂等）+ CLI 拦截文案「仅 TUI 会话支持」+ 三组测试（TUI 端到端 / 孤儿清理 / CLI 锚）
+- **项 3 实验矩阵 2 列 + D4 拍板**（stage 3）：prompt v2 落地（独立 commit 先于挂机——run meta 干净）→ 列 ① 37m07s + 列 ② 复跑 38m43s → `--compare` 三列矩阵 → 归档 `docs/eval/promptv2-70q-v0.23.md` → **拍板 revert 回 v1**（`c043597`）；修订 2 机制 3 处证据记 v3 候选（TD-60）
+
+**关键数字**：
+
+| 指标 | v0.22.0 基线 | v0.23.0 落地 |
+|---|---|---|
+| 全量回归 | 1681 passed / 0 failed / 9 ignored（默认）+ 1705（anthropic）| **1689 passed / 0 failed / 9 ignored（默认）+ 1713 / 0 / 10（anthropic）**（+8 CI，0 failed 全程）|
+| dispatch「不支持」tool | 2（record_start/stop）| **0——47 tool 全部真实可用**（TUI confirm 通道；CLI/eval 维持拦截）|
+| eval 实验结论 | 修复路径未实验（候选清单）| **双负结果归档**：GBNF 结构性不可用（12 请求判定）+ prompt v2 方差带内 revert（净通过 33/35 vs 32）|
+| E2B 方差带 | 未量化（同 query 两次 attempt 可不同）| **±3 通过数 / ±6 失败模式计数**（6 query 纯翻转量化——`--compare` 解读标尺）|
+| MCP tool / agent catalog | 46 / 47 + proc_finish | **不变**（record 落地不加——catalog 早在册，D6 论证 2）|
+| ADR | 0032 | **新 ADR-0033**（D1~D6 + 两附录）|
+| Cargo deps | +0 | **+0** |
+
+### v0.23.0 阶段 4 — Review + 收尾（REVIEW-v0.23 + CHANGELOG + README + tag v0.23.0）
+
+- **Docs**: `docs/reviews/REVIEW-v0.23.md`（新）—— 4 stage 四维度审查 + 实测观察归档 4 条（GBNF 判定性负结果的时间线价值——冒烟先行 12 请求换一整列挂机 / prompt v2 双列实验 + E2B 方差带首次量化——单列数据不可单独归因 / record 落地与 eval 口径隔离——D6 三重论证的实测兑现 / TD-55~57 终态确认——无 key 第 4 个 cycle open）+ Findings（P0 0 / P1 0 / P2 4）+ cycle 数据汇总 + v0.24+ 候选方向（RAG 主体 + 更强模型底座一并决策 / prompt v3 / TD-55~57 / GBNF 复测 / Multi-agent 维持 RAG 后）+ 模型底座决策解读纪律（±3/±6 以下不归因）
+- **Docs**: `docs/tech-debt.md` —— 新增 TD-60（prompt v3 候选——修订 2 单独实验）+ TD-61（GBNF 复测挂 llama-server 升级节点）+ TD-55~57 / TD-58 v0.23 追踪行
+- **Docs**: `README.md` —— eval harness 段补 v0.23 实验结论（两负结果 + 方差带标尺 + 47 tool 全可用）；`docs/stages/v0.23-brainstorm.md` stage 4 ✅ + 头部完结 + cycle 总结段
+- **Changed**: `Cargo.toml`（0.22.0 → 0.23.0，Cargo.lock 同步）+ `git tag v0.23.0`（annotated）；全程零业务代码（diff 仅 docs + Cargo 两文件），bump 前后回归 1689/1713 不变
 
 ### v0.23 stage 3 — 实验矩阵 2 列 FULL 挂机 + D4 拍板：prompt v2 无明确增益，revert 回 v1（E2B 方差带首次量化）
 
