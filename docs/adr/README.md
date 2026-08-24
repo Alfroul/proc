@@ -27,6 +27,7 @@
 | [0031](./0031-tui-agent-panel.md) | TUI AgentPanel + AgentSession 流式会话架构 | Accepted | v0.21.0 阶段 1 |
 | [0032](./0032-eval-harness.md) | `proc agent eval` 评测 harness + session observability | Accepted | v0.22.0 阶段 1 |
 | [0033](./0033-eval-experiments-and-record-tools.md) | eval 变量实验（GBNF × prompt v2）+ proc_record_start/stop agent 侧支持 | Accepted | v0.23.0 阶段 1 |
+| [0034](./0034-rag-experience-recall.md) | RAG 历史经验召回（检索层 + 注入层 + 评估口径）+ prompt v3 措辞稿 | Accepted | v0.24.0 阶段 1 |
 
 ## ADR 模板
 

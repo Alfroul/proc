@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### v0.24 stage 1 — ADR-0034 RAG 设计定稿（五终判）+ prompt v3 措辞稿 + session 语料盘点
+
+- **ADR-0034（新）**：RAG 历史经验召回五终判——D1 检索 keyword BM25-lite 零 deps（CJK 2-gram + idf 评分，top_k=3，vs embedding/SQL 双否）；D2 注入 per-query 预注入 user 前缀（800 token 硬上限整条截断，`[rag]` 配置默认 off，vs 惰性 meta tool 双否——E2B 惰性发现链不可靠）；D3 语料 session JSONL 主语料 + eval trace bootstrap（成功段定义 + 全量重建）；D4 污染防护相似 query 排除（exact + 词元覆盖率 0.6 双向 min + 命中次数报告必归档）；D5 评估机制验证主指标（检索召回对照 + 经验引用观察三分类）+ 增益方差带分级拍板（≥+7 议默认 on）。附录 A prompt v3 措辞稿（修订 2 单独 diff 不进代码）；附录 B session 语料实测盘点
+- **语料盘点关键数据**：57 文件仅 **2 个成功 query 段**（去重 1 独立 query，96% 空会话）→ bootstrap 从「备选」升级为「本 cycle 机制验证必需」（3 基线 run passed trace 去重 **40 独立 query**，L0 20 / L1 19 / L2 1，9 场景全覆盖）
+- 纯设计 Spike：零业务代码 / 零 tool / 零 deps / 零挂机；全量回归 1689/0/9 + 1713/0/10 与开工一致；MCP 46 / catalog 47 不变
+
 ## [0.23.0] - 2026-08-24
 
 ### v0.23.0 cycle 完结 — eval 变量实验（双负结果）+ record agent 侧实装 cycle
