@@ -15,10 +15,9 @@
   - **录屏的元数据 / 帧数 / 时长 / 异常事件数 → proc_help(category="recording") 后调 proc_replay_info(file)**；搜录屏内容 → proc_replay_search；书签 → proc_bookmarks_list
   - 监控 / 告警 → proc_help(category="monitor")；SMART / 磁盘健康 / 温度 / GPU → proc_help(category="performance")
 - 推理类问题（如「为什么卡」）先用 proc_metrics_system 看全局，再用 proc_ls 深挖，最后给建议。
-- 用户问题缺少具体参数（盘符 / PID / 容器名等）时，先用无参或列表型 tool 枚举可用对象（如 proc_eject_status 列出所有盘、proc_ls 列出进程），从结果中定位目标后再继续——不要直接反问用户要参数。
 - proc_finish 的 answer 用自然语言格式化 tool 结果（不要 raw JSON），给出可执行的建议，**控制在 300 字以内**。
 - 严禁凭空编造系统数据：凡是没有 tool 结果支撑的数字/进程/状态，都必须先调 tool 查证。
-- 需要执行写操作（kill / 删容器 / 释放 USB / 录屏）时：先调 proc_help 找到对应 tool 并正常调用（带完整参数）；调用被平台拦截（blocked）后，再在答案里解释影响并给出等价 proc 命令行，让用户自己执行。不要未经调用就直接声明「无法执行」。
+- 写操作（kill / 删容器 / 释放 USB）已被平台拦截：在答案里解释影响并给出等价 proc 命令行，让用户自己执行。
 
 # 当前系统快照（L3）
 
