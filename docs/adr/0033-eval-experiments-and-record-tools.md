@@ -1,6 +1,6 @@
 # ADR-0033：eval 变量实验（GBNF × prompt v2）+ proc_record_start/stop agent 侧支持
 
-**Status**: Accepted（v0.23 stage 1 Spike 落地；GBNF 冒烟实测结论已回填附录 B——**不兼容，矩阵缩为 2 列**）
+**Status**: Accepted（v0.23 stage 1 Spike 落地；GBNF 冒烟实测结论已回填附录 B——**不兼容，矩阵缩为 2 列**；stage 3 实验矩阵已跑完——**prompt v2 无明确增益，拍板 revert 回 v1**，详见 D4 拍板结果与 [`docs/eval/promptv2-70q-v0.23.md`](../eval/promptv2-70q-v0.23.md)）
 
 **Date**: 2026-08-23（v0.23 cycle stage 1 Spike）
 
@@ -54,6 +54,7 @@ stage 1 小场景冒烟（附录 B）判定链路兼容性：**结论不兼容**
 - **主指标**：L0/L1 通过率 + output_degraded 次数（prompt v2 的两个靶点：缺参引导治 chain_incomplete/wrong_tool 侧、发现链措辞治写操作类 query——output_degraded 主要靶手 GBNF 已移除，v2 对退化间接收敛待观察）。
 - **参考指标**：L2 双口径（多步规划是 E2B 能力边界，v2 缺参引导若生效，L2 反问缺参型失败应向 chain 命中迁移）。
 - **拍板输出**：agent.toml / prompt 推荐值（README/doc 注明）+ 是否写默认值。**无改善或退化则默认配置不动**（system.md 回滚或保持 v1）；改善则 prompt v2 落地即默认（文本进代码本来就是默认路径），GBNF 开关维持注释态推荐（用户配置层，不进代码默认）。
+- **stage 3 实测拍板（2026-08-23，用户拍板 A：revert 回 v1）**：v2 两列（净通过 33/35 vs 基线 32）落在 E2B 方差带内（同配置复跑 6 query 纯翻转，±3 通过数 / ±6 失败模式计数）——增益无法与方差区分；L2 一致回退（full-chain 1→0→0 + chain_incomplete +3/+4 两轮同向）；修订 1 直接靶点两轮 1/4 迁移（靶点场景缺真正的无参枚举 tool），修订 2 机制可复现生效（idx63 两轮过 / #21 完整执行演示链）——**修订 2 单独记 v3 候选推 v0.24+**。revert commit `c043597`；数据与方差带标尺归档 [`docs/eval/promptv2-70q-v0.23.md`](../eval/promptv2-70q-v0.23.md)。
 
 ### D5：record_start/stop agent 语义（stage 2 已实装；「录制范围」措辞按实装修订）
 
@@ -89,7 +90,7 @@ stage 1 小场景冒烟（附录 B）判定链路兼容性：**结论不兼容**
 - GBNF 逃生舱关闭（tools 协议模式下）：未来 tool call 输出约束的路径是协议层重写（纯 JSON completion + 自解析）或 llama-server 升级后复测（附录 B 版本语境）；
 - 实验列（prompt v2 增益 + 可选终验）成为 v0.24 RAG cycle 的模型底座决策输入；
 - record 落地后 47 tool 全部真实可用（「不支持」清单零项）——agent tool 能力拼图补全；
-- prompt v2 若拍板落地即成默认 system prompt（回滚路径 = git revert + rebuild）。
+- prompt v2 若拍板落地即成默认 system prompt（回滚路径 = git revert + rebuild）——**实测走回滚分支**：`5d2ac64`（v2 落地）→ `c043597`（数据拍板 revert），v1 维持默认，v2 措辞稿留附录 A 备查。
 
 ## 与既有 ADR 关系
 
@@ -168,7 +169,7 @@ status=400 body={"error":{"code":400,"message":"Cannot use custom grammar constr
 
 - **v0.23 stage 1 Spike**（本 ADR 落地）：D1~D6 + 附录 A prompt v2 措辞稿 + 附录 B 冒烟实测结论
 - **v0.23 stage 2 Slice A**（✅ 2026-08-23 完成）：record_start/stop agent 侧实装（D5 语义 + 上方落地注记）
-- **v0.23 stage 3 Slice B**：实验矩阵 2 列 FULL 挂机（prompt v2 / 可选终验）+ `--compare` 矩阵报告 + 归档 `docs/eval/` + 最优配置拍板（D4 标准）
+- **v0.23 stage 3 Slice B**（✅ 2026-08-23 完成）：实验矩阵 2 列 FULL 挂机（prompt v2 + 同配置复跑方差列）+ `--compare` 矩阵报告 + 归档 `docs/eval/promptv2-70q-v0.23.md` + D4 拍板：**无明确增益，revert 回 v1**（`c043597`）
 - **v0.24+**：实验列作 RAG cycle 模型底座决策输入；GBNF 复测挂在 llama-server 升级节点
 
 ## References

@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+### v0.23 stage 3 — 实验矩阵 2 列 FULL 挂机 + D4 拍板：prompt v2 无明确增益，revert 回 v1（E2B 方差带首次量化）
+
+- **Added**: `docs/eval/promptv2-70q-v0.23.md`（新）——prompt v2 实验 2 列 + 基线三 run 对比归档：对比矩阵（L0 17/17/19 · L1 14/16/16 · L2 full-chain 1/0/0 · degraded 21/16/19）+ 靶点 query 逐条 verdict（修订 1 两轮 1/4 未迁移——靶点场景缺真正的无参枚举 tool；修订 2 写操作发现链可复现生效 3 处证据）+ **E2B 方差带量化**（同配置复跑 6 query 纯翻转：±3 通过数 / ±6 失败模式计数——未来所有 `--compare` 单列差异的解读标尺）+ Docker 环境一致性核对（三轮 daemon 均未运行，单变量隔离成立）
+- **Changed**: `src/agent/prompts/system.md` 落 prompt v2（commit `5d2ac64`，ADR-0033 附录 A 两处精确 diff 逐字落地）→ 实验后 **revert 回 v1**（commit `c043597`，D4 保守拍板）——终态 v1 维持默认，v2 措辞稿留附录 A 备查；修订 2（写操作发现链）单独记 v3 候选推 v0.24+
+- **拍板依据（D4）**: 净通过 33/35 vs 基线 32 落在方差带内（增益无法与方差区分）+ L2 一致回退（full-chain 1→0→0 + chain_incomplete +3/+4 两轮同向）+ 修订 1 直接靶点未动——无明确改善不动默认
+- **Docs**: ADR-0033 Status / D4 拍板结果 / Migration path stage 3 / Consequences 四处回填；brainstorm stage 3 勾选 + 测试矩阵行同步 2 列实际形态；`docs/stages/v0.23-stage-3.md`（本阶段任务清单，会话开工产出）
+- **回归**: 全量 **1689 / 0 / 9（默认）+ 1713 / 0 / 10（anthropic）不变**（prompt 文本零测试改动；v1 终态与 stage 2 末态逐字一致）+ fmt / clippy 双档 / build 双档 / bench --no-run 全过；MCP tool 46 / agent catalog 47 不变
+
 ### v0.23 stage 2 — proc_record_start/stop agent 侧实装：RecordState 持久 handle + teardown 防孤儿 + CLI 拦截文案（47 tool 全可用拼图补全）
 
 - **Added**: `src/agent/session.rs` 新类型 **`RecordState`**（`child: Arc<Mutex<Option<Child>>>` 跨 tool 调用保活 + `file_path: Arc<Mutex<Option<String>>>` 记忆 start 落盘路径——agent catalog 的 `proc_record_stop` 是 no_params，stop/teardown 靠记忆值定位文件）+ `start` / `stop` / `teardown_stop` 三方法全部薄包 MCP 既有 `make_record_start_json` / `make_record_stop_json`（ADR-0029 record_handle pattern 复用，不重写）；`AgentSession::spawn` 内建状态（**签名不变，builder.rs 零改动**）——session 线程 clone 喂 runner + 循环退出兜底 teardown，`SessionHandle` clone 暴露 **`stop_orphan_recording()`** teardown 钩子
