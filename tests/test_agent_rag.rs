@@ -1,12 +1,28 @@
 //! v0.24 stage 2：RAG 检索层集成测试（ADR-0034 D1/D3/D4 + D2 模板渲染）。
+//! v0.24 stage 3：注入接线测试（E/F/G 组）+ 本地召回对照探针（H 组）。
 //!
 //! fixture 全构造（tempdir + 真实 struct serde 序列化），不依赖真实
-//! `~/.config/proc/sessions/` 与本地 eval run JSON——CI 确定性。
+//! `~/.config/proc/sessions/` 与本地 eval run JSON——CI 确定性（H 组
+//! `#[ignore]` 探针除外——本机挂机前手动跑）。
 
+use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use futures_util::StreamExt;
+use serde_json::json;
+
+use proc::agent::provider::{
+    CompleteOptions, CompleteResponse, Delta, LlmError, LlmProvider, ProviderStream, StopReason,
+    Usage,
+};
 use proc::agent::rag::corpus::{Entry, EntrySource};
 use proc::agent::rag::{RagIndex, RagParams, inject_experience};
+use proc::agent::runner::{AgentOptions, AgentRunner, StopCause};
 use proc::agent::session_log::{LogEvent, SessionLogEntry};
-use proc::agent::{EvalReport, EvalRunFile, EvalRunMeta, FailureMode, QueryResult};
+use proc::agent::types::{Message, Role, ToolCall};
+use proc::agent::{AgentConfig, EvalReport, EvalRunFile, EvalRunMeta, FailureMode, QueryResult};
 
 // ---------------------------------------------------------------------------
 // fixture 构造
@@ -387,4 +403,317 @@ fn inject_no_hits_transparent_with_exclusion_report() {
     assert!(!polluted.injected);
     assert_eq!(polluted.text, "列出USB盘");
     assert_eq!(polluted.excluded_entries, 1); // D4 命中次数报告数据源
+}
+
+// ---------------------------------------------------------------------------
+// stage 3：ScriptedProvider / StreamScriptedProvider（test_agent_v0_20_stage_3b
+// 与 v0_21_stage_2 模式——逐轮弹出 + seen_messages 记录，注入断言载体）
+// ---------------------------------------------------------------------------
+
+struct ScriptedProvider {
+    responses: Mutex<VecDeque<CompleteResponse>>,
+    seen_messages: Mutex<Vec<Vec<Message>>>,
+}
+
+impl ScriptedProvider {
+    fn new(responses: Vec<CompleteResponse>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into()),
+            seen_messages: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ScriptedProvider {
+    fn name(&self) -> &'static str {
+        "scripted"
+    }
+
+    async fn complete(
+        &self,
+        messages: Vec<Message>,
+        _tools: Vec<proc::agent::types::ToolSchema>,
+        _options: CompleteOptions,
+    ) -> Result<CompleteResponse, LlmError> {
+        self.seen_messages.lock().unwrap().push(messages);
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or(LlmError::StreamEnded)
+    }
+
+    fn stream(
+        &self,
+        _messages: Vec<Message>,
+        _tools: Vec<proc::agent::types::ToolSchema>,
+        _options: CompleteOptions,
+    ) -> ProviderStream<'static> {
+        futures_util::stream::empty::<Result<Delta, LlmError>>().boxed()
+    }
+}
+
+struct StreamScriptedProvider {
+    turns: Mutex<VecDeque<Vec<Delta>>>,
+    seen_messages: Mutex<Vec<Vec<Message>>>,
+}
+
+#[async_trait]
+impl LlmProvider for StreamScriptedProvider {
+    fn name(&self) -> &'static str {
+        "scripted-stream"
+    }
+
+    async fn complete(
+        &self,
+        _messages: Vec<Message>,
+        _tools: Vec<proc::agent::types::ToolSchema>,
+        _options: CompleteOptions,
+    ) -> Result<CompleteResponse, LlmError> {
+        Err(LlmError::Config("streaming only".to_string()))
+    }
+
+    fn stream(
+        &self,
+        messages: Vec<Message>,
+        _tools: Vec<proc::agent::types::ToolSchema>,
+        _options: CompleteOptions,
+    ) -> ProviderStream<'static> {
+        self.seen_messages.lock().unwrap().push(messages);
+        let deltas = self.turns.lock().unwrap().pop_front().unwrap_or_default();
+        futures_util::stream::iter(deltas.into_iter().map(Ok)).boxed()
+    }
+}
+
+fn finish_resp(answer: &str) -> CompleteResponse {
+    CompleteResponse {
+        message: Message {
+            role: Role::Assistant,
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "call-finish".to_string(),
+                name: "proc_finish".to_string(),
+                arguments: json!({ "answer": answer }),
+            }],
+            tool_results: Vec::new(),
+        },
+        stop_reason: StopReason::ToolUse,
+        usage: Usage::default(),
+    }
+}
+
+fn finish_deltas(answer: &str) -> Vec<Delta> {
+    vec![
+        Delta::ToolCall(ToolCall {
+            id: "call-finish".to_string(),
+            name: "proc_finish".to_string(),
+            arguments: json!({ "answer": answer }),
+        }),
+        Delta::EndTurn {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// E 组：RagConfig 解析（完整段 / 默认 / params 映射 / 未知字段拒）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rag_config_full_section_parses() {
+    let content = "[rag]\nenabled = true\nbudget_tokens = 400\ntop_k = 5\n\
+                   exclude_threshold = 0.7\neval_corpora = [\"a.json\", \"b.json\"]\n";
+    let config = AgentConfig::from_toml(content).unwrap();
+    assert!(config.rag.enabled);
+    assert_eq!(config.rag.budget_tokens, 400);
+    assert_eq!(config.rag.top_k, 5);
+    assert!((config.rag.exclude_threshold - 0.7).abs() < 1e-9);
+    assert_eq!(config.rag.eval_corpora, vec!["a.json", "b.json"]);
+}
+
+#[test]
+fn rag_config_defaults_when_section_empty_or_missing() {
+    let empty = AgentConfig::from_toml("[rag]\n").unwrap().rag;
+    let missing = AgentConfig::from_toml("").unwrap().rag;
+    for cfg in [&empty, &missing] {
+        assert!(!cfg.enabled); // 默认 off 保基线（ADR-0034 D2）
+        assert_eq!(cfg.budget_tokens, 800);
+        assert_eq!(cfg.top_k, 3);
+        assert!((cfg.exclude_threshold - 0.6).abs() < 1e-9);
+        assert!(cfg.eval_corpora.is_empty());
+    }
+}
+
+#[test]
+fn rag_config_params_maps_to_rag_params() {
+    // 默认映射：800 tokens → 1200 chars 与 RagParams::default 同值锚
+    let params = AgentConfig::from_toml("").unwrap().rag.params();
+    assert_eq!(params.budget_chars, RagParams::default().budget_chars);
+    assert_eq!(params.top_k, 3);
+    assert_eq!(params.min_score, 1.0);
+    assert!((params.exclude_threshold - 0.6).abs() < 1e-9);
+
+    // 奇数 tokens 整数运算 * 3 / 2：801 → 1201
+    let odd = AgentConfig::from_toml("[rag]\nbudget_tokens = 801\n")
+        .unwrap()
+        .rag
+        .params();
+    assert_eq!(odd.budget_chars, 1201);
+}
+
+#[test]
+fn rag_config_unknown_field_rejected() {
+    assert!(AgentConfig::from_toml("[rag]\nfoo = 1\n").is_err());
+}
+
+// ---------------------------------------------------------------------------
+// F 组：off 态零开销锚（无 rag 的 runner 行为与 stage 2 前完全一致）
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn runner_off_state_passes_query_through_untouched() {
+    let provider = Arc::new(ScriptedProvider::new(vec![finish_resp("答案")]));
+    let runner = AgentRunner::new(
+        provider.clone() as Arc<dyn LlmProvider>,
+        proc::agent::tools::catalog::default_registry(),
+        AgentOptions::default(),
+    );
+
+    let query = "怎么查看 USB 设备列表";
+    let outcome = runner.run(query).await.unwrap();
+    assert_eq!(outcome.stop, StopCause::EndTurn);
+
+    let seen = provider.seen_messages.lock().unwrap();
+    // off 态零注入痕迹：user message 与原文逐字一致
+    assert_eq!(seen[0][1].content.as_deref(), Some(query));
+}
+
+// ---------------------------------------------------------------------------
+// G 组：on 态注入端到端（complete / streaming / 200 chars 同底截断）
+// ---------------------------------------------------------------------------
+
+fn rag_runner(provider: Arc<ScriptedProvider>, index: RagIndex) -> AgentRunner {
+    AgentRunner::new(
+        provider as Arc<dyn LlmProvider>,
+        proc::agent::tools::catalog::default_registry(),
+        AgentOptions::default(),
+    )
+    .with_rag(Arc::new(index), RagParams::default())
+}
+
+#[tokio::test]
+async fn runner_on_state_injects_experience_prefix_complete_path() {
+    let provider = Arc::new(ScriptedProvider::new(vec![finish_resp("答案")]));
+    let runner = rag_runner(provider.clone(), usb_dns_corpus());
+
+    let query = "怎么查看 USB 设备列表";
+    let outcome = runner.run(query).await.unwrap();
+    assert_eq!(outcome.stop, StopCause::EndTurn); // 注入不破 loop 语义
+
+    let seen = provider.seen_messages.lock().unwrap();
+    let user = seen[0][1].content.as_deref().unwrap();
+    assert!(user.starts_with("[历史经验参考] "));
+    assert!(user.contains("- \"列出所有 USB 设备\" → proc_usb_list"));
+    assert!(user.ends_with(&format!("\n[当前问题] {query}")));
+}
+
+#[tokio::test]
+async fn runner_on_state_truncates_probe_for_exact_exclusion() {
+    // 长 query（250 chars）与条目 query（200 chars + …，即 session 源侧
+    // 截断形态）前 200 chars 全等——runner 同款 200 chars 截断后 exact
+    // match → 污染排除生效 → 透传（user message 为截断 probe，与 session
+    // 源侧 200 chars 同底口径一致；eval query 全部远短于 200 不触发）
+    let entry_query = format!("{}…", "查".repeat(200));
+    let index = RagIndex::from_entries(vec![
+        entry(&entry_query, &["proc_ls"], "结论"),
+        entry("run alpha", &["proc_a"], "x"),
+    ]);
+    let provider = Arc::new(ScriptedProvider::new(vec![finish_resp("答案")]));
+    let runner = rag_runner(provider.clone(), index);
+
+    let long_query = "查".repeat(250);
+    runner.run(&long_query).await.unwrap();
+
+    let seen = provider.seen_messages.lock().unwrap();
+    let user = seen[0][1].content.as_deref().unwrap();
+    assert!(!user.contains("[历史经验参考]")); // 排除生效零注入
+    assert_eq!(user, entry_query); // 透传 = 截断 probe（200 + …）
+}
+
+#[tokio::test]
+async fn runner_on_state_injects_experience_prefix_streaming_path() {
+    let provider = Arc::new(StreamScriptedProvider {
+        turns: Mutex::new(VecDeque::from(vec![finish_deltas("答案")])),
+        seen_messages: Mutex::new(Vec::new()),
+    });
+    let runner = AgentRunner::new(
+        provider.clone() as Arc<dyn LlmProvider>,
+        proc::agent::tools::catalog::default_registry(),
+        AgentOptions::default(),
+    )
+    .with_rag(Arc::new(usb_dns_corpus()), RagParams::default());
+
+    let cancel = AtomicBool::new(false);
+    let outcome = runner
+        .run_streaming("怎么查看 USB 设备列表", &[], &|_| {}, None, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(outcome.stop, StopCause::EndTurn);
+
+    let seen = provider.seen_messages.lock().unwrap();
+    let user = seen[0][1].content.as_deref().unwrap();
+    assert!(user.starts_with("[历史经验参考] "));
+    assert!(user.ends_with("\n[当前问题] 怎么查看 USB 设备列表"));
+}
+
+// ---------------------------------------------------------------------------
+// H 组：本地召回对照探针（#[ignore]——D5 主指标①离线工具，挂机前本机跑）
+// ---------------------------------------------------------------------------
+
+/// 抽样 15 条覆盖 9 场景 × 3 level（perf 0/8 · proc 12/15/18 · docker 21/27 ·
+/// usb 31/37 · security 42/46 · recording 52 · flow 57 · monitor 62 · dns 67；
+/// L0 6 / L1 4 / L2 5）。人工标注每条的相关经验条目集合后对照 top-3 算
+/// 命中率（top-3 含 ≥1 标注相关条目的 query 占比）与平均命中条数。
+#[test]
+#[ignore = "需本地三基线 JSON（从仓库根 cwd 跑），挂机前手动执行"]
+fn local_recall_probe_prints_top3_for_sampled_queries() {
+    let files = [
+        "eval-e2b-70q.json",
+        "eval-promptv2-70q.json",
+        "eval-best-70q.json",
+    ];
+    for f in files {
+        assert!(
+            std::path::Path::new(f).is_file(),
+            "缺基线 JSON {f}（从仓库根目录跑）"
+        );
+    }
+    let paths: Vec<std::path::PathBuf> = files.iter().map(std::path::PathBuf::from).collect();
+    let empty_sessions = tempfile::tempdir().unwrap();
+    let index = RagIndex::build(empty_sessions.path(), &paths);
+    assert!(index.len() >= 30, "bootstrap 去重池异常: {}", index.len()); // 附录 B 口径 40
+
+    let queries = proc::agent::eval::load_eval_queries().unwrap();
+    let sample = [
+        0usize, 8, 12, 15, 18, 21, 27, 31, 37, 42, 46, 52, 57, 62, 67,
+    ];
+    for idx in sample {
+        let q = &queries[idx];
+        let outcome = index.retrieve(&q.text, &RagParams::default());
+        println!("idx {idx} [{}/L{}] {}", q.scenario, q.level, q.text);
+        println!(
+            "  excluded={} hits={}",
+            outcome.excluded,
+            outcome.hits.len()
+        );
+        for (e, score) in &outcome.hits {
+            println!(
+                "  {score:.2} [{}] {} → {}",
+                e.source.label(),
+                e.query,
+                e.tools.join(" → ")
+            );
+        }
+    }
 }

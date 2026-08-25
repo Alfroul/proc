@@ -5,7 +5,7 @@
 //! 逃生舱 + 采样参数选段。`ProviderSpec` 携带一行描述（CLI stderr 打印 /
 //! TUI 面板状态行）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::config::AgentConfig;
@@ -31,7 +31,31 @@ pub fn build_runner(
     max_steps: u32,
 ) -> Result<(AgentRunner, ProviderSpec), String> {
     let (provider, registry, options, spec) = build_parts(provider_flag, model_flag, max_steps)?;
-    Ok((AgentRunner::new(provider, registry, options), spec))
+    let mut runner = AgentRunner::new(provider, registry, options);
+    if let Some((index, params)) = build_rag(
+        &AgentConfig::load(),
+        &crate::dirs_config_dir().join("sessions"),
+    ) {
+        runner = runner.with_rag(index, params);
+    }
+    Ok((runner, spec))
+}
+
+/// v0.24 stage 3（ADR-0034 D2）：`[rag]` enabled 时全量建索引（off 态
+/// None——不建索引零开销）。session 主语料 + `eval_corpora` bootstrap
+/// （相对路径按 cwd 解析）；构建失败走 rag 模块静默降级契约（不返 Err）。
+pub fn build_rag(
+    config: &AgentConfig,
+    session_dir: &Path,
+) -> Option<(Arc<super::rag::RagIndex>, super::rag::RagParams)> {
+    if !config.rag.enabled {
+        return None;
+    }
+    let eval_paths: Vec<PathBuf> = config.rag.eval_corpora.iter().map(PathBuf::from).collect();
+    Some((
+        Arc::new(super::rag::RagIndex::build(session_dir, &eval_paths)),
+        config.rag.params(),
+    ))
 }
 
 /// v0.21 stage 3：TUI AgentPanel 进面板时建会话（与 CLI ask 共用构造链；
@@ -45,13 +69,15 @@ pub fn build_session(
     max_steps: u32,
 ) -> Result<(super::session::SessionHandle, ProviderSpec), String> {
     let (provider, registry, options, spec) = build_parts(provider_flag, model_flag, max_steps)?;
-    let recorder = if AgentConfig::load().session.log {
+    let config = AgentConfig::load();
+    let recorder = if config.session.log {
         super::session_log::SessionRecorder::start(&spec.name)
     } else {
         super::session_log::SessionRecorder::disabled()
     };
+    let rag = build_rag(&config, &crate::dirs_config_dir().join("sessions"));
     Ok((
-        super::session::AgentSession::spawn(provider, registry, options, recorder),
+        super::session::AgentSession::spawn(provider, registry, options, recorder, rag),
         spec,
     ))
 }

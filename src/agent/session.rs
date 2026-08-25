@@ -182,6 +182,7 @@ impl AgentSession {
         registry: ToolRegistry,
         options: AgentOptions,
         recorder: SessionRecorder,
+        rag: Option<(Arc<super::rag::RagIndex>, super::rag::RagParams)>,
     ) -> SessionHandle {
         let (events_tx, events_rx) = std_mpsc::channel::<SessionEvent>();
         let (queries_tx, queries_rx) = std_mpsc::channel::<SessionCommand>();
@@ -207,6 +208,7 @@ impl AgentSession {
                     thread_cancel,
                     recorder,
                     thread_record,
+                    rag,
                 );
                 thread_exited.store(true, Ordering::SeqCst);
             })
@@ -232,6 +234,7 @@ fn session_loop(
     cancel: Arc<AtomicBool>,
     recorder: SessionRecorder,
     record: RecordState,
+    rag: Option<(Arc<super::rag::RagIndex>, super::rag::RagParams)>,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -245,7 +248,11 @@ fn session_loop(
             return;
         }
     };
-    let runner = AgentRunner::new(provider, registry, options).with_record_state(record.clone());
+    let mut runner =
+        AgentRunner::new(provider, registry, options).with_record_state(record.clone());
+    if let Some((index, params)) = rag {
+        runner = runner.with_rag(index, params);
+    }
     let mut history: Vec<Message> = Vec::new();
 
     loop {

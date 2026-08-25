@@ -21,6 +21,8 @@ pub struct AgentConfig {
     pub mock: MockConfig,
     #[serde(default)]
     pub session: SessionConfig,
+    #[serde(default)]
+    pub rag: RagConfig,
 }
 
 /// `[default]` — 用户长期偏好（provider / 模型 / loop 深度）。
@@ -85,6 +87,66 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self { log: true }
+    }
+}
+
+/// `[rag]` — v0.24 RAG 经验召回（ADR-0034 D2，默认 off 保基线）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RagConfig {
+    /// 总开关（默认 false——off 态不建索引零开销，v0.22/v0.23 基线可比）。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 注入段 token 预算硬上限（默认 800；chars 换算 = tokens * 3 / 2）。
+    #[serde(default = "default_rag_budget_tokens")]
+    pub budget_tokens: u32,
+    /// 检索条数上限（默认 3）。
+    #[serde(default = "default_rag_top_k")]
+    pub top_k: usize,
+    /// 污染排除词元覆盖率阈值（默认 0.6，ADR-0034 D4）。
+    #[serde(default = "default_rag_exclude_threshold")]
+    pub exclude_threshold: f64,
+    /// bootstrap 语料：eval run JSON 路径列表（默认空 = 仅 session 语料；
+    /// 相对路径按 cwd 解析）。
+    #[serde(default)]
+    pub eval_corpora: Vec<String>,
+}
+
+impl Default for RagConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            budget_tokens: 800,
+            top_k: 3,
+            exclude_threshold: 0.6,
+            eval_corpora: Vec::new(),
+        }
+    }
+}
+
+fn default_rag_budget_tokens() -> u32 {
+    800
+}
+
+fn default_rag_top_k() -> usize {
+    3
+}
+
+fn default_rag_exclude_threshold() -> f64 {
+    0.6
+}
+
+impl RagConfig {
+    /// 映射到 rag 模块参数包：`min_score` 定值 1.0 不暴露配置；
+    /// `budget_chars = budget_tokens * 3 / 2`——800 → 1200 与
+    /// `RagParams::default` 同值锚（D2「≈800 token ≈ 1200 chars」换算）。
+    pub fn params(&self) -> super::rag::RagParams {
+        super::rag::RagParams {
+            top_k: self.top_k,
+            min_score: 1.0,
+            exclude_threshold: self.exclude_threshold,
+            budget_chars: (self.budget_tokens.saturating_mul(3) / 2) as usize,
+        }
     }
 }
 

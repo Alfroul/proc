@@ -116,6 +116,7 @@ fn spawn_session(provider: ScriptedStreamProvider) -> (Arc<ScriptedStreamProvide
             ..Default::default()
         },
         proc::agent::SessionRecorder::disabled(),
+        None,
     );
     (provider, handle)
 }

@@ -124,6 +124,7 @@ fn spawn_session(provider: ScriptedStreamProvider) -> SessionHandle {
             ..Default::default()
         },
         proc::agent::SessionRecorder::disabled(),
+        None,
     )
 }
 

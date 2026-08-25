@@ -182,9 +182,8 @@ mod tests {
 
     #[test]
     fn pollution_coverage_boundary_and_bidirectional_min() {
-        let ts = |items: &[&str]| -> HashSet<String> {
-            items.iter().map(|s| s.to_string()).collect()
-        };
+        let ts =
+            |items: &[&str]| -> HashSet<String> { items.iter().map(|s| s.to_string()).collect() };
         // 恰 0.6 → 排除（>= 语义）；norm 占位互异以绕开 exact match 分支
         let q = ts(&["a", "b", "c", "d", "e"]);
         let e = ts(&["a", "b", "c", "x", "y"]);

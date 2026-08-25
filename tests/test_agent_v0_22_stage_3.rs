@@ -109,6 +109,7 @@ fn spawn_session_with_recorder(
             ..Default::default()
         },
         recorder,
+        None,
     )
 }
 

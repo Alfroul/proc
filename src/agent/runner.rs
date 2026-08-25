@@ -23,6 +23,7 @@ use super::prompts::SYSTEM_PROMPT;
 use super::provider::{
     CompleteOptions, CompleteResponse, Delta, LlmError, LlmProvider, ToolChoice,
 };
+use super::rag::RagIndex;
 use super::session::{ConfirmDecision, ConfirmRequest};
 use super::tool_registry::ToolRegistry;
 use super::tools::dispatch::{self, execute_tool};
@@ -196,6 +197,9 @@ pub struct AgentRunner {
     /// 触达）；TUI AgentSession 经 [`AgentRunner::with_record_state`] 注入与
     /// session 线程 / SessionHandle 共享的同一份。
     record: super::session::RecordState,
+    /// v0.24 stage 3（ADR-0034 D2）：RAG 经验召回索引 + 参数；None = off 态
+    /// （不建索引零开销，query 原文透传）。
+    rag: Option<(Arc<RagIndex>, super::rag::RagParams)>,
 }
 
 impl AgentRunner {
@@ -209,6 +213,7 @@ impl AgentRunner {
             registry: Arc::new(registry),
             options,
             record: super::session::RecordState::default(),
+            rag: None,
         }
     }
 
@@ -216,6 +221,31 @@ impl AgentRunner {
     pub fn with_record_state(mut self, record: super::session::RecordState) -> Self {
         self.record = record;
         self
+    }
+
+    /// 注入 RAG 经验索引（builder 构造链 `build_rag` 产出；off 态不调用）。
+    pub fn with_rag(mut self, index: Arc<RagIndex>, params: super::rag::RagParams) -> Self {
+        self.rag = Some((index, params));
+        self
+    }
+
+    /// D2 注入入口：off 态原文透传（零开销锚）；on 态先 200 chars 同底截断
+    /// （D3——与 session 源侧 query 截断一致，污染排除判定两侧同口径）再
+    /// `inject_experience`，stderr 结构化报告行（D4 命中次数的数据源）。
+    fn rag_wrap(&self, query: &str) -> String {
+        let Some((index, params)) = &self.rag else {
+            return query.to_string();
+        };
+        let probe = super::eval::runner::truncate_chars(query, 200);
+        let injected = super::rag::inject_experience(&probe, index, params);
+        eprintln!(
+            "[rag] injected={} entries={} excluded={} est_tokens={}",
+            injected.injected,
+            injected.injected_entries,
+            injected.excluded_entries,
+            injected.est_tokens
+        );
+        injected.text
     }
 
     pub async fn run(&self, query: &str) -> Result<RunnerOutcome, LlmError> {
@@ -232,9 +262,10 @@ impl AgentRunner {
         }
 
         let system = build_system_prompt();
+        let user = self.rag_wrap(query);
         let mut messages = vec![
             Message::new(Role::System, system),
-            Message::new(Role::User, query.to_string()),
+            Message::new(Role::User, user),
         ];
         // 每轮 tools = entry 4 + proc_finish 控制 tool（决策 I）+ proc_help 发现
         // 后动态加入的类别 tool（决策 J——OpenAI 协议下模型只能调用请求 tools
@@ -378,7 +409,7 @@ impl AgentRunner {
         let system = build_system_prompt();
         let mut messages = vec![Message::new(Role::System, system)];
         messages.extend(history.iter().cloned());
-        messages.push(Message::new(Role::User, query.to_string()));
+        messages.push(Message::new(Role::User, self.rag_wrap(query)));
 
         let mut tools: Vec<_> = self.registry.entry_tools().into_iter().cloned().collect();
         tools.push(finish_tool_schema());
