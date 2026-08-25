@@ -38,6 +38,8 @@ v0.23 cycle 完结（tag `v0.23.0`，2026-08-24）留下两组输入：
 
 **stage 2 实装清单预览**：`src/agent/rag/` 新模块——`corpus.rs`（`Entry { query, tools: Vec<String>, conclusion_head, source }` + 语料解析：sessions JSONL 成功段提取 / bootstrap eval JSON passed trace 提取）、`retrieve.rs`（tokenize + score + top-k + 污染排除（D4））、`mod.rs`（`RagIndex` 组装 + `inject_experience` 模板渲染（D2））。测试：`tests/test_agent_rag.rs` 集成 + 模块内联单元（语料 fixture 构造 / 命中排序 / 排除逻辑 / 空·薄语料降级返 None）。
 
+> **stage 2 落地注记（2026-08-25）**：三模块实装与预览一致（corpus 165 / retrieve 121 / mod 196 行业务，含文档注释；测试 272 内联 + 368 集成，28 测试全绿）。补充件：`RagParams` 参数包（top_k / min_score / exclude_threshold / budget_chars 四定值打包，stage 3 `RagConfig` 映射入口）+ `RagIndex::from_entries` 公开构造（测试与调用方直喂语料）。规格歧义消解两处：① 评分公式 `Σ_{t ∈ tokens(current)}` 按 query 侧**去重集合**迭代（同 token 重复出现不重复计分）；② CJK 边界定死——CJK 判定 U+4E00~U+9FFF，中文标点等其余字符一律作分隔，单字 CJK 段产单字 token。
+
 ### D2：注入位置与 token 预算终判——per-query 预注入 ✅
 
 **两路对比**（brainstorm 倾向转正）：
@@ -96,6 +98,8 @@ eval_corpora = []          # bootstrap 语料：eval run JSON 路径列表（空
 
 **索引构建时机**：session 启动 / eval run 启动时**全量重建**（百级文件毫秒级，不做增量——简单优先）；构建失败（目录缺失 / JSON 损坏）→ 静默降级空索引 + 一次 stderr 警告（`SessionRecorder::disabled()` 同款契约）。
 
+> **stage 2 落地注记（2026-08-25）**：成功段状态机实装口径——非 `end_turn` 收尾（max_steps / empty_after_retry / interrupted）与未收尾段（query_started 后无 session_finished）均不产出，段内任意 `error` 事件整段作废；去重规则 = 归一化 query（lowercase + 去空白）全局保首见，装载序 session 先 eval 后（真实语料优先）；bootstrap 经 `EvalRunFile` 反序列化直读（schema 与 harness 同源，零新解析代码），坏源警告跳过。session JSONL 的 query text 源侧已 200 chars 截断——Entry.query 即截断版，与排除判定同底无碍（stage 3 runner 侧注入前以同款 200 chars 截断做 exact/coverage 判定即可保持一致）。
+
 ### D4：污染防护终判——相似 query 排除 + 命中次数报告 ✅
 
 **问题**：经验库含 eval 同款 query 的成功 trace 时，RAG-on 跑 eval 等于检索答案——增益是信息泄漏非能力提升（brainstorm 风险 3）。
@@ -109,6 +113,8 @@ eval_corpora = []          # bootstrap 语料：eval run JSON 路径列表（空
 **边界诚实声明**：同场景同意图不同措辞的 query 互相检索是 RAG 的**设计目的**（相似问题的历史解法），不是污染——排除阈值只挡「答案直达」型泄漏，不挡「同类经验」型参考。两类边界由 0.6 阈值切分，stage 3 机制验证报告抽样复核切分质量。
 
 **命中次数报告**：RAG-on eval run 期间 rag 模块统计 per-query 的排除条目数 / 注入条目数 / 估算 token 数，stderr 结构化输出；stage 3 归档「排除命中次数」汇总表证明防护生效（brainstorm 风险 3 mitigate (3) 兑现）。
+
+> **stage 2 落地注记（2026-08-25）**：coverage 实装为**去重集合**口径（`token_set` 交集 / 双向 min 分母），恰 0.6 按 `>=` 排除；排除计数 `excluded` 随 `RetrievalOutcome` 与 `InjectedQuery` 返回（`injected_entries` / `est_tokens` 同包），stage 3 stderr 结构化输出的数据源就位。三类样例（同款 exact / 高覆盖改写 / 同场景异意图）已 fixture 锚定（集成 C 组——第三类同时锚定「不排除且可命中」的同类经验参考语义）。
 
 ### D5：评估口径终判——机制验证主指标 + 增益方差带解读 ✅
 
@@ -203,7 +209,7 @@ eval_corpora = []          # bootstrap 语料：eval run JSON 路径列表（空
 ## Migration path
 
 - **v0.24 stage 1 Spike**（本 ADR 落地）：D1~D5 五终判 + 附录 A prompt v3 措辞稿 + 附录 B 语料实测盘点
-- **v0.24 stage 2 Slice A**：RAG 检索层实装（`src/agent/rag/` corpus / retrieve / mod + 单测——D1 规格 + D4 排除逻辑）
+- **v0.24 stage 2 Slice A**：RAG 检索层实装（`src/agent/rag/` corpus / retrieve / mod + 单测——D1 规格 + D4 排除逻辑）✅（2026-08-25 完成——482 行业务 + 640 行测试（28 测试全绿），库形态零接线（runner / config / builder diff 为空）、Cargo deps +0）
 - **v0.24 stage 3 Slice B**：注入层接线（D2 规格 + `[rag]` 配置默认 off）+ eval 矩阵挂机（RAG-on 列 + v3 列，附录 A / D5 口径）+ 机制验证报告 + 拍板（D5 标准）
 - **v0.24 stage 4**：REVIEW-v0.24 归档（机制验证结论 + 增益方差带解读 + 污染防护实效三段落）
 - **v0.25+**：RAG 结论（机制成立与否）作为模型底座重启决策（决策 1 归档候选表）的输入

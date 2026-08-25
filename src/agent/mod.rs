@@ -31,6 +31,7 @@ pub mod mock_provider;
 pub mod model_registry;
 pub mod prompts;
 pub mod provider;
+pub mod rag;
 #[cfg(feature = "mock-provider")]
 pub mod record_fixture;
 pub mod runner;

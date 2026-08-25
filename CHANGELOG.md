@@ -7,6 +7,12 @@
 
 ## [Unreleased]
 
+### v0.24 stage 2 — RAG 检索层（corpus/retrieve/index 三模块，库形态零接线）
+
+- **`src/agent/rag/`（新，482 行业务 + 640 行测试，28 测试全绿）**：`corpus.rs`——`Entry{query, tools, conclusion_head, source}` 索引单元 + `EntrySource::{Session, Eval}` 双源标记 + session JSONL 成功段状态机（query_started → tool ≥1 → end_turn 收尾无 error；error / 零 tool / 非 end_turn / 未收尾段全弃）+ bootstrap eval JSON passed trace 直读（`EvalRunFile` 反序列化复用，零新解析代码）+ 归一化去重保首见（先 session 后 eval）；`retrieve.rs`——CJK 2-gram / ASCII 分词（U+4E00~9FFF 判 CJK，中文标点作分隔，单字段单字 token）+ idf 评分（`ln(1+N/df)`，query 侧去重集合，tf 上限 3）+ D4 污染排除（exact match + 去重集合覆盖率 ≥0.6 双向 min 分母）；`mod.rs`——`RagIndex` 全量重建（失败源 stderr 警告静默降级不 panic）+ `RagParams` 参数包（top_k/min_score/exclude_threshold/budget_chars 默认 3/1.0/0.6/1200）+ `inject_experience` D2 模板渲染（`[历史经验参考]`/`[当前问题]` 模板，1200 chars 预算整条截断不截半条，`InjectedQuery` 携带 excluded/est_tokens 报告字段——stage 3 命中次数报告数据源）
+- **测试四组**（`tests/test_agent_rag.rs` 14 集成 + 模块内联 14）：语料装载（tempdir fixture 全构造 CI 确定性 / 缺目录降级 / 跨 run 去重 / 坏源跳过）/ 检索排序（相关性 / min_score 门槛 / 并列按 tool 链长 tie-break）/ 污染排除三类样例锚定（同款 exact / 高覆盖改写 / 同场景异意图不排除且可命中）/ 注入预算（模板逐字 / 结论 80 chars 截断 / 整条截断 / 无命中原文透传零痕迹）
+- **零接线**：runner / config / builder / agent.toml diff 为空（注入接线 stage 3）；MCP 46 / catalog 47 / Cargo deps +0 不变；全量回归 **1717 / 0 / 9 + 1741 / 0 / 10**（1689/1713 + 28 新增，RAG off 态行为零变更）；ADR-0034 D1/D3/D4 落地注记 + Migration path stage 2 标注
+
 ### v0.24 stage 1 — ADR-0034 RAG 设计定稿（五终判）+ prompt v3 措辞稿 + session 语料盘点
 
 - **ADR-0034（新）**：RAG 历史经验召回五终判——D1 检索 keyword BM25-lite 零 deps（CJK 2-gram + idf 评分，top_k=3，vs embedding/SQL 双否）；D2 注入 per-query 预注入 user 前缀（800 token 硬上限整条截断，`[rag]` 配置默认 off，vs 惰性 meta tool 双否——E2B 惰性发现链不可靠）；D3 语料 session JSONL 主语料 + eval trace bootstrap（成功段定义 + 全量重建）；D4 污染防护相似 query 排除（exact + 词元覆盖率 0.6 双向 min + 命中次数报告必归档）；D5 评估机制验证主指标（检索召回对照 + 经验引用观察三分类）+ 增益方差带分级拍板（≥+7 议默认 on）。附录 A prompt v3 措辞稿（修订 2 单独 diff 不进代码）；附录 B session 语料实测盘点
