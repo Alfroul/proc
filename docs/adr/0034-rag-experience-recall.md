@@ -79,6 +79,8 @@ eval_corpora = []          # bootstrap 语料：eval run JSON 路径列表（空
 
 **stage 3 接线点预览**：`src/agent/config.rs`（`RagConfig` + Default=off）+ `src/agent/builder.rs`（读配置建 `RagIndex` 传 runner——off 态不建索引零开销）+ `src/agent/runner.rs`（query 入口注入 helper 调用）。
 
+> **stage 3 落地注记（2026-08-25/26）**：三接线点与预览一致（`RagConfig.params()` 做 `[rag]` → `RagParams` 映射，`budget_chars = budget_tokens * 3 / 2` 整数运算——800→1200 与默认同值锚，`min_score` 定值 1.0 不暴露配置）；`AgentSession::spawn` 4→5 参（+`Option<(Arc<RagIndex>, RagParams)>`，v0.22 stage 3 同款先例）。实装口径两处明示：① **透传 = 截断 probe**——runner 侧 `rag_wrap` 先 `truncate_chars(query, 200)` 再进 `inject_experience`，无命中透传的是 probe（与 session 源侧 200 chars 同底一致；eval query 全部远短于 200 不触发）；② **stderr 报告行** `[rag] injected=<bool> entries=<n> excluded=<n> est_tokens=<n>` 每 run() 调用一行（attempt-2 重跑也计），off 态零输出。**挂机顺序硬约束**（RAG-on 列必须 prompt v1 binary——system.md include_str 嵌入无配置开关，v3 commit 必须后于 RAG-on 列挂机）。**实验终态**：RAG-on 列 +2 vs 方差列落带内 → `enabled` 默认维持 off（D5 三分支「维持 off + 数据归档」）——机制验证两主指标成立（召回 12/15 · 引用 8/15 · 干扰 0 · output_degraded -12 超带），「机制成立但 E2B 兑现不了通过率」归档 `docs/eval/rag-v3-70q-v0.24.md`；v3 列 -5/-8 落带外 → revert `7959030`（附录 A 措辞稿留档，TD-60 终态回填 stage 4）。
+
 ### D3：语料口径终判——session JSONL 主语料 + eval trace bootstrap（本 cycle 机制验证必需）✅
 
 **索引单元**（D1 `Entry`）：
@@ -210,7 +212,7 @@ eval_corpora = []          # bootstrap 语料：eval run JSON 路径列表（空
 
 - **v0.24 stage 1 Spike**（本 ADR 落地）：D1~D5 五终判 + 附录 A prompt v3 措辞稿 + 附录 B 语料实测盘点
 - **v0.24 stage 2 Slice A**：RAG 检索层实装（`src/agent/rag/` corpus / retrieve / mod + 单测——D1 规格 + D4 排除逻辑）✅（2026-08-25 完成——482 行业务 + 640 行测试（28 测试全绿），库形态零接线（runner / config / builder diff 为空）、Cargo deps +0）
-- **v0.24 stage 3 Slice B**：注入层接线（D2 规格 + `[rag]` 配置默认 off）+ eval 矩阵挂机（RAG-on 列 + v3 列，附录 A / D5 口径）+ 机制验证报告 + 拍板（D5 标准）
+- **v0.24 stage 3 Slice B**：注入层接线（D2 规格 + `[rag]` 配置默认 off）+ eval 矩阵挂机（RAG-on 列 + v3 列，附录 A / D5 口径）+ 机制验证报告 + 拍板（D5 标准）✅（2026-08-26 完成——接线 `b959277` + v3 落地 `e166e27` + revert `7959030`；拍板：RAG 维持 off（机制成立但通过率带内）+ v3 负结果归档，详见 `docs/eval/rag-v3-70q-v0.24.md`）
 - **v0.24 stage 4**：REVIEW-v0.24 归档（机制验证结论 + 增益方差带解读 + 污染防护实效三段落）
 - **v0.25+**：RAG 结论（机制成立与否）作为模型底座重启决策（决策 1 归档候选表）的输入
 

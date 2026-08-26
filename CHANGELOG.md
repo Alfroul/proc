@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+### v0.24 stage 3 — RAG 注入层接线 + eval 矩阵挂机（拍板：RAG 维持 off / v3 revert）
+
+- **接线三处**（ADR-0034 D2/D4 规格）：`src/agent/config.rs`——`RagConfig` `[rag]` 五字段（enabled 默认 **false** 保基线 / budget_tokens 800 / top_k 3 / exclude_threshold 0.6 / eval_corpora bootstrap 路径列表）+ `params()` 映射（budget_chars = tokens×3/2，800→1200 与 `RagParams` 默认同值锚）；`src/agent/runner.rs`——`AgentRunner.rag` 字段 + `with_rag` builder + `rag_wrap`（off 态原文透传零开销；on 态 200 chars 同底截断（D3——与 session 源侧同口径）→ `inject_experience` → stderr 结构化行 `[rag] injected/entries/excluded/est_tokens`——D4 命中次数报告数据源），`run_with_progress` / `run_streaming` 两 query 入口共用；`src/agent/builder.rs`——`build_rag`（off→None **不建索引零开销**；on→session 主语料 + eval_corpora 全量重建）+ `build_runner` / `build_session` 接线 + `AgentSession::spawn` 4→5 参（4 测试调用点补 None）
+- **测试 E/F/G/H 组**（`tests/test_agent_rag.rs` 追加 8 过 + 1 `#[ignore]` 探针）：RagConfig 解析五锚（完整段 / 空段默认 / 无段 / params 映射 801→1201 / 未知字段拒）/ off 态零开销（user message 原文逐字）/ on 态端到端 complete + streaming（ScriptedProvider seen_messages 前缀断言）/ 200 chars exact 排除变体（透传 = 截断 probe 锚）/ `#[ignore]` 本地召回对照探针（15 抽样覆盖 9 场景 × 3 level，D5 主指标①离线工具）
+- **挂机顺序硬约束**（变量隔离生命线）：RAG-on 列必须跑在 prompt v1 binary 上（system.md include_str 嵌入无配置开关）——接线 `b959277` → RAG-on 列挂机 → v3 落地 `e166e27` → v3 列挂机，各列 `git_describe` 归档核对
+- **两列实验 + 机制验证 + 拍板**（归档 `docs/eval/rag-v3-70q-v0.24.md`，四列 compare 矩阵）：RAG-on 列 **37/70**（L0 20 / L1 17 四列最优，**output_degraded 19→9 超带**）但 +2 vs 方差列落带内 → **D5 三分支「维持 off + 数据归档」**——机制验证两主指标成立（召回 12/15 · 经验引用 引用 8 / 无视 6 / **干扰 0** · 排除命中 42/70 query 首尝试拦截 · est_tokens 均值 296）→「**机制成立但 E2B 兑现不了通过率**」，degraded -12 质量增益给 v0.25+ 模型底座重启决策留直接输入；v3 列 **27/70**（-5/-8 落带外向下，L0 13/23 掉 4-6）→ **revert `7959030` 回 v1**（TD-60 负结果归档，终态回填 stage 4）
+- 全量回归 **1725 / 0 / 9（默认）+ 1749 / 0 / 11（anthropic）**（1717/1741 + 9 新增，off 默认不破基线）；MCP 46 / catalog 47 / Cargo deps +0 不变；ADR-0034 D2 落地注记 + Migration path stage 3 标注；附 stage 2 遗留 fmt 小修（`rag/retrieve.rs` 闭包换行）
+
 ### v0.24 stage 2 — RAG 检索层（corpus/retrieve/index 三模块，库形态零接线）
 
 - **`src/agent/rag/`（新，482 行业务 + 640 行测试，28 测试全绿）**：`corpus.rs`——`Entry{query, tools, conclusion_head, source}` 索引单元 + `EntrySource::{Session, Eval}` 双源标记 + session JSONL 成功段状态机（query_started → tool ≥1 → end_turn 收尾无 error；error / 零 tool / 非 end_turn / 未收尾段全弃）+ bootstrap eval JSON passed trace 直读（`EvalRunFile` 反序列化复用，零新解析代码）+ 归一化去重保首见（先 session 后 eval）；`retrieve.rs`——CJK 2-gram / ASCII 分词（U+4E00~9FFF 判 CJK，中文标点作分隔，单字段单字 token）+ idf 评分（`ln(1+N/df)`，query 侧去重集合，tf 上限 3）+ D4 污染排除（exact match + 去重集合覆盖率 ≥0.6 双向 min 分母）；`mod.rs`——`RagIndex` 全量重建（失败源 stderr 警告静默降级不 panic）+ `RagParams` 参数包（top_k/min_score/exclude_threshold/budget_chars 默认 3/1.0/0.6/1200）+ `inject_experience` D2 模板渲染（`[历史经验参考]`/`[当前问题]` 模板，1200 chars 预算整条截断不截半条，`InjectedQuery` 携带 excluded/est_tokens 报告字段——stage 3 命中次数报告数据源）
