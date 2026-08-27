@@ -230,7 +230,7 @@
 **验证**：mock pid=1000 flow（start_time=T1）+ alive_pids 含 pid=1000 start_time=T2 → overlay 跳过；flow.start_time 与 alive 一致 → overlay 命中。
 **v0.10.0 stage 4 决策**：不修。理由：(1) 时间窗口窄（accum 1s drain + sysinfo PID 复用罕见）；(2) CONTEXT.md 已记录，用户透明；(3) 影响一次评分不持续，优先级低于 TD-19 ebpf 真实验证。归档为 v0.11+ 候选。
 
-### TD-22：`property_at_index` 生命周期标注代码质量（P2-3 归档）
+### TD-22：`property_at_index` 生命周期标注代码质量（P2-3 归档） ✅ Fixed（v0.25 stage 1 现状核查确认已修）
 
 **位置**：`src/schannel_etw/provider.rs:456-475`
 **现状**：函数签名 `Option<&'static EVENT_PROPERTY_INFO>` 的 `'static` 标注技术上错误——返回的引用生命周期实际绑定到 `info_ptr` 指向的 buffer（来自 `tdh_get_event_info_buffer` 返回的 `Vec<u8>`）。Rust 借用检查无法表达「生命周期绑到 raw pointer 来源」，用 `'static` 绕过。
@@ -238,6 +238,8 @@
 **修复**：改成 `Option<&'a EVENT_PROPERTY_INFO>` + 加 lifetime parameter；或 inline 到调用点直接读字段。
 **验证**：`cargo clippy --release --all-targets -- -D warnings` 仍 0 warnings。
 **v0.10.0 stage 4 决策**：不修。理由：(1) 不引发 UB（实际用法安全）；(2) 修复增加 ~5 行代码但语义不变；(3) 优先级低于功能 / 测试改进。归档为 v0.11+ 代码质量候选。
+
+> **v0.25 stage 1 回填 ✅ Fixed**：现状核查发现签名已是 `fn property_at_index(info_buf: &[u8], idx: usize) -> Option<&EVENT_PROPERTY_INFO>`（`provider.rs:484`，lifetime elision 自动传播，函数注释明确「不再撒谎说 `&'static`」）——与 TD-35（dns_log/etw.rs 同款问题，v0.12.0 阶段 5 修复）对应，schannel 版在后续重构中已修，仅 TD 状态未回填。本条关闭无代码改动。
 
 ---
 
@@ -263,7 +265,7 @@
 **验证**：mock spawn_one 永远返 false → restart_tick 调 MAX_RETRIES 次后 banner 显示 permanent_failure。
 **v0.11.0 stage 8 决策**：不修。理由：(1) 实际触发场景极少（权限切换）；(2) banner 已显示 restarting，用户能感知；(3) 修复需新增 RestartState::on_respawn_failed 方法 + 状态机扩展测试，改动中等。归档为 v0.12+ 候选。
 
-### TD-25（REVIEW-13 P2-3）：docker worker 不在 canonical_worker_thread_name 列表
+### TD-25（REVIEW-13 P2-3）：docker worker 不在 canonical_worker_thread_name 列表 ✅ Fixed in v0.25 stage 1（ADR-0019 追加决策 8）
 
 **位置**：`src/workers/manager.rs:278-288`（`canonical_worker_thread_name` 列表）+ ADR-0019 未明确文档化此例外
 **现状**：`canonical_worker_thread_name` 列出 6 个 worker（port / usb / net-flow / dns-log / disk-io-etw / schannel-etw），不含 docker-snapshot-worker / docker-logs-worker-{name}。docker worker panic 时 `WorkerManager::restart` 因 canonical 返回 None 直接返 false，docker worker 不会自动 respawn。
@@ -271,6 +273,8 @@
 **修复**：在 ADR-0019 §决策 7「不实装 ebpf_worker restart」之后追加「不实装 docker worker restart：DockerPanel 自管 worker 生命周期，独立 spawn/drop 逻辑」。或者把 docker worker 也接入 restart（需重构 DockerPanel 把 worker handle 暴露给 WorkerManager）。
 **验证**：ADR-0019 文档明确 docker 例外；或 docker worker panic 后也走 restart 路径。
 **v0.11.0 stage 8 决策**：不修。理由：(1) ADR 文档补充；(2) docker worker 接入 restart 需重构 DockerPanel（影响大）。归档为 v0.12+ 文档候选。
+
+> **v0.25 stage 1 标 ✅ Fixed**：ADR-0019 追加决策 8「不实装 docker worker restart：DockerPanel 自管」——设计例外显式文档化（纯 doc，不重构 DockerPanel）。
 
 ### TD-26（REVIEW-13 P2-4）：HRESULT 映射不完整，CERT_E_EXPIRED / CERT_E_UNTRUSTEDROOT 都归 Unknown ✅ Fixed in v0.12.0 阶段 3
 
@@ -362,7 +366,7 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **验证**：Downloads 路径签名进程扣分从 30 降到 15（或 20）。
 **v0.11.0 stage 8 决策**：不修。理由：(1) surgical 原则明确「叠加扣分」是设计行为；(2) 用户配置 path_rules.toml 可以补充注释解释；(3) 修复需评估 R18 内部 weight 调整对其他场景的影响。归档为 v0.12+ UX 候选。
 
-### TD-34（REVIEW-13 P2-12）：plan.md 不用 [x] checkbox 风格，stage-7.md 任务清单描述与实际不匹配
+### TD-34（REVIEW-13 P2-12）：plan.md 不用 [x] checkbox 风格，stage-7.md 任务清单描述与实际不匹配 ⬜ Obsolete（v0.25 stage 1 判废）
 
 **位置**：`plan.md`（表格风格）+ `docs/stages/v0.11-stage-7.md:55`（假设 checkbox 风格）
 **现状**：stage-7.md 任务清单第 7 项「plan.md 中所有功能阶段已 [x]」假设 plan.md 用 checkbox 标记阶段完成情况，但 plan.md 实际是表格风格（「阶段 N 实装：...」描述）。
@@ -370,6 +374,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **修复**：要么改 plan.md 用 checkbox（破坏现有风格），要么改 stage-7.md 任务清单第 7 项描述（更准确：「plan.md 阶段表 + CONTEXT.md 演进历史段全部更新到 v0.11」）。后者更 surgical。
 **验证**：stage-7.md 任务清单第 7 项描述与 plan.md 实际风格匹配。
 **v0.11.0 stage 8 决策**：不修。理由：(1) stage-7.md 已落 ✅，本次 cycle 不再触发；(2) 文档风格调整优先级低。归档为 v0.12+ 文档候选。
+
+> **v0.25 stage 1 判废（Obsolete）**：v0.13+ cycle 起 plan.md 已不在流程中（ADR-0001 phased-project skill adoption——brainstorm.md 替代 plan.md 作 cycle-level 项目宪法，进度追踪在 brainstorm stage 总览表唯一勾选点）。TD 描述的「风格不匹配」对象已不存在，关闭。
 
 ### TD-35（REVIEW-13 P2-13）：`property_at_index` 的 `'static` lifetime 不正确（DNS ETW 版本） ✅ Fixed in v0.12.0 阶段 5
 

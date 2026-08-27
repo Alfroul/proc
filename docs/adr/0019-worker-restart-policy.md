@@ -54,6 +54,8 @@
 
 7. **不实装 ebpf_worker restart**：Linux-only 路径（feature flag `ebpf`），v0.11 cycle 不动 ebpf（TD-19 推迟范围）。ebpf_worker panic 后 banner 显示但状态保持 Healthy（无 restart_history 条目）。
 
+8. **不实装 docker worker restart：DockerPanel 自管**（v0.25 stage 1 TD-25 追加）：`canonical_worker_thread_name` 列表（port / usb / net-flow / dns-log / disk-io-etw / schannel-etw）**不含** docker-snapshot-worker / docker-logs-worker-{name}。docker worker 由 DockerPanel 自管生命周期（面板进入时独立 spawn、退出时 drop），worker handle 不在 `WorkerManager` 字段内——docker worker panic 时 `WorkerManager::restart` 因 canonical 返回 None 直接返 false，不自动 respawn。这是设计选择非遗漏：接入 restart 需重构 DockerPanel 把 worker handle 暴露给 WorkerManager（影响面大、收益窄——docker 子系统可用性由面板自身的 spawn/drop 逻辑兜底，重进面板即重建）。
+
 ## 后果
 
 ### 正面

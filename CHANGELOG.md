@@ -5,6 +5,16 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### v0.25 stage 1 — 设计 Spike：空会话机制归因 + ADR-0035 定稿 + TD 逐项终判（TD-52/54 已落地重大发现）
+
+- **Docs**: `docs/adr/0035-td-cleanup-and-session-hygiene.md`（新）—— D1 空会话治理终判（**延迟创建**：首个非 session_start 事件才落盘，弃退出清理——Drop 语义不可靠）+ D2 MCP 持久化（**TD-52/54 现状核查确认 v0.17 已落地**（feature `mcp-persistent-state` 默认启用），stage 3 仅剩回填；**TD-53 改道 sysinfo delta**——NT Kernel Logger 单实例 + 非管理员恒失败否决 ETW worker 方案，改在 `run_snapshot_worker` 内做 delta 计算，~200-300 → ~60-100 行）+ D3 TD 逐项终判表（12 项）+ D4 验收锚（tool 46 / catalog 47 / deps +0）
+- **Docs**: `docs/stages/v0.25-stage-1.md`（新）—— Spike 调查发现归档：**空会话归因修正**（ask/eval 走 build_runner 无 recorder 不产生文件；空文件唯一来源是 TUI AgentPanel 进面板即落盘 `SessionRecorder::start` 构造即 File::create——brainstorm「与 eval run 时间吻合」是相关非因果；实测 102 文件 100 空全 `-llama-cpp` 成对出现）
+- **Docs**: `docs/tech-debt.md` —— TD-34 标 Obsolete（plan.md 已不在 v0.13+ 流程）+ TD-22 标 ✅ Fixed（现状核查发现 `property_at_index` 签名已改 lifetime elision，修复未回填）+ TD-25 标 ✅ Fixed
+- **Docs**: `docs/adr/0019-worker-restart-policy.md` —— 追加决策 8「不实装 docker worker restart：DockerPanel 自管」（TD-25，设计例外显式文档化）
+- 零业务代码（Spike）；回归双档与开工基线一致（1725/0/10 + 1749/0/11）；cycle 总规模修正 ~1900 → ~1100-1200 行级（stage 3 实装缩水 2/3）
+
 ## [0.24.0] - 2026-08-26
 
 ### v0.24.0 cycle 完结 — RAG 历史经验召回主体（机制验证型）+ prompt v3 搭车 cycle
