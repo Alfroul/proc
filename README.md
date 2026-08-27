@@ -319,6 +319,8 @@ E2B 基线（v0.22 首跑，[归档报告](docs/eval/e2b-70q-v0.22.md)）：L0 1
 
 v0.23 变量实验（[ADR-0033](docs/adr/0033-eval-experiments-and-record-tools.md)，[实验归档](docs/eval/promptv2-70q-v0.23.md)）——两条候选修复路径均以数据关闭：**GBNF** 逃生舱结构性不可用（llama-server 对 grammar × tools 同传显式 400 拒绝，冒烟 12 请求判定性，结论绑定 llama-server b8685）；**prompt v2** 措辞无明确增益（净通过 33/35 vs 基线 32，落 E2B 方差带内 → 保守 revert 回 v1）。**E2B 方差带首次量化**：同 binary 同配置复跑 6 query 纯翻转——单次 run 的 ±3 通过数 / ±6 失败模式计数在噪声内，`--compare` 单列差异小于此量级不可单独归因（v0.24 模型底座决策的解读标尺）。E2B 画像维持基线，进一步改善的杠杆是模型升级（v0.24 与 RAG 一并评估）。另：v0.23 起 agent catalog **47 tool 全部真实可用**（录屏 tool 在 TUI Agent 面板经 y/n confirm 真实执行；CLI 单轮路径维持拦截——跨调用保活仅 TUI 会话支持）。
 
+v0.24 RAG + prompt v3 实验（[ADR-0034](docs/adr/0034-rag-experience-recall.md)，[实验归档](docs/eval/rag-v3-70q-v0.24.md)）——四列矩阵（v1 基线 32 / 方差列 35 / RAG-on 37 / v3 27）：**RAG 机制成立但通过率带内**——机制验证两主指标成立（检索召回 80% / 经验引用 57% / 干扰 0）+ **output_degraded 19→9（-12 超带，答案质量增益）**，但净通过 +2 vs 方差列落 ±3 带内 → `[rag]` 维持默认 off（「机制成立但 E2B 兑现不了通过率」）；**prompt v3 负结果**（修订 2 单变量，-5/-8 落带外向下 → revert 回 v1，TD-60 关闭）。E2B 零代码杠杆穷尽——进一步改善路径收敛「模型升级 × RAG-on 复测」组合（v0.25+ 候选首位）。
+
 **Session 观测**<sup>v0.22.0</sup>——TUI Agent 面板每次会话自动留档 JSONL（`~/.config/proc/sessions/`，`agent.toml [session].log = false` 可关；TextDelta 聚合落盘不逐 delta），离线提取 TTFT / 生成时长 / tool 轮数 / confirm 行为指标：
 
 ```bash
@@ -348,6 +350,17 @@ ctx_size = 8192
 [anthropic]
 model = "claude-sonnet-4-6"     # API key 走 ANTHROPIC_API_KEY env，不写配置文件
 max_tokens = 4096
+```
+
+**RAG 经验召回**<sup>v0.24.0</sup>（[ADR-0034](docs/adr/0034-rag-experience-recall.md)，默认 **off**）——把历史成功 query→tool 链检索出来注入 user message 前缀（`[历史经验参考]` 模板 + `[当前问题]` 原文），让 agent「见过一次就会第二次」。语料 = session JSONL 成功段（主语料，随日常使用自动积累）+ eval run passed trace（bootstrap，`eval_corpora` 显式列出才生效）；keyword BM25-lite 检索零依赖；与当前 query 相似的条目自动排除（防 eval 语料泄漏——排除命中数每 query 报告）。E2B 实测（[实验归档](docs/eval/rag-v3-70q-v0.24.md)）：机制成立（召回 80% / 引用 57% / 干扰 0 + degraded -12 超带）但通过率落方差带内 → 维持 off；更强模型底座上是首选复测项：
+
+```toml
+[rag]
+enabled = false                # 总开关（off 态不建索引零开销）
+# budget_tokens = 800          # 注入段 token 预算硬上限（≈1200 chars 整条截断）
+# top_k = 3                    # 检索条数上限
+# exclude_threshold = 0.6      # 污染排除：词元覆盖率阈值（相似 query 不注入）
+# eval_corpora = ["eval-e2b-70q.json"]  # bootstrap 语料路径（相对 cwd）
 ```
 
 **测试基础设施**：50 query（9 场景 L0/L1）真实 Gemma E2B 响应录制为 JSONL fixture，`--provider mock` 确定性回放——CI 跑 agent loop 零 LLM 调用、零 API 成本。E2B 实测：QUICK 18/18，FULL L0 23/23（含 2 个验收口径 artifact 放宽）+ L1 21/27（78%，τ²-bench 基线 29.4% 的 2.6 倍）。

@@ -687,6 +687,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.23 cycle 追踪**：无 key 第 4 个 cycle open（v0.20/0.21/0.22/0.23，v0.23 brainstorm 决策 3 拍板不跑）；闭环路径不变——有 key 后 `ANTHROPIC_API_KEY=... proc agent eval --provider anthropic --output ...` 一条命令三连闭环（终态确认见 REVIEW-v0.23 观察 4）。
 
+**v0.24 cycle 追踪**：无 key 第 5 个 cycle open（v0.24 brainstorm 决策 4 拍板不跑）；闭环路径不变。v0.25+ 若启动「模型升级 × RAG-on 复测」（REVIEW-v0.24 候选 1），Sonnet 云端档并入同一对比矩阵（E2B / E4B / Sonnet 三档光谱）自然到期。
+
 ### TD-56（REVIEW-v0.20 P2-2）：Anthropic model ID 未对真实 API 验证
 
 **位置**：`src/agent/anthropic_provider.rs::DEFAULT_MODEL`（`claude-sonnet-4-6`，brainstorm 决策 9 写入）
@@ -701,6 +703,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.23 cycle 追踪**：无 key 继续 open（随 TD-55 同批，见其追踪行）。
 
+**v0.24 cycle 追踪**：无 key 继续 open 第 5 个 cycle（随 TD-55 同批）。
+
 ### TD-57（REVIEW-v0.20 P2-3）：Anthropic nudge 路径连续 user 消息实测缺失
 
 **位置**：`src/agent/anthropic_provider.rs::messages_to_anthropic`（空 assistant 消息跳过逻辑，stage 4 决策 B）
@@ -714,6 +718,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **v0.20 stage 4 决策**：归档 v0.21+（随 TD-55 顺带覆盖）。
 
 **v0.23 cycle 追踪**：无 key 继续 open（随 TD-55 顺带覆盖，见其追踪行）。
+
+**v0.24 cycle 追踪**：无 key 继续 open 第 5 个 cycle（随 TD-55 顺带覆盖）。
 
 ### TD-58（REVIEW-v0.21 P2）：`test_alert::test_metric_extract_process_cpu` 并发 flaky（观察项）
 
@@ -731,6 +737,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.23 cycle 追踪**：各 stage 开工基线验证均未再现。继续观察，原判不动（stage 2 一次 `test_session_drop_during_confirm_does_not_hang` 编译+满载 5s 窗口 flaky 系另一测试，复跑绿，不并入本条）。
 
+**v0.24 cycle 追踪**：各 stage 开工全量回归双档 0 failed 均未再现。继续观察，原判不动。
+
 ### TD-59（REVIEW-v0.22 P2）：session log 累积无轮转 / 清理（观察项）
 
 **位置**：`src/agent/session_log.rs::SessionRecorder::start`（`dirs_config_dir()/sessions/<utc>-<provider>.jsonl`）
@@ -743,7 +751,9 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.22 stage 4 决策**：归档观察项。触发条件 = 用户磁盘占用可感知 / sessions 目录上万文件。归档目的：不让「不预实现」变成「永不处理」。
 
-### TD-60（REVIEW-v0.23 P2）：prompt v3 候选——修订 2（写操作发现链）单独实验
+**v0.24 cycle 追踪**：维持观察，未触发。**新增联动注**：v0.24 起 session JSONL 兼任 RAG 主语料（`src/agent/rag/` 成功段状态机索引）——未来若实施轮转/清理，需与 RAG 语料口径联动（清理只影响索引新鲜度不影响正确性——`RagIndex::build` 全量重建按现存文件）；语料密度现状见 REVIEW-v0.24 Findings「RAG 语料密度」观察项。
+
+### TD-60（REVIEW-v0.23 P2）：prompt v3 候选——修订 2（写操作发现链）单独实验（v0.24 实验关闭）
 
 **位置**：`src/agent/prompts/system.md`（终态 v1；v2 措辞稿留 [ADR-0033 附录 A](../adr/0033-eval-experiments-and-record-tools.md) 备查，修订 2 段独立可用）
 
@@ -754,6 +764,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **修复方案**（v0.24+ 实施时）：单独 diff 修订 2（不含修订 1）→ QUICK 冒烟 → FULL 三列（基线 / v3 / 复跑方差列），按方差带标尺解读（单列差异 < ±3 通过数不可单独归因）；可与 v0.24 模型底座对比列同矩阵跑摊薄挂机成本。
 
 **v0.23 stage 4 决策**：归档 v0.24+（与 RAG cycle 一并评估）。理由：单变量复验成本一次 FULL ~47m + 措辞稿已备；v3 落地与否由数据说话（与 v2 同款 D4 保守标准）。
+
+**v0.24 终态（已关闭）**：v0.24 stage 3 按修复方案原文路径执行（单独 diff 修订 2 → 独立 commit `e166e27` 先于挂机 → FULL 单变量列，E2B × RAG off × v3，binary `v0.23.0-8-ge166e27`）——**负结果**：净通过 27/70（**-5 vs 基线 / -8 vs 方差列，落带外向下**）+ L0 13/23（掉 4-6）+ output_degraded 24（高于基线带 19-21）双向一致恶化 → D4 保守标准 **revert 回 v1**（commit `7959030`，system.md 终态 = v1）。机制层面单 query 冒烟发现链三段完整复现（proc_help 找 tool → proc_kill 带参调用 → blocked 后解释+给命令行，v0.23 三处证据延续）但 70q 规模发现链措辞让简单 query 绕路（L0 受伤最重），且 v3 列无 RAG 经验缓冲。**结论：prompt 措辞杠杆在 E2B 上用数据关闭**（叠加 v0.23 v2 捆绑负结果，措辞维度两轮穷尽）；更强底座上措辞敏感度可能不同，但已非独立候选——随「模型升级 × RAG-on 复测」组合才可能重开（REVIEW-v0.24 候选 1）。归档 [docs/eval/rag-v3-70q-v0.24.md](../eval/rag-v3-70q-v0.24.md)。
 
 ### TD-61（REVIEW-v0.23 P2）：GBNF grammar × tools 复测（观察项，挂 llama-server 升级节点）
 
@@ -766,6 +778,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **修复方案**（触发时实施）：升级 llama.cpp 后按附录 B 判定表重跑冒烟（smoke1 L0 3×2 即可判定——请求校验层错误与场景无关）；若互斥放开，GBNF 单变量列复入对比矩阵（预期消灭 proc_finish 泄漏型退化）。
 
 **v0.23 stage 4 决策**：观察项，挂 llama-server 升级节点，不主动排期。归档目的：不让「结构性不可用」的版本绑定结论变成永久结论。
+
+**v0.24 cycle 追踪**：维持观察——v0.24 未升级 llama-server（四列实验均 b8685），节点未触发。若 v0.25+ 启动「模型升级 × RAG-on 复测」需升级 llama.cpp，则 GBNF 复测顺手并入（附录 B 判定表 smoke1 即可判定）。
 
 ---
 

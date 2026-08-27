@@ -5,7 +5,36 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.24.0] - 2026-08-26
+
+### v0.24.0 cycle 完结 — RAG 历史经验召回主体（机制验证型）+ prompt v3 搭车 cycle
+
+v0.24 cycle 是 proc 首个「机制验证型」cycle（净 diff ~3025 行级：src +921/-7 / tests +723/-0 / docs +1381/-0，21 文件）——**「v0.23 建标尺，v0.24 在固定底座上建召回，机制与增益分离归档」**。RAG 历史经验召回完整落地（检索层 corpus/retrieve/index 三模块 + 注入层 `[rag]` 配置接线，keyword BM25-lite 零 deps + per-query 预注入 + 污染防护）但 **`enabled` 默认维持 off**：机制验证两主指标成立——检索召回 **80%**（12/15 人工标注）· 经验引用 **57%**（8/15 链迁移，干扰 0）——且 **output_degraded 19→9（-12 超带，四列唯一超带增益——答案质量改善）**，而净通过 +2 vs 方差列落 ±3 带内 → **「机制成立但 E2B 兑现不了通过率」**两分归档，质量增益给 v0.25+ 模型底座重启决策留直接输入。prompt v3 搭车实验（修订 2 写操作发现链，单变量）负结果（**-5/-8 落带外向下**）→ revert 回 v1，**TD-60 关闭——prompt 措辞杠杆在 E2B 上用数据穷尽**（叠加 v0.23 GBNF/prompt v2 双关闭，E2B 底座零代码杠杆全部穷尽，进一步改善路径收敛「模型升级 × RAG-on 复测」组合——REVIEW-v0.24 候选 1）。MCP tool 46 / agent catalog 47 均不变（预注入路线零 tool）+ 1 份新 ADR-0034（D1~D5 五终判 + 附录 A v3 措辞稿 + 附录 B 语料盘点）+ Cargo deps +0（三连零）。详见 [REVIEW-v0.24](docs/reviews/REVIEW-v0.24.md)（P0 0 / P1 0 / P2 1：TD-55~57 仍 open；TD-60 本 cycle 关闭）。
+
+**核心交付落地范围**：
+
+- **项 1 ADR-0034 设计 Spike + session 语料盘点**（stage 1）：RAG 五终判（D1 检索 keyword BM25-lite 零 deps / D2 注入 per-query 预注入 800 token 硬上限 / D3 语料 session 主语料 + eval trace bootstrap / D4 污染防护相似 query 排除 + 命中报告必归档 / D5 评估机制验证主指标 + 方差带分级拍板）+ 附录 B 语料实测盘点（57 文件仅 2 成功段、96% 空会话 → bootstrap 从「备选」升级为机制验证必需——3 基线 run 去重 40 独立 query）；零业务代码
+- **项 2 RAG 检索层**（stage 2）：`src/agent/rag/` 三模块——corpus.rs（`Entry` 索引单元 + session JSONL 成功段状态机 + bootstrap `EvalRunFile` 直读 + 归一化去重）/ retrieve.rs（CJK 2-gram + idf 加权评分 + 污染排除三类样例锚）/ mod.rs（`RagIndex` 静默降级 + `inject_experience` 模板 1200 chars 整条截断）——库形态零接线（runner/config/builder diff 为空），482 行业务 + 28 测试全绿
+- **项 3 RAG 注入接线 + eval 矩阵 + 拍板**（stage 3）：`[rag]` 五字段配置默认 off + runner `rag_wrap` 注入入口（stderr 报告行）+ builder 构造链三处接线 + 挂机顺序硬约束（RAG-on 列必须 prompt v1 binary——`git_describe` 逐列核对）+ 四列 compare 矩阵 + 机制验证归档 + D5/D4 拍板（**RAG 维持 off / v3 revert `7959030`**）
+
+**关键数字**：
+
+| 指标 | v0.23.0 基线 | v0.24.0 落地 |
+|---|---|---|
+| 全量回归 | 1689 passed / 0 failed / 9 ignored（默认）+ 1713 / 0 / 10（anthropic）| **1725 passed / 0 failed / 10 ignored（默认）+ 1749 / 0 / 11（anthropic）**（+36 CI 双档，0 failed 全程）|
+| RAG 机制验证 | 无（设计倾向）| **召回 12/15（80%）· 引用 8 / 无视 6 / 干扰 0 · 排除命中 42/70 query · est_tokens 均值 296**（预算 37%）|
+| 四列矩阵净通过 | 32（v1 基线）| 35（方差列）/ **37**（RAG-on，+2 带内 → 维持 off）/ **27**（v3，-5/-8 带外 → revert）|
+| output_degraded | 21（v1 基线）| RAG-on **9**（-12 超带——唯一超带增益）/ v3 24（恶化）|
+| MCP tool / agent catalog | 46 / 47 + proc_finish | **不变**（预注入路线零 tool，D2 终判 meta tool 双否）|
+| ADR | 0033 | **新 ADR-0034**（D1~D5 + 两附录）|
+| Cargo deps | +0 | **+0**（keyword 路线，v0.22/0.23/0.24 三连零）|
+
+### v0.24.0 阶段 4 — Review + 收尾（REVIEW-v0.24 + CHANGELOG + README RAG 章节 + tag v0.24.0）
+
+- **Docs**: `docs/reviews/REVIEW-v0.24.md`（新）—— 4 stage 四维度审查 + 实测观察归档 4 条（机制验证结论——「机制成立但 E2B 兑现不了通过率」两分归档 / 方差带解读——「四列最优」≠「增益成立」，±3 标尺首次大规模应用 / 污染防护实效——42/70 query 排除命中是干净归因的前提设施 / v3 负结果 + E2B 零代码杠杆穷尽——路径收敛「模型升级 × RAG-on 复测」）+ Findings（P0 0 / P1 0 / P2 1：TD-55~57 仍 open 第 5 个 cycle；**TD-60 本 cycle 关闭**；RAG 语料密度观察项）+ cycle 数据汇总（净 diff +3025/-7 · 挂机 2 列 80m13s）+ v0.25+ 候选方向评估（「模型升级 × RAG-on 复测」组合首位——决策 1 归档候选表 + degraded -12 互为输入）
+- **Docs**: `docs/tech-debt.md` —— TD-60 终态回填（已关闭——v3 负结果 revert，措辞杠杆在 E2B 上用数据关闭）+ TD-55~58 / TD-59（新增 RAG 语料联动注）/ TD-61 追踪行
+- **Docs**: `README.md` —— AI Agent 章节新增 RAG 经验召回小节（`[rag]` 配置五字段默认 off + 污染防护 + ADR/eval 链接）+ eval harness 段补 v0.24 四列结论；`docs/stages/v0.24-brainstorm.md` stage 4 ✅ + 头部完结 + cycle 总结段 + stage 3 行勘误（默认档 ignored 9→10 笔误）
+- **Changed**: `Cargo.toml`（0.23.0 → 0.24.0，Cargo.lock 同步）+ `git tag v0.24.0`（annotated）；全程零业务代码（diff 仅 docs + Cargo 两文件），bump 前后回归 1725/1749 不变
 
 ### v0.24 stage 3 — RAG 注入层接线 + eval 矩阵挂机（拍板：RAG 维持 off / v3 revert）
 
@@ -13,7 +42,7 @@
 - **测试 E/F/G/H 组**（`tests/test_agent_rag.rs` 追加 8 过 + 1 `#[ignore]` 探针）：RagConfig 解析五锚（完整段 / 空段默认 / 无段 / params 映射 801→1201 / 未知字段拒）/ off 态零开销（user message 原文逐字）/ on 态端到端 complete + streaming（ScriptedProvider seen_messages 前缀断言）/ 200 chars exact 排除变体（透传 = 截断 probe 锚）/ `#[ignore]` 本地召回对照探针（15 抽样覆盖 9 场景 × 3 level，D5 主指标①离线工具）
 - **挂机顺序硬约束**（变量隔离生命线）：RAG-on 列必须跑在 prompt v1 binary 上（system.md include_str 嵌入无配置开关）——接线 `b959277` → RAG-on 列挂机 → v3 落地 `e166e27` → v3 列挂机，各列 `git_describe` 归档核对
 - **两列实验 + 机制验证 + 拍板**（归档 `docs/eval/rag-v3-70q-v0.24.md`，四列 compare 矩阵）：RAG-on 列 **37/70**（L0 20 / L1 17 四列最优，**output_degraded 19→9 超带**）但 +2 vs 方差列落带内 → **D5 三分支「维持 off + 数据归档」**——机制验证两主指标成立（召回 12/15 · 经验引用 引用 8 / 无视 6 / **干扰 0** · 排除命中 42/70 query 首尝试拦截 · est_tokens 均值 296）→「**机制成立但 E2B 兑现不了通过率**」，degraded -12 质量增益给 v0.25+ 模型底座重启决策留直接输入；v3 列 **27/70**（-5/-8 落带外向下，L0 13/23 掉 4-6）→ **revert `7959030` 回 v1**（TD-60 负结果归档，终态回填 stage 4）
-- 全量回归 **1725 / 0 / 9（默认）+ 1749 / 0 / 11（anthropic）**（1717/1741 + 9 新增，off 默认不破基线）；MCP 46 / catalog 47 / Cargo deps +0 不变；ADR-0034 D2 落地注记 + Migration path stage 3 标注；附 stage 2 遗留 fmt 小修（`rag/retrieve.rs` 闭包换行）
+- 全量回归 **1725 / 0 / 10（默认）+ 1749 / 0 / 11（anthropic）**（1717/1741 + 9 新增（8 过 + 1 `#[ignore]` 探针），off 默认不破基线）；MCP 46 / catalog 47 / Cargo deps +0 不变；ADR-0034 D2 落地注记 + Migration path stage 3 标注；附 stage 2 遗留 fmt 小修（`rag/retrieve.rs` 闭包换行）
 
 ### v0.24 stage 2 — RAG 检索层（corpus/retrieve/index 三模块，库形态零接线）
 
