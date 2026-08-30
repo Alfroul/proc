@@ -11,7 +11,7 @@
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -77,6 +77,9 @@ pub enum LogEvent {
 
 /// session JSONL 留档器（`[session].log` 默认 true；写失败静默降级）。
 ///
+/// v0.25 stage 2（ADR-0035 D1）延迟创建：首个非 session_start 事件到达才
+/// 落盘——进面板不发问的会话不产生空文件（空会话治理主项）。
+///
 /// `Clone` 是廉价 Arc 共享——session_loop 主体与 sink / confirm 闭包各持一份。
 #[derive(Clone)]
 pub struct SessionRecorder {
@@ -84,7 +87,13 @@ pub struct SessionRecorder {
 }
 
 struct RecorderInner {
-    writer: BufWriter<File>,
+    /// 延迟创建目标：文件名时间戳 = 构造时刻（与 wall_start 的轻微偏差
+    /// 见 ADR-0035 Consequences，无实际影响）。
+    path: PathBuf,
+    /// None = 文件未创建（pending_start 暂存中）或落盘失败已放弃（静默降级）。
+    writer: Option<BufWriter<File>>,
+    /// SessionStart 暂存（provider, wall_start）：物化时补写首行（ts 0 / seq 0）。
+    pending_start: Option<(String, String)>,
     seq: u64,
     start: Instant,
     /// 聚合中的 TextDelta（首 delta ts，累计 chars）。
@@ -97,35 +106,29 @@ impl SessionRecorder {
         Self::start_in_dir(&crate::dirs_config_dir().join("sessions"), provider)
     }
 
-    /// 测试注入用：指定目录（目录创建 / 文件打开失败 → 静默降级，不影响会话）。
+    /// 测试注入用：指定目录。目录创建失败 → 构造即降级 disabled（`is_enabled`
+    /// 语义：构造成功即 enabled，目录可写性检查保留在构造时）；文件创建延迟
+    /// 到首个非 session_start 事件（ADR-0035 D1），届时失败 → 静默放弃。
     pub fn start_in_dir(dir: &Path, provider: &str) -> Self {
         if fs::create_dir_all(dir).is_err() {
             return Self::disabled();
         }
-        let filename = format!(
+        let path = dir.join(format!(
             "{}-{provider}.jsonl",
             crate::agent::eval::runner::utc_timestamp_compact()
-        );
-        match File::create(dir.join(filename)) {
-            Ok(file) => {
-                let rec = Self {
-                    inner: Some(Arc::new(Mutex::new(RecorderInner {
-                        writer: BufWriter::new(file),
-                        seq: 0,
-                        start: Instant::now(),
-                        pending_delta: None,
-                    }))),
-                };
-                rec.write(
-                    LogEvent::SessionStart {
-                        provider: provider.to_string(),
-                        wall_start: crate::agent::eval::runner::utc_timestamp_iso(),
-                    },
-                    0,
-                );
-                rec
-            }
-            Err(_) => Self::disabled(),
+        ));
+        Self {
+            inner: Some(Arc::new(Mutex::new(RecorderInner {
+                path,
+                writer: None,
+                pending_start: Some((
+                    provider.to_string(),
+                    crate::agent::eval::runner::utc_timestamp_iso(),
+                )),
+                seq: 0,
+                start: Instant::now(),
+                pending_delta: None,
+            }))),
         }
     }
 
@@ -176,26 +179,44 @@ impl SessionRecorder {
         let ts = elapsed_ms(&g.start);
         g.write_entry(LogEvent::ConfirmDecision { approved }, ts);
     }
-
-    fn write(&self, event: LogEvent, ts_rel_ms: u64) {
-        let Some(inner) = &self.inner else { return };
-        let mut g = inner.lock().unwrap();
-        g.write_entry(event, ts_rel_ms);
-    }
 }
 
 impl RecorderInner {
     fn write_entry(&mut self, event: LogEvent, ts_rel_ms: u64) {
+        // D1 延迟创建：首个非 session_start 事件到达才建文件，SessionStart
+        // 届时补写首行；File::create 失败清暂存静默放弃（后续调用 no-op）。
+        if self.writer.is_none() {
+            let Some((provider, wall_start)) = self.pending_start.take() else {
+                return;
+            };
+            match File::create(&self.path) {
+                Ok(file) => {
+                    self.writer = Some(BufWriter::new(file));
+                    self.emit(
+                        LogEvent::SessionStart {
+                            provider,
+                            wall_start,
+                        },
+                        0,
+                    );
+                }
+                Err(_) => return,
+            }
+        }
+        self.emit(event, ts_rel_ms);
+    }
+
+    fn emit(&mut self, event: LogEvent, ts_rel_ms: u64) {
         let entry = SessionLogEntry {
             seq: self.seq,
             ts_rel_ms,
             event,
         };
         self.seq += 1;
-        if let Ok(json) = serde_json::to_string(&entry) {
+        if let (Ok(json), Some(w)) = (serde_json::to_string(&entry), self.writer.as_mut()) {
             // per-line flush：会话崩溃时已写行完整，Drop 无需特殊收尾。
-            let _ = writeln!(self.writer, "{json}");
-            let _ = self.writer.flush();
+            let _ = writeln!(w, "{json}");
+            let _ = w.flush();
         }
     }
 

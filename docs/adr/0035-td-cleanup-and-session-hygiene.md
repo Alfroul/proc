@@ -96,6 +96,13 @@ v0.25 是主线条件未齐窗口期的**维护型轻 cycle**（brainstorm 决�
 - **代价**：延迟创建后 SessionStart 的 wall_start 与文件 mtime 有轻微偏差（构造时刻 vs 首事件时刻——文件名时间戳仍是构造时刻，无实际影响）；TD-53 sysinfo delta 精度低于 ETW（IO counters 含非磁盘 IO，已用 source 字段声明）。
 - **中性**：ask/eval 不落盘现状显式化为测试锚（原为隐式行为）；TD-22/34/52/54 四项状态回填让 tech-debt.md 与代码重新对齐。
 
+## stage 2 实装注记（2026-08-30 落地）
+
+- **D1 落地**：`RecorderInner` 持 `path: PathBuf` + `pending_start: Option<(String, String)>`（provider, wall_start）+ `writer: Option<BufWriter<File>>`；物化收敛在 `write_entry` 单点（`File::create` + 补写 SessionStart ts 0/seq 0 + 写当前事件；届时失败清暂存静默放弃）。TextDelta 聚合段经 `flush_pending` → `write_entry` 同样触发物化，与 D1 触发口径一致。
+- **TD-24 落地**：`on_respawn_failed(now)` = retry_count `saturating_add(1)` + `last_crash = Some(now)`（backoff 从失败尝试点重新起算；`Some` 保持 `restart_tick` pending 过滤器命中）。生产路径只在 `decide_restart` 为 Some（retry_count < MAX_RETRIES）时被调，计数不越界。mock 口径：非 canonical thread_name 直插 `restart_history` → `spawn_one` 的 `_ => false` 分支确定性失败（不依赖环境，规避 disk-io-etw 需管理员的不确定性）。
+- **TD-40 落地**：`RegexBuilder::new(pattern).size_limit(64 * 1024).build()`；测试用 `(a{300}){300}`（展开 ~90K 指令）验证编译期拒绝。
+- **实测**：新增 9 测试（三路径 5 + TD-24 3 + TD-40 1），回归双档 1734 / 1758（+9 双档同量，0 failed）；`tests/test_agent_rag.rs` 全绿（D1 口径核对实证——无 QueryStarted 的文件在 corpus 状态机下不产语料，治理不影响索引）；MCP tool 46 / catalog 47 / deps +0 锚在位。
+
 ## stage 2/3 实装清单预览
 
 **stage 2（Slice A：语料卫生 + 边角清仓，~150 业务 + ~150 测试 + ~100 doc）**：

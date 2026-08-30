@@ -234,3 +234,47 @@ fn restart_status_restarted_within_3s_window() {
     // 4s 后（> 3s 窗口）状态本身仍是 Restarted，但 layout.rs::restart_label_for
     // 在 > 3s 时返回空字符串（淡出）。这里只验证状态机，banner 淡出在 layout 测试。
 }
+
+// ---------------------------------------------------------------------------
+// v0.25 TD-24：spawn_one 恒 false → permanent_failure 止损
+// ---------------------------------------------------------------------------
+
+#[test]
+fn td24_spawn_failure_drives_retry_count_to_permanent_failure() {
+    // TD-24 验证口径（TD 原文）：mock spawn_one 永远返 false → restart_tick
+    // 调 MAX_RETRIES 次后 permanent_failure。mock 手法：非 canonical
+    // thread_name 直插 restart_history（pub 字段既有测试手法）——spawn_one
+    // 的 `_ => false` 分支确定性失败，不依赖环境（对比 disk-io-etw 需管理员）。
+    use proc::workers::RestartState;
+
+    let mut mgr = WorkerManager::new(None);
+    let mut state = RestartState::new(t0());
+    assert!(state.record_crash(t0()));
+    mgr.restart_history.insert("mock-failing-worker", state);
+
+    // tick 1（t0+5s，backoff(0)=5s 到期）：spawn 失败 → retry_count=1；
+    // 未「重启成功」不进 restarted 列表。
+    let t1 = t0() + Duration::from_secs(5);
+    assert!(mgr.restart_tick(t1, None).is_empty());
+    assert_eq!(mgr.restart_history["mock-failing-worker"].retry_count, 1);
+
+    // tick 2（失败点 +30s，backoff(1)）：retry_count=2。
+    let t2 = t1 + Duration::from_secs(30);
+    mgr.restart_tick(t2, None);
+    assert_eq!(mgr.restart_history["mock-failing-worker"].retry_count, 2);
+
+    // tick 3（失败点 +300s，backoff(2)）：retry_count=3 → permanent failure。
+    let t3 = t2 + Duration::from_secs(300);
+    mgr.restart_tick(t3, None);
+    let state = &mgr.restart_history["mock-failing-worker"];
+    assert_eq!(state.retry_count, 3);
+    assert!(state.is_permanent_failure());
+    assert!(matches!(
+        RestartStatus::from_state(state, t3),
+        RestartStatus::PermanentFailure { retry_count: 3 }
+    ));
+
+    // 止损：permanent 后 tick 不再尝试（计数不再增长）。
+    mgr.restart_tick(t3 + Duration::from_secs(600), None);
+    assert_eq!(mgr.restart_history["mock-failing-worker"].retry_count, 3);
+}

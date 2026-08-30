@@ -16,7 +16,9 @@
 //!    - 同 tick 调 `try_respawn`（backoff 未到返回 false，到期则 spawn + retry_count+=1）
 //! 2. `App::tick` 每 1s 调 `WorkerManager::restart_tick(now, crash_tx)`：
 //!    - 遍历 `restart_history` 中 `last_crash.is_some()` 的 worker
-//!    - 时间到 backoff 就 spawn + retry_count+=1
+//!    - 时间到 backoff 就 spawn：成功 `on_respawned`（retry_count+=1），
+//!      失败 `on_respawn_failed`（retry_count 同样 +1，v0.25 TD-24 止损——
+//!      环境持续不支持时 MAX_RETRIES 后 permanent_failure，不再无限重试）
 //! 3. `WorkerManager::restart_status(name, now)` 返回 banner 渲染用的状态
 
 use std::time::{Duration, SystemTime};
@@ -114,6 +116,14 @@ impl RestartState {
         self.retry_count = self.retry_count.saturating_add(1);
         self.last_restart = Some(now);
         self.last_crash = None;
+    }
+
+    /// v0.25 TD-24：spawn 失败后调用——retry_count += 1（达 [`MAX_RETRIES`]
+    /// 后 permanent_failure 止损），`last_crash` 重定位到失败尝试点（backoff
+    /// 从该点重新起算；保持 `Some` 让 `restart_tick` 的 pending 过滤器继续命中）。
+    pub fn on_respawn_failed(&mut self, now: SystemTime) {
+        self.retry_count = self.retry_count.saturating_add(1);
+        self.last_crash = Some(now);
     }
 }
 
@@ -285,6 +295,40 @@ mod tests {
         assert_eq!(s.retry_count, 1);
         assert_eq!(s.last_restart, Some(now));
         assert!(s.last_crash.is_none());
+    }
+
+    #[test]
+    fn on_respawn_failed_increments_and_rebases_backoff() {
+        // v0.25 TD-24：spawn 失败 retry_count+=1，backoff 从失败尝试点重新起算。
+        let mut s = RestartState::new(t0());
+        s.record_crash(t0());
+        let fail_at = t0() + Duration::from_secs(5);
+        s.on_respawn_failed(fail_at);
+        assert_eq!(s.retry_count, 1);
+        assert_eq!(s.last_crash, Some(fail_at));
+        // backoff(1) = 30s：29s 未到期，30s 到期。
+        assert!(
+            s.decide_restart(fail_at + Duration::from_secs(29))
+                .is_none()
+        );
+        assert!(
+            s.decide_restart(fail_at + Duration::from_secs(30))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn on_respawn_failed_reaches_permanent_failure() {
+        // 连续 MAX_RETRIES 次 spawn 失败 → permanent_failure（TD-24 止损终点）。
+        // 生产路径 on_respawn_failed 只在 decide_restart 为 Some（retry_count <
+        // MAX_RETRIES）时被调，计数不会越过 MAX_RETRIES。
+        let mut s = RestartState::new(t0());
+        s.record_crash(t0());
+        for _ in 0..MAX_RETRIES {
+            s.on_respawn_failed(t0());
+        }
+        assert_eq!(s.retry_count, MAX_RETRIES);
+        assert!(s.is_permanent_failure());
     }
 
     #[test]

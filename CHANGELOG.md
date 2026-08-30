@@ -7,6 +7,15 @@
 
 ## [Unreleased]
 
+### v0.25 stage 2 — Slice A：空会话治理（D1 延迟创建）+ TD-24 止损状态机 + TD-40 regex hardening
+
+- **Changed**: `src/agent/session_log.rs` —— **D1 延迟创建**（ADR-0035）：`RecorderInner` 加 `path` / `pending_start`（provider+wall_start 暂存），`writer` 变 `Option`；**首个非 session_start 事件到达才 `File::create`**（SessionStart 届时补写首行 ts 0/seq 0；Error 事件也触发落盘留 2 行诊断文件）——TUI 进 Agent 面板不发问退出不再留空文件（102/100 现象根治）；`is_enabled` 语义不变（构造成功即 enabled，目录可写性检查保留在构造时）；`File::create` 届时失败清暂存静默放弃（降级契约不变）；文件名时间戳仍为构造时刻
+- **Changed**: `src/workers/{restart,manager}.rs` —— **TD-24**：`RestartState::on_respawn_failed(now)`（retry_count saturating +1 + `last_crash` 重定位到失败尝试点——backoff 从该点重新起算）+ `try_respawn` 在 `spawn_one` 返 false 时调用——环境持续不支持该 worker 时 MAX_RETRIES 后 permanent_failure 止损（原行为：retry_count 永不增长，banner 永远 Restarting 的无限重试）
+- **Changed**: `src/security/trusted_signers.rs` —— **TD-40**：`vendor_pattern` 编译改 `RegexBuilder::size_limit(64 * 1024)`（嵌套量词展开超预算在编译期被拒，堵理论 ReDoS 面；regex 自带 API，deps +0）
+- **Tests**: `tests/test_agent_v0_25_stage_2.rs`（新，5 过）——三路径语料回归（ADR-0035 D1 口径）：TUI 语义不发问无文件（recorder 层 + session 层）/ Error-only 2 行文件 / **query 进行中退出文件保留**（HangingProvider `stream::pending` + drop handle 边界）/ **ask·eval 不落盘现状锚**（USERPROFILE 重定向 + `build_runner(mock)` + `run_with_progress` 实跑 fixture query 后 sessions 目录零新增——防未来 recorder 接进 build_runner 的口径漂移）；发问首两行锚由既有 v0_22_stage_3 完整生命周期测试覆盖不重复
+- **Tests**: TD-24（restart.rs 单测 ×2 增计数/重定位 backoff 阶梯 + 到达 permanent_failure；test_worker_restart.rs 集成 ×1——**TD 原文 mock 口径**：非 canonical thread_name 直插 `restart_history` 走 `spawn_one` `_ => false` 确定性失败，三次 tick（5s/30s/300s）后 retry_count=3 + `PermanentFailure` banner + 止损不再尝试）+ TD-40（`(a{300}){300}` 超 64KB 被拒 / 普通 pattern 存活）
+- 回归双档 **1725+9=1734 / 0 / 10 + 1749+9=1758 / 0 / 11**（新增 9 测试双档同量）；`tests/test_agent_rag.rs` 全绿（RAG 索引无影响锚——空文件本就无成功段）；MCP tool 46 / catalog 47 / Cargo deps +0 不变
+
 ### v0.25 stage 1 — 设计 Spike：空会话机制归因 + ADR-0035 定稿 + TD 逐项终判（TD-52/54 已落地重大发现）
 
 - **Docs**: `docs/adr/0035-td-cleanup-and-session-hygiene.md`（新）—— D1 空会话治理终判（**延迟创建**：首个非 session_start 事件才落盘，弃退出清理——Drop 语义不可靠）+ D2 MCP 持久化（**TD-52/54 现状核查确认 v0.17 已落地**（feature `mcp-persistent-state` 默认启用），stage 3 仅剩回填；**TD-53 改道 sysinfo delta**——NT Kernel Logger 单实例 + 非管理员恒失败否决 ETW worker 方案，改在 `run_snapshot_worker` 内做 delta 计算，~200-300 → ~60-100 行）+ D3 TD 逐项终判表（12 项）+ D4 验收锚（tool 46 / catalog 47 / deps +0）

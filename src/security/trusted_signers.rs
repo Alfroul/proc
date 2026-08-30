@@ -71,7 +71,12 @@ pub fn load_trusted_signers_from(path: &std::path::Path) -> Vec<TrustedSignersRu
         .signer
         .into_iter()
         .filter_map(|raw| {
-            let Ok(regex) = regex::Regex::new(&raw.vendor_pattern) else {
+            // v0.25 TD-40：限制编译预算（64KB）——用户 toml 里的极端 regex
+            // （嵌套量词展开）在编译期被拒，堵住理论 ReDoS 面。
+            let Ok(regex) = regex::RegexBuilder::new(&raw.vendor_pattern)
+                .size_limit(64 * 1024)
+                .build()
+            else {
                 tracing::warn!(
                     "trusted_signers rule「{}」vendor_pattern 正则编译失败：{}",
                     raw.name,
@@ -179,6 +184,37 @@ vendor_pattern = "good"
         let rules = load_trusted_signers_from(&tmp);
         let _ = std::fs::remove_file(&tmp);
         assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "good");
+    }
+
+    #[test]
+    fn td40_oversized_regex_rejected_by_size_limit() {
+        // v0.25 TD-40：嵌套量词展开超 64KB 编译预算的 pattern 在编译期被拒
+        //（RegexBuilder::size_limit，ReDoS 硬化）；普通 pattern 不受影响。
+        let tmp = std::env::temp_dir().join(format!(
+            "proc-trustedsigners-td40-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &tmp,
+            r#"
+[[signer]]
+name = "evil"
+vendor_pattern = "(a{300}){300}"
+
+[[signer]]
+name = "good"
+vendor_pattern = "^Adobe Inc\\.$"
+"#,
+        )
+        .unwrap();
+        let rules = load_trusted_signers_from(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(
+            rules.len(),
+            1,
+            "嵌套量词 (a{{300}}){{300}} 展开应超 64KB 被拒"
+        );
         assert_eq!(rules[0].name, "good");
     }
 

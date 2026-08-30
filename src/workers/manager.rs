@@ -209,13 +209,17 @@ impl WorkerManager {
             if let Some(state) = self.restart_history.get_mut(name) {
                 state.on_respawned(now);
             }
+        } else if let Some(state) = self.restart_history.get_mut(name) {
+            // v0.25 TD-24：spawn 失败也计数——否则环境持续不支持该 worker 时
+            // retry_count 永不增长，无法到达 permanent_failure 止损。
+            state.on_respawn_failed(now);
         }
         spawned
     }
 
     /// 真实 spawn 一个新 worker 替换旧的（旧的 drop 时 shutdown + join 旧线程）。
     /// net_flow / dns_log / disk_io_etw / schannel_etw 是 Option 字段：detect/try_spawn
-    /// 失败时返回 false（不更新 state）。
+    /// 失败时返回 false（调用方 `try_respawn` 走 `on_respawn_failed` 计数止损）。
     fn spawn_one(&mut self, name: &'static str, crash_tx: Option<&Sender<WorkerCrash>>) -> bool {
         match name {
             "port-snapshot-worker" => {
