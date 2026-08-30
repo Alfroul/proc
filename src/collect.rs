@@ -1663,6 +1663,16 @@ impl SystemSnapshot {
         &self.process_cache
     }
 
+    /// Mutable access to the incremental process cache.
+    ///
+    /// v0.25 stage 3 TD-53（ADR-0035 D2 改道）：MCP snapshot worker 在
+    /// `refresh_heavy_incremental` 应用新数据后，用 sysinfo delta 填
+    /// `disk_read_speed` / `disk_write_speed`（TUI `update_disk_speeds` 同款口径）。
+    #[must_use]
+    pub fn process_cache_mut(&mut self) -> &mut HashMap<u32, ProcessInfo> {
+        &mut self.process_cache
+    }
+
     /// 完整刷新（首次启动用）
     pub fn refresh(&mut self) -> Result<()> {
         self.refresh_light();

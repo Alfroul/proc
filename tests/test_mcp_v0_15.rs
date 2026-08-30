@@ -496,7 +496,7 @@ fn test_proc_metrics_gpu_returns_ok_with_providers_array() {
 
 #[test]
 fn test_proc_metrics_disk_io_returns_per_disk_array() {
-    let out = metrics::make_metrics_disk_io_json(None);
+    let out = metrics::make_metrics_disk_io_json(None, None);
     assert_eq!(out["ok"], serde_json::json!(true));
     // total 段在
     let total = &out["total"];
@@ -516,7 +516,7 @@ fn test_proc_metrics_disk_io_returns_per_disk_array() {
 #[test]
 fn test_proc_metrics_disk_io_filter_by_device_returns_subset_or_empty() {
     // device=Some 不存在的设备 → per_disk 空，但 total/disks 字段仍返（决策 5）
-    let out = metrics::make_metrics_disk_io_json(Some("DEFINITELY_NOT_A_REAL_DEVICE_XYZ"));
+    let out = metrics::make_metrics_disk_io_json(Some("DEFINITELY_NOT_A_REAL_DEVICE_XYZ"), None);
     assert_eq!(out["ok"], serde_json::json!(true));
     assert_eq!(
         out["device_filter"],

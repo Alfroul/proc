@@ -7,6 +7,24 @@
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-30
+
+### v0.25.0 cycle 完结 — TD 清仓 + session 语料卫生（维护型轻 cycle）
+
+v0.25 是主线条件未齐窗口期的**维护型轻 cycle**（brainstorm 5 决策 2026-08-27 拍板；净规模 ~1100 行级——ADR-0035 stage 1 把 stage 3 实装从 ~450 砍到 ~100-150）——**「主线第 3 次搁置（模型组合设计留档附录 A），清偿工程债存量 + 治理 session 空语料，为主线重启交付干净底座」**。三组打包全清：① **语料卫生**——D1 延迟创建根治空会话（TUI 进 Agent 面板不发问不再落盘，102/100 现象消除；三路径语料回归测试 5 例锚定）；② **边角清仓**——TD-24 worker restart 止损状态机（spawn_one 恒败 → MAX_RETRIES 后 permanent_failure，不再无限重试）+ TD-40 regex size_limit(64KB) ReDoS 硬化 + TD-25/34 文档关闭；③ **MCP 观测补全**——TD-53 改道 sysinfo delta（per-process disk_io 段 + `proc_ls` disk bps 附带收益，避开 NT Kernel Logger 单实例陷阱）+ TD-50 `proc_smart` schema 层 `_meta.x-deprecated` hint + TD-52/54 状态回填（v0.17 已落地）。**零挂机**（纯工程 cycle——tool 语义不变原则：只加响应字段不改既有字段含义，基线可比性按 brainstorm 风险 4 口径论证）。MCP tool 46 / agent catalog 47 / Cargo deps +0 三不变锚全程保持；TD 存量从十余项 open 收敛到 8 项（全部既定归档/观察项，无新增债）。详见 [REVIEW-v0.25](docs/reviews/REVIEW-v0.25.md)。
+
+### v0.25 stage 3 — Slice B + Review：TD-53 改道 sysinfo delta + TD-50 x-deprecated hint + TD 批量回填 + cycle 收尾
+
+- **Added**: `proc_metrics_disk_io` 响应加 **`per_process` 段**（TD-53，ADR-0035 D2 改道）——`{ source: "sysinfo-delta", count, processes[] {pid, name, read_bps, write_bps} }`，read+write 降序 top-N 默认 10（`top` 参数覆盖）；source 字段声明口径（Windows IO counters 含非磁盘 IO 如命名管道，与 TUI 非管理员档一致）；`device` 过滤不影响 per_process（per-process counters 无法按盘归属）
+- **Changed**: `src/mcp/handler/mod.rs` —— **TD-53 worker delta 计算**：`compute_process_disk_speeds` 纯函数（TUI `update_disk_speeds` 同款口径：`(pid, start_time)` 键控 `disk_usage` 差分 / elapsed + `saturating_sub` 防 counter 回退 + 首观测只建基线 + 尾部重建基线淘汰死亡进程）+ `run_snapshot_worker` 局部基线状态（`prev_disk`/`prev_disk_at` 不进 handler 字段，无锁竞争）+ **只在 `refresh_heavy_incremental` 返 `Ok(true)` 时触发**（pending tick cache 未变重算会把速度刷成 0）；**附带收益**：`proc_ls` 的 `disk_read_bps/disk_write_bps` 随 worker 填充同步受益
+- **Changed**: `src/collect.rs` —— `SystemSnapshot::process_cache_mut()` 可变访问器（`process_cache()` 对称补全，worker 填 speed 字段最小开口）
+- **Changed**: `src/mcp/handler/mod.rs` —— **TD-50**：`proc_smart` `#[tool(meta = deprecated_meta())]`——schema 层 `_meta: {"x-deprecated": true}`（rmcp `Tool.meta`，MCP 规范官方扩展键），与 v0.17 description `[Deprecated]` 文本层 hint 双轨；tool 不删保外部 client，MCP tool 46 不变
+- **Changed**: `src/agent/tools/dispatch.rs` —— `proc_metrics_disk_io` 分发同步传 `top`（`usize_of` 既有 helper）；`tests/test_mcp_v0_15.rs` 两处调用点机械补第二参
+- **Docs**: `docs/tech-debt.md` —— **TD 批量回填**：TD-24/TD-40 标 ✅ Fixed（stage 2）+ TD-52/TD-54 标 ✅ Fixed（v0.17 已落地，状态滞后回填）+ TD-50/TD-53 标 ✅ Fixed（本 stage）+ cycle 清仓盘点总检段（open 存量收敛到 8 项）
+- **Docs**: `docs/reviews/REVIEW-v0.25.md`（新——D4 验收锚核对 + 风险 4 零挂机口径声明 + v0.26+ 候选方向评估）+ ADR-0035 扩 stage 3 实装注记 + README（`proc_smart` deprecated 注记 + `proc_metrics_disk_io` per_process 说明 + TD-52 过时注修正）
+- **Tests**: `tests/test_mcp_v0_25_stage_3.rs`（新，8 过）——TD-53 单元 ×4（差分精确断言 / 首观测基线 / counter 回退 saturating / 基线重建 + PID 复用键控，合成数据不依赖真实 sysinfo）+ TD-53 响应段 ×2（per_process 结构 / source 口径 / 降序 / top 截断 + 既有字段不缺锚）+ TD-50 运行时 ×1（`proc_smart_tool_attr().meta` 含 `x-deprecated: true`——宏生成 pub 静态函数直接拿 Tool struct，比 v0.17 源码 grep 更强的 schema 断言 + `proc_metrics_smart` 阴性对照）+ tool 46 运行时锚 ×1
+- 回归双档 **1734+8=1742 / 0 / 10 + 1758+8=1766 / 0 / 11**（79 行 test result）；MCP tool 46 / catalog 47 / Cargo deps +0（Cargo.lock 零 diff）不变锚在位
+
 ### v0.25 stage 2 — Slice A：空会话治理（D1 延迟创建）+ TD-24 止损状态机 + TD-40 regex hardening
 
 - **Changed**: `src/agent/session_log.rs` —— **D1 延迟创建**（ADR-0035）：`RecorderInner` 加 `path` / `pending_start`（provider+wall_start 暂存），`writer` 变 `Option`；**首个非 session_start 事件到达才 `File::create`**（SessionStart 届时补写首行 ts 0/seq 0；Error 事件也触发落盘留 2 行诊断文件）——TUI 进 Agent 面板不发问退出不再留空文件（102/100 现象根治）；`is_enabled` 语义不变（构造成功即 enabled，目录可写性检查保留在构造时）；`File::create` 届时失败清暂存静默放弃（降级契约不变）；文件名时间戳仍为构造时刻

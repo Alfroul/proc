@@ -423,7 +423,9 @@ fn dispatch_value(registry: &ToolRegistry, name: &str, args: &Value) -> (Value, 
         // ---- performance ----
         "proc_metrics_system" => make_metrics_system_json(),
         "proc_metrics_gpu" => make_metrics_gpu_json(),
-        "proc_metrics_disk_io" => make_metrics_disk_io_json(str_of(args, "device")),
+        "proc_metrics_disk_io" => {
+            make_metrics_disk_io_json(str_of(args, "device"), usize_of(args, "top"))
+        }
         "proc_metrics_smart" => make_metrics_smart_json(str_of(args, "device")),
         "proc_metrics_thermal" => make_metrics_thermal_json(),
         "proc_metrics_history" => match str_of(args, "metric") {

@@ -256,7 +256,7 @@
 **验证**：`proc diag --json | jq '.dns_collector'` 输出 `"etw"` / `"powershell"` / `"none"`。
 **v0.11.0 stage 8 决策**：不修。理由：(1) human-readable 模式已含此信息，用户可临时用 human-readable；(2) JSON schema 变更需在 rmcp MCP tools 同步——优先级低于 P1 修复。归档为 v0.12+ 候选。
 
-### TD-24（REVIEW-13 P2-2）：worker restart spawn_one 失败时 retry_count 不增加，无法到达 permanent_failure
+### TD-24（REVIEW-13 P2-2）：worker restart spawn_one 失败时 retry_count 不增加，无法到达 permanent_failure ✅ Fixed in v0.25 stage 2
 
 **位置**：`src/workers/manager.rs:215-220`（`try_respawn` 在 spawn_one 返 false 时仅不调 on_respawned）
 **现状**：panic 后 `spawn_one` 失败（如 `detect_collector()` 返 None 因环境变化），`on_respawned` 不调用，retry_count 不增加。`state.last_crash` 仍在，下次 `restart_tick`（1s 后）会再次尝试 spawn_one——按 backoff 间隔（5s/30s/5min）重试。这意味着环境持续不支持该 worker 时，**永远无法到达 permanent_failure 状态**——worker 看似在重试，实际每次都失败。
@@ -264,6 +264,8 @@
 **修复**：在 `spawn_one` 失败时调用 `state.on_respawn_failed(now)` 让 retry_count += 1，达到 MAX_RETRIES 后进入 permanent_failure 止损。
 **验证**：mock spawn_one 永远返 false → restart_tick 调 MAX_RETRIES 次后 banner 显示 permanent_failure。
 **v0.11.0 stage 8 决策**：不修。理由：(1) 实际触发场景极少（权限切换）；(2) banner 已显示 restarting，用户能感知；(3) 修复需新增 RestartState::on_respawn_failed 方法 + 状态机扩展测试，改动中等。归档为 v0.12+ 候选。
+
+> **v0.25 stage 2 标 ✅ Fixed**（commit `43300d9`，ADR-0035 D3）：`RestartState::on_respawn_failed(now)`（retry_count `saturating_add(1)` + `last_crash` 重定位到失败尝试点——backoff 从该点重新起算）+ `try_respawn` 在 `spawn_one` 返 false 时调用。测试按 TD 原文 mock 口径：非 canonical thread_name（`"mock-failing-worker"`）直插 `restart_history` 走 `spawn_one` `_ => false` 确定性失败（规避 disk-io-etw 需管理员的环境不确定性），三次 tick（5s/30s/300s）后 retry_count == 3 + `PermanentFailure` banner + 止损不再尝试。
 
 ### TD-25（REVIEW-13 P2-3）：docker worker 不在 canonical_worker_thread_name 列表 ✅ Fixed in v0.25 stage 1（ADR-0019 追加决策 8）
 
@@ -428,7 +430,7 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **验证**：`cargo test --release` 全过（无 macOS 测试需要保留）。
 **v0.12.2 决策**：✅ **已修复**。删整个 `non_target_stubs` mod；文件顶部 doc comment 同步把「三类用例」改「两类用例」（删 macOS 跨平台条目）。原 stage 6 决策「macOS 贡献者友好」在 v0.12 release 稳定后翻盘——贡献者实际只在 Windows 开发，保留 dead mod 反而误导。
 
-### TD-40（REVIEW-14 P2-3）：`trusted_signers.toml` regex 无复杂度限制
+### TD-40（REVIEW-14 P2-3）：`trusted_signers.toml` regex 无复杂度限制 ✅ Fixed in v0.25 stage 2
 
 **位置**：`src/security/trusted_signers.rs:74`（`regex::Regex::new(&raw.vendor_pattern)`）
 **现状**：用户在 `~/.config/proc/trusted_signers.toml` 配置的 `vendor_pattern` 直接传给 `regex::Regex::new`，无 size / 复杂度限制。
@@ -436,6 +438,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 **修复**：加 regex 复杂度 lint 或 size limit（如 `regex::RegexBuilder::size_limit(64 * 1024)`）。
 **验证**：构造极端 regex 验证 RegexBuilder 拒绝。
 **v0.12.0 stage 6 决策**：不修。理由：(1) regex crate 自身有 NFA simulation 防回溯爆炸；(2) 实际匹配对象长度短，风险低；(3) 修复需评估 size_limit 阈值（过严误报 / 过松无效）。归档为 v0.13+ 安全候选。
+
+> **v0.25 stage 2 标 ✅ Fixed**（commit `43300d9`，ADR-0035 D3）：`RegexBuilder::new(pattern).size_limit(64 * 1024).build()` 替换裸 `Regex::new`——嵌套量词展开超编译预算的 rule 被 filter_map 拒绝（测试用 `(a{300}){300}` 展开 ~90K 指令验证拒绝 + 普通 `^Adobe` 存活）。regex crate 自带 API，deps +0。
 
 ### TD-41（REVIEW-14 P2-4）：SYSTEM_BOOT_ENTRIES 白名单按 process name 不严格
 
@@ -596,7 +600,7 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 > v0.15.0 cycle stage 4 Review 产出 [`docs/reviews/REVIEW-v0.15.md`](reviews/REVIEW-v0.15.md)，P2 = 5 项归档到此段。
 
-### TD-50（REVIEW-v0.15 P2-1）：`proc_metrics_smart` vs `proc_smart` 入口重叠
+### TD-50（REVIEW-v0.15 P2-1）：`proc_metrics_smart` vs `proc_smart` 入口重叠 ✅ Fixed in v0.25 stage 3
 
 **位置**：
 - `src/mcp/handler/metrics.rs::make_metrics_smart_json`（device=None 走聚合 vs device=Some 走详细 attributes）
@@ -614,6 +618,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.15 stage 4 决策**：归档 v0.16+ cycle 评估。理由：(1) `proc_smart` 是 v0.7 既有 17 tool 之一，外部 client（Claude Desktop / Cursor）可能已集成，废弃需评估破坏性；(2) `proc_metrics_smart` 双路径设计是 stage 3 决策 2 落地，stage 1 §4c 待定项已闭环；(3) 保持现状 (c) 是 surgical 默认，agent 二选一不阻断。
 
+> **v0.25 stage 3 标 ✅ Fixed**（ADR-0035 D2）：按修复方案 (a) 落地——schema 层 `_meta: {"x-deprecated": true}`（rmcp `#[tool]` 宏 `meta` 属性 → `Tool.meta`，MCP 规范官方扩展键）+ README 注记。与 v0.17 的 description `[Deprecated]` 文本层 hint 双轨（v0.17 落地文本层时 TD 仍记 open——ADR-0035 stage 1 核查确认 schema 层无痕迹）。tool 本体不删（外部 client 兼容），MCP tool 46 不变锚保持。运行时断言：`ProcMcpHandler::proc_smart_tool_attr().meta` 含 `x-deprecated: true` + `proc_metrics_smart_tool_attr().meta` 为 None（阴性对照）。
+
 ### TD-51（REVIEW-v0.15 P2-2）：`MonitorManager` 无持久化
 
 **位置**：
@@ -630,7 +636,7 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.15 stage 4 决策**：归档 v0.16+ cycle 评估。理由：(1) v0.7 `proc_monitor_list` 既有契约是「空表起步」（list 在 production TUI 路径有持久化，但 MCP 路径未集成）；(2) agent 视角的监控配置应持久化是合理需求，但需评估配置 schema 与 TUI 路径一致性；(3) v0.16 cycle 主题 D2（操作 + 录屏类）会涉及更多写操作 MCP tool，统一评估持久化策略。
 
-### TD-52（REVIEW-v0.15 P2-3）：`metrics_system` sparkline 30s 历史不暴露
+### TD-52（REVIEW-v0.15 P2-3）：`metrics_system` sparkline 30s 历史不暴露 ✅ Fixed in v0.17 stage 4（v0.25 stage 3 回填）
 
 **位置**：
 - `src/mcp/handler/metrics.rs::make_metrics_system_json`（仅返当前快照，无 sparkline 历史）
@@ -646,7 +652,9 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.15 stage 4 决策**：归档 v0.16+ cycle 评估。理由：(1) MCP 一次性 request-response 模型与 sparkline 持久化语义不直接兼容，需评估 rmcp 0.11 Resource subscribe 能力（与 brainstorm 主题 B 可观测性 cycle 同款方向）；(2) `proc_diag` 是 v0.7 既有一次性快照 tool，`metrics_system` 同款语义是 surgical 默认；(3) agent 当前能用 `metrics_system` 拿当前快照 + 多次调用对比，趋势需求可在 client 侧累积。
 
-### TD-53（REVIEW-v0.15 P2-4）：`metrics_disk_io` per-process 不暴露
+> **v0.25 stage 3 标 ✅ Fixed（v0.17 stage 4 实装，状态回填滞后——ADR-0035 D2 现状核查发现）**：v0.17 stage 4 在 feature `mcp-persistent-state`（默认启用）下落地修复方案 1 变体——`ProcMcpHandler::system_history: Arc<Mutex<VecDeque<MetricsSample>>>`（30s cap，snapshot worker 1s tick 兼任 push，不 spawn 第二个 worker）+ `proc_metrics_history` tool（`metric: "cpu"|"memory"|"swap"`, `seconds` 默认 30 上限 30）。原 ADR-0026/0027 设计；tech-debt 状态未随 v0.17 回填，本行补记。
+
+### TD-53（REVIEW-v0.15 P2-4）：`metrics_disk_io` per-process 不暴露 ✅ Fixed in v0.25 stage 3（改道 sysinfo delta）
 
 **位置**：
 - `src/mcp/handler/metrics.rs::make_metrics_disk_io_json`（仅返 total + per_disk + disks 三段，无 per-process）
@@ -662,7 +670,9 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.15 stage 4 决策**：归档 v0.16+ cycle 评估。理由：(1) disk_io_etw worker 启动延迟（NT Kernel Logger单实例）+ 非管理员 / x86 fallback 复杂度高，MCP 一次性调用不适合；(2) `proc_ls --sort disk_read` 已覆盖列表视角，详情页视角 v0.16 cycle 评估；(3) v0.16 cycle 主题 D2（操作 + 录屏类）会涉及更多 worker 路径，统一评估 MCP handler 持久 worker 字段策略。
 
-### TD-54（REVIEW-v0.15 P2-5）：`proc_flows` / `metrics_*` 多次调用 SystemSnapshot::new + App::new 累积开销
+> **v0.25 stage 3 标 ✅ Fixed（改道实装，ADR-0035 D2 终判）**：原修复方案 1（handler 持久 disk_io_etw worker，dns_collector 先例模式）**否决**——① NT Kernel Logger 全局单实例：MCP server 与 TUI 同机并存互抢 session，后启动者恒失败；② MCP server 常态非提权运行，ETW 恒 None 等于死代码；③ 启动延迟 ~1s + x86 cfg-gate。**改道方案**（TD-54 持久 snapshot 落地后解锁）：`run_snapshot_worker` 在 `refresh_heavy_incremental` 返 `Ok(true)` 时做 sysinfo delta（`compute_process_disk_speeds`——TUI `update_disk_speeds` 同款 `(pid, start_time)` 键控 `disk_usage` 差分 / elapsed，worker 局部基线无锁竞争）填 `ProcessInfo.disk_read_speed/write_speed`（`proc_ls` 的 `disk_read_bps/disk_write_bps` 同步受益）+ `metrics_disk_io` 响应加 `per_process` 段（read+write 降序 top-N 默认 10，`source: "sysinfo-delta"` 口径声明——Windows IO counters 含非磁盘 IO 如命名管道，与 TUI 非管理员档同口径）。规模 ~200-300 → ~80 业务行。
+
+### TD-54（REVIEW-v0.15 P2-5）：`proc_flows` / `metrics_*` 多次调用 SystemSnapshot::new + App::new 累积开销 ✅ Fixed in v0.17 stage 3（v0.25 stage 3 回填）
 
 **位置**：
 - `src/mcp/handler/cli.rs::make_flows_json`（`App::new() + 2s warm-up` 每次 ~2s）
@@ -678,6 +688,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 2. **加 TTL 缓存**：handler 内 `HashMap<ToolName, (timestamp, result)>` 缓存，TTL 1s（与 worker 1s tick 对齐）
 
 **v0.15 stage 4 决策**：归档 v0.16+ cycle 评估。理由：(1) `App::new()` 不是 Send + Sync（包含多个 worker handle + UI 状态），跨 tool call 共享需评估线程安全；(2) SystemSnapshot 共享较简单但需评估 freshness（worker 路径 vs MCP 路径同步）；(3) agent 实际不会高频调（典型 task 调 1-2 次），优化收益边际；(4) v0.16 cycle 主题 D2 涉及更多 worker 路径，统一评估。
+
+> **v0.25 stage 3 标 ✅ Fixed（v0.17 stage 3 实装，状态回填滞后——ADR-0035 D2 现状核查发现）**：v0.17 stage 3 在 feature `mcp-persistent-state`（默认启用）下落地修复方案 1——`ProcMcpHandler::snapshot: Arc<Mutex<Option<SystemSnapshot>>>` 持久字段 + `run_snapshot_worker`（`mcp-snapshot-worker` 线程）1s tick refresh + `refresh_heavy_incremental`，`metrics_*` / `proc_ls` / `proc_tree` / `proc_export` 生产路径复用 snapshot 跳过 `SystemSnapshot::new + refresh` 累积开销（原 App::new Send+Sync 顾虑以「共享 SystemSnapshot 数据结构非 App」化解，ADR-0026）。`App::new` 路径的 `proc_flows`（~2s warm-up）不在 v0.17 落地范围（flows 数据源是 Schannel worker 非 SystemSnapshot），本 TD 主诉的 SystemSnapshot 复用已闭环。
 
 ### TD-55（REVIEW-v0.20 P2-1）：Sonnet 50 query 真实对照验收 deferred
 
@@ -789,9 +801,28 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 ---
 
+## v0.25 cycle 清仓盘点（2026-08-30，stage 3 收尾状态总检）
+
+> v0.25 是「TD 清仓 + session 语料卫生」维护型轻 cycle（ADR-0035）。本段是 cycle 收尾时点的 tech-debt 全量状态总检——open 存量从 v0.24 末的十余项收敛到 8 项（全部为既定归档 / 观察项，无新增债）。
+
+| 状态 | 条目 | 说明 |
+|---|---|---|
+| **本 cycle 关闭（实装）** | TD-24 / TD-40 | stage 2（commit `43300d9`）：on_respawn_failed 止损状态机 / regex size_limit(64KB) |
+| **本 cycle 关闭（实装）** | TD-50 / TD-53 | stage 3：`_meta.x-deprecated` schema hint / sysinfo delta 改道 per-process 段 |
+| **本 cycle 回填（v0.17 已落地）** | TD-52 / TD-54 | sparkline 30s 历史 + `proc_metrics_history` tool / 持久 snapshot + 1s tick worker——代码先落地状态未回填，本 cycle 对齐 |
+| **本 cycle 判废** | TD-34 | plan.md 已不在 v0.13+ 流程（brainstorm 替代） |
+| **本 cycle 回填（已修未记）** | TD-22 | `property_at_index` lifetime 修复在后续重构中完成，stage 1 核查发现补记 |
+| **维持归档（理由仍立）** | TD-11 / TD-20 / TD-21 / TD-41 / TD-51 | watchdog spawn 威胁模型 / Win10 1809 探测 / overlay 单键 pid / SYSTEM_BOOT_ENTRIES image path / MonitorManager 持久化（feature 非 debt，v0.26+ 候选） |
+| **单特性候选（v0.26+ 主题评估）** | TD-31 / TD-44~49 | FilterExpr 跨 ctx / 性能优化 / replay 增强——与维护型定位不符留档 |
+| **观察项（触发条件未到）** | TD-55~57 / TD-58 / TD-59 / TD-61 | 无 key（第 6 个 cycle）/ flaky 未再现 / 轮转未触发 / llama-server 未升级 |
+| **已关闭（前 cycle）** | TD-60 | prompt v3 负结果（v0.24 数据关闭） |
+
+---
+
 ## 历史回顾
 
 - v0.6.0 Review（本文件来源）：`docs/reviews/REVIEW-7.md` 产出 1 P0 + 9 P1 + 14 P2。
 - v0.6.0 阶段 8 应修：1 P0 + 9 P1（详见 REVIEW-7.md）。
 - v0.7.0 候选：本文件 v0.7.0 段 11 项。
 - v0.8.0+ 候选：本文件 v0.8.0+ 段 6 项（含 v0.7.0 阶段 8 遗留的 TD-17 / TD-18 / TD-19 eBPF 相关）。
+- v0.25 cycle 清仓（2026-08-30）：关闭 TD-24 / TD-40 / TD-50 / TD-53（实装）+ TD-52 / TD-54（v0.17 落地回填）+ TD-34（判废）+ TD-22（已修回填）——打包清单三组全清（ADR-0035 D3 终判表只砍不加兑现，无新增债）。

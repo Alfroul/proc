@@ -352,7 +352,7 @@ model = "claude-sonnet-4-6"     # API key 走 ANTHROPIC_API_KEY env，不写配�
 max_tokens = 4096
 ```
 
-**RAG 经验召回**<sup>v0.24.0</sup>（[ADR-0034](docs/adr/0034-rag-experience-recall.md)，默认 **off**）——把历史成功 query→tool 链检索出来注入 user message 前缀（`[历史经验参考]` 模板 + `[当前问题]` 原文），让 agent「见过一次就会第二次」。语料 = session JSONL 成功段（主语料，随日常使用自动积累）+ eval run passed trace（bootstrap，`eval_corpora` 显式列出才生效）；keyword BM25-lite 检索零依赖；与当前 query 相似的条目自动排除（防 eval 语料泄漏——排除命中数每 query 报告）。E2B 实测（[实验归档](docs/eval/rag-v3-70q-v0.24.md)）：机制成立（召回 80% / 引用 57% / 干扰 0 + degraded -12 超带）但通过率落方差带内 → 维持 off；更强模型底座上是首选复测项：
+**RAG 经验召回**<sup>v0.24.0</sup>（[ADR-0034](docs/adr/0034-rag-experience-recall.md)，默认 **off**）——把历史成功 query→tool 链检索出来注入 user message 前缀（`[历史经验参考]` 模板 + `[当前问题]` 原文），让 agent「见过一次就会第二次」。语料 = session JSONL 成功段（主语料，随日常使用自动积累；v0.25 起空会话不落盘——[ADR-0035](docs/adr/0035-td-cleanup-and-session-hygiene.md) D1 延迟创建，主语料只含真实活动）+ eval run passed trace（bootstrap，`eval_corpora` 显式列出才生效）；keyword BM25-lite 检索零依赖；与当前 query 相似的条目自动排除（防 eval 语料泄漏——排除命中数每 query 报告）。E2B 实测（[实验归档](docs/eval/rag-v3-70q-v0.24.md)）：机制成立（召回 80% / 引用 57% / 干扰 0 + degraded -12 超带）但通过率落方差带内 → 维持 off；更强模型底座上是首选复测项：
 
 ```toml
 [rag]
@@ -402,7 +402,7 @@ enabled = false                # 总开关（off 态不建索引零开销）
 | `proc_handles` | `proc handles --pid` | `{ ok, count, handles[] }` |
 | `proc_priority` | `proc priority` | `{ ok, pid, action, priority }` |
 | `proc_affinity` | `proc affinity` | `{ ok, pid, action, affinity_mask }` |
-| `proc_smart` | `proc smart` | `{ ok, disks[] | disk }` |
+| `proc_smart` | `proc smart` | `{ ok, disks[] | disk }`（**deprecated**——schema `_meta.x-deprecated: true`（v0.25 TD-50）+ description `[Deprecated]` 前缀（v0.17）；优先用 `proc_metrics_smart`，tool 保留兼容外部 client）|
 | `proc_dns` | `proc dns` | `{ ok, count, queries[] }`（drain 一次，非 tail） |
 | `proc_diag` | `proc diag --json` | `{ ok, workers[] }` |
 | `proc_monitor_list` | 监控配置快照 | `{ ok, count, monitors[] }` |
@@ -434,9 +434,9 @@ enabled = false                # 总开关（off 态不建索引零开销）
 
 | Tool | 返回 JSON |
 |---|---|
-| `proc_metrics_system` | `{ ok, cpu_usage_pct, memory, swap, system_disk, uptime_secs, processes_count, network_interfaces[], tcp_stats, cpu_temp_c, gpu_temp_c }`（无 30s sparkline 历史 — TD-52 v0.16+ 候选）|
+| `proc_metrics_system` | `{ ok, cpu_usage_pct, memory, swap, system_disk, uptime_secs, processes_count, network_interfaces[], tcp_stats, cpu_temp_c, gpu_temp_c }`（30s sparkline 历史见类别 6a `proc_metrics_history`——v0.17 TD-52 落地）|
 | `proc_metrics_gpu` | `{ ok, gpus[], providers[] }`（providers 标 nvml/dxgi/pdh 数据源；无 GPU → `gpus: [], note`）|
-| `proc_metrics_disk_io` | `{ ok, total, per_disk[], disks[] }`（`device=Some` 仅过滤 per_disk）|
+| `proc_metrics_disk_io` | `{ ok, total, per_disk[], disks[], per_process }`（`device=Some` 仅过滤 per_disk；`per_process = { source: "sysinfo-delta", count, processes[] {pid, name, read_bps, write_bps} }`——read+write 降序 top-N 默认 10，`top=N` 覆盖；v0.25 TD-53 sysinfo delta 口径，IO counters 含非磁盘 IO，worker warm-up / fallback 期速度全 0）|
 | `proc_metrics_smart` | `device=None` → aggregated（disks[] 摘要，与 sidebar 同款）/ `device=Some` → 详细 attributes（与 `proc_smart` 同 schema）|
 | `proc_metrics_thermal` | `{ ok, per_core_freq_mhz[], per_core_temp_c[], throttle, reason }`（throttle null + reason="Unavailable" 兜底非 Windows）|
 

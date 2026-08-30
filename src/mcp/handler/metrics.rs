@@ -35,8 +35,13 @@ pub struct MetricsGpuArgs {
 pub struct MetricsDiskIoArgs {
     /// Filter `per_disk` to a specific device (e.g. "PhysicalDrive0", "/dev/sda"). None = all devices.
     /// `total` / `disks` 字段始终返全部，per_disk 按设备过滤。
+    /// `per_process` 段不受影响（per-process IO counters 是进程级聚合，无法按盘归属）。
     #[serde(default)]
     pub device: Option<String>,
+    /// Max entries in `per_process.processes[]` (sorted by read_bps+write_bps desc).
+    /// None = 10.
+    #[serde(default)]
+    pub top: Option<usize>,
 }
 
 /// `proc_metrics_smart` Args（与既有 `SmartArgs` 字段同形但**独立 struct**）。
@@ -68,8 +73,8 @@ pub struct MetricsThermalArgs {
 /// `proc_metrics_system` — 系统全貌快照（CPU / 内存 / swap / 磁盘 / uptime / 进程数 /
 /// 网卡 / TCP / 温度）。
 ///
-/// **sparkline 30 秒历史暂不暴露**（决策 3）—— 需要持久化 + worker 累积，MCP 一次性
-/// request-response 不适合。stage 4 Review 评估是否加（暂留 v0.16+ 候选）。
+/// sparkline 30s 历史由 v0.17 stage 4 TD-52 落地（`ProcMcpHandler::system_history`
+/// + `proc_metrics_history` tool——本 helper 不含历史，单次快照语义）。
 ///
 /// v0.17 stage 3 TD-54：保留旧签名作 fallback 路径（测试 + worker warm-up 期间用），
 /// 生产路径走 [`metrics_system_json_from_snapshot`] 复用 `ProcMcpHandler::snapshot`
@@ -184,15 +189,12 @@ pub fn make_metrics_gpu_json() -> Value {
     out
 }
 
-/// `proc_metrics_disk_io` — 全磁盘 IO 速率（total + per_disk）+ 磁盘容量信息。
-///
-/// **per-process disk_io 暂不暴露**（决策 5）—— 需要 ETW + thread_map（disk_io_etw
-/// worker 模式），MCP 一次性调用启动 ETW session 不实用。stage 4 Review 评估是否
-/// 加（暂留 v0.16+ 候选）。
+/// `proc_metrics_disk_io` — 全磁盘 IO 速率（total + per_disk）+ 磁盘容量信息 +
+/// per-process top-N 段（v0.25 stage 3 TD-53，ADR-0035 D2 改道）。
 ///
 /// v0.17 stage 3 TD-54：保留旧签名作 fallback 路径，生产路径走
 /// [`metrics_disk_io_json_from_snapshot`]。
-pub fn make_metrics_disk_io_json(device: Option<&str>) -> Value {
+pub fn make_metrics_disk_io_json(device: Option<&str>, top: Option<usize>) -> Value {
     let mut snapshot = match crate::collect::SystemSnapshot::new() {
         Ok(s) => s,
         Err(e) => return super::err(format!("SystemSnapshot::new failed: {e}")),
@@ -200,13 +202,19 @@ pub fn make_metrics_disk_io_json(device: Option<&str>) -> Value {
     if let Err(e) = snapshot.refresh() {
         return super::err(format!("snapshot refresh failed: {e}"));
     }
-    metrics_disk_io_json_from_snapshot(&snapshot, device)
+    metrics_disk_io_json_from_snapshot(&snapshot, device, top)
 }
 
 /// v0.17 stage 3 TD-54：从已有 SystemSnapshot 读字段（生产路径）。
+///
+/// v0.25 stage 3 TD-53：加 `per_process` 段（read+write 降序 top-N，默认 10）。
+/// 速度值由 MCP snapshot worker 的 sysinfo delta 填充（fallback 路径 fresh
+/// snapshot 无基线，速度全 0）；`source: "sysinfo-delta"` 声明口径（Windows 下
+/// IO counters 含非磁盘 IO 如命名管道，与 TUI 非管理员档同口径）。
 pub(crate) fn metrics_disk_io_json_from_snapshot(
     snapshot: &crate::collect::SystemSnapshot,
     device: Option<&str>,
+    top: Option<usize>,
 ) -> Value {
     let (total_read, total_write) = snapshot.disk_io_speed();
     let per_disk: Vec<crate::collect::DiskIoInfo> = snapshot.per_disk_io_speed();
@@ -242,6 +250,28 @@ pub(crate) fn metrics_disk_io_json_from_snapshot(
         })
         .collect();
 
+    // v0.25 stage 3 TD-53：per-process top-N 段（read+write 降序）。
+    // 速度值来自 snapshot worker 的 sysinfo delta（fallback 路径无基线时全 0）。
+    let top_n = top.unwrap_or(10);
+    let mut ranked: Vec<&crate::collect::ProcessInfo> = snapshot.process_cache().values().collect();
+    ranked.sort_by(|a, b| {
+        let total_a = a.disk_read_speed.saturating_add(a.disk_write_speed);
+        let total_b = b.disk_read_speed.saturating_add(b.disk_write_speed);
+        total_b.cmp(&total_a)
+    });
+    ranked.truncate(top_n);
+    let per_process: Vec<Value> = ranked
+        .iter()
+        .map(|p| {
+            json!({
+                "pid": p.pid,
+                "name": p.name.as_ref(),
+                "read_bps": p.disk_read_speed,
+                "write_bps": p.disk_write_speed,
+            })
+        })
+        .collect();
+
     json!({
         "ok": true,
         "device_filter": device,
@@ -251,6 +281,11 @@ pub(crate) fn metrics_disk_io_json_from_snapshot(
         },
         "per_disk": per_disk_filtered,
         "disks": disks_arr,
+        "per_process": {
+            "source": "sysinfo-delta",
+            "count": per_process.len(),
+            "processes": per_process,
+        },
     })
 }
 

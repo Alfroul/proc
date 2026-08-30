@@ -294,6 +294,12 @@ fn run_snapshot_worker(
     snapshot: Arc<Mutex<Option<SystemSnapshot>>>,
     system_history: Arc<Mutex<VecDeque<MetricsSample>>>,
 ) {
+    // v0.25 stage 3 TD-53（ADR-0035 D2 改道）：per-process 磁盘速率的跨 tick 基线。
+    // worker 局部状态不进 handler 字段（无锁竞争，TUI App::prev_process_disk 同款）。
+    let mut prev_disk: std::collections::HashMap<(u32, u64), (u64, u64)> =
+        std::collections::HashMap::new();
+    let mut prev_disk_at: Option<std::time::Instant> = None;
+
     loop {
         let tick_start = std::time::Instant::now();
 
@@ -312,7 +318,19 @@ fn run_snapshot_worker(
 
         // 2. refresh（失败保原 snapshot 不变）
         if s.refresh().is_ok() {
-            let _ = s.refresh_heavy_incremental();
+            // v0.25 stage 3 TD-53：只在 heavy 结果真正应用（Ok(true)）时算 delta——
+            // pending tick 的 process_cache 未变，重算会把速度刷成 0（TUI 只在
+            // Ok(true) 分支调 update_disk_speeds 的同款理由）。
+            if matches!(s.refresh_heavy_incremental(), Ok(true)) {
+                let now = std::time::Instant::now();
+                compute_process_disk_speeds(
+                    s.process_cache_mut(),
+                    &mut prev_disk,
+                    prev_disk_at,
+                    now,
+                );
+                prev_disk_at = Some(now);
+            }
         }
 
         // 3. v0.17 stage 4 TD-52：从 snapshot 提取 MetricsSample push 到 system_history
@@ -336,6 +354,45 @@ fn run_snapshot_worker(
         let sleep_dur = std::time::Duration::from_secs(1).saturating_sub(elapsed);
         std::thread::sleep(sleep_dur);
     }
+}
+
+/// v0.25 stage 3 TD-53（ADR-0035 D2 改道）：per-process 磁盘速率 sysinfo delta 计算。
+///
+/// TUI `App::update_disk_speeds`（app.rs）同款口径：key = `(pid, start_time)`
+/// （PID 复用防护，ADR-0003），prev tick 的 `disk_usage` 累计值差分 / elapsed 填
+/// `disk_read_speed` / `disk_write_speed`。MCP snapshot worker 每 tick 在
+/// `refresh_heavy_incremental` 返 `Ok(true)` 时调用。
+///
+/// - `prev_time = None`（首观测）：跳过差分只重建基线（speeds 保持 0，下一 tick
+///   起有差分——TUI 首帧同款行为）
+/// - `disk_usage` 小于 prev（counter 回退 / 进程重启）：`saturating_sub` 归 0 不 panic
+/// - 无 prev 条目的进程（新出现 / PID 复用）：speeds 保持 0，进新基线
+/// - 尾部无条件重建基线：存活进程集合即新基线，死亡进程条目自然淘汰
+///
+/// `pub` 让集成测试可合成 `HashMap<u32, ProcessInfo>` 单测（不依赖真实 sysinfo）。
+#[cfg(feature = "mcp-persistent-state")]
+pub fn compute_process_disk_speeds(
+    processes: &mut std::collections::HashMap<u32, crate::collect::ProcessInfo>,
+    prev: &mut std::collections::HashMap<(u32, u64), (u64, u64)>,
+    prev_time: Option<std::time::Instant>,
+    now: std::time::Instant,
+) {
+    if let Some(t0) = prev_time {
+        let elapsed = now.duration_since(t0).as_secs_f64().max(0.001);
+        for proc in processes.values_mut() {
+            let key = (proc.pid, proc.start_time);
+            if let Some(&(prev_r, prev_w)) = prev.get(&key) {
+                proc.disk_read_speed =
+                    ((proc.disk_usage.0.saturating_sub(prev_r)) as f64 / elapsed) as u64;
+                proc.disk_write_speed =
+                    ((proc.disk_usage.1.saturating_sub(prev_w)) as f64 / elapsed) as u64;
+            }
+        }
+    }
+    *prev = processes
+        .values()
+        .map(|p| ((p.pid, p.start_time), p.disk_usage))
+        .collect();
 }
 
 // ===========================================================================
@@ -454,6 +511,20 @@ struct DockerLogsArgs {
 // 并生成 `tool_router()` 关联函数。ServerHandler impl 通过 `#[tool_handler]`
 // 复用这个 router 派发 `tools/call` 请求。
 // ===========================================================================
+
+/// v0.25 stage 3 TD-50（ADR-0035 D2）：`proc_smart` 废弃 hint。
+///
+/// rmcp 0.11 `#[tool]` 宏支持 `meta = <Expr>` 属性（生成 `Tool.meta: Option<Meta>`，
+/// 序列化为 MCP 规范官方扩展键 `_meta`）。`{"x-deprecated": true}` 是 schema 层
+/// 机器可读 hint——与 v0.17 落地的 description `[Deprecated]` 文本层 hint 双轨；
+/// tool 本体不删（TD 修复方案 a——外部 client 可能已集成）。
+fn deprecated_meta() -> rmcp::model::Meta {
+    rmcp::model::Meta(
+        [("x-deprecated".to_string(), serde_json::Value::Bool(true))]
+            .into_iter()
+            .collect(),
+    )
+}
 
 #[tool_router]
 impl ProcMcpHandler {
@@ -586,7 +657,8 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_smart",
-        description = "[Deprecated] SMART disk health. Prefer proc_metrics_smart for aggregated or single-device mode (richer schema + same SMART data source). This tool is kept for backward compatibility but will be removed in v0.18+. device=None lists all disks with summary; device=\"/dev/sda\" or \"PhysicalDrive0\" returns detailed attributes. Returns JSON { ok, disks[] | disk } with { device, model, serial, temperature, health, attributes[] }. health is one of Ok/Warning/Critical/Unknown."
+        description = "[Deprecated] SMART disk health. Prefer proc_metrics_smart for aggregated or single-device mode (richer schema + same SMART data source). This tool is kept for backward compatibility but will be removed in v0.18+. device=None lists all disks with summary; device=\"/dev/sda\" or \"PhysicalDrive0\" returns detailed attributes. Returns JSON { ok, disks[] | disk } with { device, model, serial, temperature, health, attributes[] }. health is one of Ok/Warning/Critical/Unknown.",
+        meta = deprecated_meta()
     )]
     fn proc_smart(
         &self,
@@ -815,7 +887,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_metrics_disk_io",
-        description = "Disk I/O: total {read_bps, write_bps}, per_disk[] {name, mount_point, read_bps, write_bps}, disks[] {name, mount_point, used_bytes, total_bytes, is_removable}. Optional device filter narrows per_disk only (total/disks always return all)."
+        description = "Disk I/O: total {read_bps, write_bps}, per_disk[] {name, mount_point, read_bps, write_bps}, disks[] {name, mount_point, used_bytes, total_bytes, is_removable}, per_process {source: \"sysinfo-delta\", count, processes[] {pid, name, read_bps, write_bps}} — top N by read+write desc, default 10, top=N overrides. Per-process rates are sysinfo IO-counter deltas (include non-disk IO like named pipes; same basis as non-admin TUI; zeros during worker warm-up / fallback). Optional device filter narrows per_disk only (total/disks/per_process always return all — per-process counters cannot be attributed per-disk)."
     )]
     fn proc_metrics_disk_io(
         &self,
@@ -828,11 +900,12 @@ impl ProcMcpHandler {
                     return ok_result(metrics::metrics_disk_io_json_from_snapshot(
                         s,
                         args.device.as_deref(),
+                        args.top,
                     ));
                 }
             }
         }
-        ok_result(make_metrics_disk_io_json(args.device.as_deref()))
+        ok_result(make_metrics_disk_io_json(args.device.as_deref(), args.top))
     }
 
     #[tool(

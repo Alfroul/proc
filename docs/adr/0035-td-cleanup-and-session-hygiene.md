@@ -103,6 +103,12 @@ v0.25 是主线条件未齐窗口期的**维护型轻 cycle**（brainstorm 决�
 - **TD-40 落地**：`RegexBuilder::new(pattern).size_limit(64 * 1024).build()`；测试用 `(a{300}){300}`（展开 ~90K 指令）验证编译期拒绝。
 - **实测**：新增 9 测试（三路径 5 + TD-24 3 + TD-40 1），回归双档 1734 / 1758（+9 双档同量，0 failed）；`tests/test_agent_rag.rs` 全绿（D1 口径核对实证——无 QueryStarted 的文件在 corpus 状态机下不产语料，治理不影响索引）；MCP tool 46 / catalog 47 / deps +0 锚在位。
 
+## stage 3 实装注记（2026-08-30 落地）
+
+- **TD-53 落地（D2 改道方案）**：三层接线——① `src/collect.rs` `SystemSnapshot::process_cache_mut()` 可变访问器（`process_cache()` 的对称补全，worker 填 speed 字段的最小开口）；② `src/mcp/handler/mod.rs` `compute_process_disk_speeds(processes, prev, prev_time, now)` 纯函数（TUI `update_disk_speeds` 同款口径：`(pid, start_time)` 键控 `disk_usage` 差分 / elapsed，`saturating_sub` 防 counter 回退，首观测只建基线，尾部无条件重建基线淘汰死亡进程——`pub` 让集成测试合成数据单测）+ `run_snapshot_worker` 局部基线状态（`prev_disk` / `prev_disk_at`——worker 私有不进 handler 字段，风险 2 并发顾虑的规避）+ **只在 `refresh_heavy_incremental` 返 `Ok(true)` 时触发**（pending tick cache 未变，重算会把速度刷成 0——TUI 只在 `Ok(true)` 分支调 update_disk_speeds 的同款理由）；③ `metrics.rs` `metrics_disk_io_json_from_snapshot` 加 `per_process` 段（`process_cache()` 引用按 read+write 饱和和降序 + truncate top-N）+ `MetricsDiskIoArgs.top: Option<usize>`（默认 10）。**附带收益**：`proc_ls` 的 `disk_read_bps/disk_write_bps`（读 `ProcessInfo.disk_read_speed/write_speed`）随 worker 填充同步受益。**接线面**：agent 内部分发 `dispatch.rs` 同步传 `usize_of(args, "top")`；`test_mcp_v0_15.rs` 两处既有调用点机械补第二参。
+- **TD-50 落地**：`deprecated_meta() -> rmcp::model::Meta`（`{"x-deprecated": true}`）+ `#[tool(meta = deprecated_meta())]`——rmcp 0.11 `#[tool]` 宏的 `meta` 属性生成 `Tool.meta`，序列化为 MCP 规范官方扩展键 `_meta`。description 的 `[Deprecated]` 文本层 hint（v0.17）不动（v0_17 静态 grep 测试锚定）。**测试升级**：v0.17 用源码 grep 静态断言是因为 `tool_router()` 私有；本 stage 发现宏生成 `pub fn {fn}_tool_attr() -> rmcp::model::Tool` 可从外部直接调用——运行时 schema 断言（`proc_smart_tool_attr().meta` 含 `x-deprecated: true` + `proc_metrics_smart_tool_attr().meta` None 阴性对照）。
+- **实测**：新增 8 测试（TD-53 单元 4——差分精确断言（`checked_sub` 构造精确 elapsed）/ 首观测基线 / counter 回退 saturating / 基线重建 + PID 复用键控；TD-53 响应段 2——per_process 结构 / source 口径 / 降序 / top 截断 + 既有字段不缺锚；TD-50 运行时 1；tool 46 运行时锚 1），回归双档 1742 / 1766（+8 双档同量，0 failed，79 行 test result——78 基线 + 1 新测试二进制 test_mcp_v0_25_stage_3）；MCP tool 46 / catalog 47 / deps +0（Cargo.lock 零 diff）锚在位。
+
 ## stage 2/3 实装清单预览
 
 **stage 2（Slice A：语料卫生 + 边角清仓，~150 业务 + ~150 测试 + ~100 doc）**：
