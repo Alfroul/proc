@@ -126,3 +126,9 @@ TD-53 改道三层接线（`process_cache_mut()` 访问器 + `compute_process_di
 - 打包清单三组全清（① 语料卫生 / ② 边角清仓 / ③ MCP 观测补全）；D3 终判表 12 项全部落地或显式关闭
 - 容量检查：stage 2 ~400 行 / stage 3 ~790 行（含 Review doc）——远低于 1500 行铁律，无 Checkpoint 触发
 - 手册执行：每 stage 独立会话 + 开工基线验证（回归双档 78/79 行核对 + 三件套）+ 完工报告 + 启动指令包——全流程兑现
+
+---
+
+## 勘误（2026-08-31，v0.26 拍板会话补记）
+
+> 本 Review 头部基线声明「fmt / clippy（双档）/ build（双档）/ bench --no-run 全过」**在 tag v0.25.0 上不成立**：`tests/test_mcp_v0_25_stage_3.rs:24`（stage 3 收尾 commit `2297738` 引入）触发 clippy `field_reassign_with_default`，默认档 `cargo clippy --release --all-targets -- -D warnings` 退出码 101。定因：stage 3 会话 clippy 跑在该测试文件写入之前（过程 miss 非业务缺陷；工具链 1.95.0 未变，非 lint 漂移）。处置：v0.26 拍板会话（2026-08-31）按 clippy 自荐机械修复（struct 字面量替换，零行为变化，该二进制 8/8 复跑绿），修复随 `plan(v0.26)` commit 入库；流程改进（gate 脚本 + pre-push hook 机器门禁）立项为 v0.26 stage 2 主项——详见 [`docs/stages/v0.26-brainstorm.md`](../stages/v0.26-brainstorm.md) R2 段。

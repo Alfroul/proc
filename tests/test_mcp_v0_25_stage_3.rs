@@ -21,11 +21,12 @@ use proc::mcp::handler::{ProcMcpHandler, list_tool_names};
 use serde_json::json;
 
 fn mk_proc(pid: u32, start_time: u64, disk_usage: (u64, u64)) -> ProcessInfo {
-    let mut p = ProcessInfo::default();
-    p.pid = pid;
-    p.start_time = start_time;
-    p.disk_usage = disk_usage;
-    p
+    ProcessInfo {
+        pid,
+        start_time,
+        disk_usage,
+        ..Default::default()
+    }
 }
 
 /// elapsed = 2s 的确定性时间对（`t0 = now - 2s` 与 `now` 同基准，差精确 2s）。
