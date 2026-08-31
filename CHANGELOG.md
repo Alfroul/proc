@@ -7,6 +7,12 @@
 
 ## [Unreleased]
 
+### v0.26 stage 1 — Spike：现状核查与实测取数 + ADR-0036 定稿
+
+- **Docs**: `docs/adr/0036-presentation-sprint.md`（新，D1~D5 五组决策：README 信息架构（评估者视图加顶部双受众）/ gate 两档（快档 < 3-5 min + 全档 + required checks 主防线，R2 结构性修复）/ proptest dev-dep 预登记（runtime deps +0 纪律延续）/ 深挖 10 条清单封闭 / 数字溯源纪律（Review 抽查 ≥ 10 数字））
+- **Docs**: `docs/stages/v0.26-stage-1.md`（新，取数附录 A-F）——**附录 A** bench 6 文件 27 数据点实测（2026-08-31 分批，全无回归；refresh_heavy **2.9×** 提升溯源至 TD-47 `4c7e294` parent_chain `Arc<str>` 重构（v0.17），其余 ~2× 提升不写无依据归因）；**附录 B** 79 test binary 耗时分布 + gate 快档名单；**附录 C** unsafe 198 处分布（block 191 + fn 2 + extern fn 5；SAFETY 注释 59 处覆盖 ETW/security 组，NT API 层零覆盖为 stage 4 补注释目标区；edition 2024 `unsafe_op_in_unsafe_fn` 已合规零变更）；**附录 D** 竞品 GitHub API 核实（btop 34.3K⭐ / bottom 14.0K⭐ / System Informer 15.7K⭐ / glances 33.5K⭐，as of 2026-08-31；四大竞品 README 均无 AI agent/MCP——proc 独有断言成立）；**附录 E** demo GIF 录制规格（交用户录制，stage 3 挂载不阻塞）；**附录 F** README 亮点条数字溯源表（65,074 src / 26,968 tests / 46 tools / 36 ADR / 61 TD / 25 releases 全实测）
+- 零业务代码；回归双档与开工基线一致（1742/0/10 + 1766/0/11，79 行核对）
+
 ## [0.25.0] - 2026-08-30
 
 ### v0.25.0 cycle 完结 — TD 清仓 + session 语料卫生（维护型轻 cycle）
