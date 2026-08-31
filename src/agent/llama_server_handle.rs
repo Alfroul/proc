@@ -204,6 +204,13 @@ impl LlamaServerHandle {
         self.port
     }
 
+    /// 子进程 PID。drop 清理断言按 PID 查退出（`tasklist /FI "PID eq N"`），
+    /// 不再全局扫 llama-server.exe——同 binary 内其他测试的 server 存活时
+    /// 全局扫描会误报（v0.26 stage 2 R1 竞态修复）。
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn base_url(&self) -> &str {
         &self.base_url
     }

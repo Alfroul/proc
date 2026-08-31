@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# opt-in pre-push hook：推送前跑 gate 快档（fmt + clippy 双档 + 21 binary 测试
+# 子集，~2-3 min）。失败则 push 中止。
+#
+# 安装（仓库级，一次性）：git config core.hooksPath .githooks
+# 卸载：git config --unset core.hooksPath
+#
+# 设计依据 ADR-0036 D2：hook 是 opt-in 不强推（被绕过的 hook 不如没有），
+# GitHub required checks 是主防线（设置说明见 docs/stages/v0.26-stage-2.md）。
+exec bash scripts/gate.sh fast

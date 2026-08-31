@@ -68,6 +68,12 @@ impl LlamaCppProvider {
     pub fn model_path(&self) -> &PathBuf {
         &self.inner.model_path
     }
+
+    /// 当前 llama-server 子进程 PID（惰性 spawn 后有值；未 spawn 返 None）。
+    /// e2e 清理断言按自身 PID 查退出而非全局 tasklist 扫镜像名（R1 竞态修复）。
+    pub async fn server_pid(&self) -> Option<u32> {
+        self.inner.server.lock().await.as_ref().map(|h| h.pid())
+    }
 }
 
 impl ProviderInner {

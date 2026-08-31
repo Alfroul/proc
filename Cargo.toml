@@ -155,6 +155,10 @@ anthropic = []      # opt-in：启用 AnthropicProvider（云端对照）
 tempfile = "3"
 # v0.6.0 阶段 3：log_rotate 测试需要设置文件 mtime 模拟「8 天前的日志」。
 filetime = "0.2"
+# v0.26 stage 2：FilterExpr 属性测试（ADR-0036 D3 预登记 dev-dep——runtime
+# deps +0 纪律延续，本 cycle 显式批准 dev-deps +1）。roundtrip 语义等价 +
+# 乱输入不 panic 两条属性，cases 256（ADR 定值，纯函数 parser 秒级）。
+proptest = "1.5"
 # v0.13 阶段 1：criterion benchmark suite（ADR: 性能 baseline cycle 方案 A）。
 # 锁 0.5（最新稳定）。与 Rust MSRV 1.85 兼容（criterion 0.5 要求 Rust 1.70+）。
 # 不在 CI 跑（决策表 B），仅本地手跑——GitHub Actions 共享 runner 抖动大。

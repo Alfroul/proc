@@ -84,7 +84,13 @@ v0.26 是秋招窗口期（2026-08~11）的**展示冲刺轻 cycle**（brainstor
 
 ## stage 2 实装注记
 
-（stage 2 会话落地后回填：R1 修复锚 / gate.sh 快档实测时长 / proptest cases 实测）
+（2026-08-31 stage 2 会话回填）
+
+- **R1 修复锚**：`LlamaServerHandle::pid()` + `LlamaCppProvider::server_pid()`（getter 小改，未触及 spawn 生命周期——风险 7 边界保持）；e2e 清理断言改 `tasklist /FI "PID eq N"` 查自身子进程退出。验收：`--test test_llama_cpp_provider` 连跑 3 轮稳定绿（27/27 × 3，真实 server 并行场景）。TD 台账回填（v0.26 cycle 追踪段，未立 TD-62）
+- **gate.sh 快档实测**（i7-13700HX / 16GB / Win11）：稳态（无变更）**29s**——远低于 < 5 min 目标 ✅；src 变更后首跑 **~9.5 min（569s）**——clippy 双档编译 + 21 binary release thin-LTO 链接主导，名单大小非主要变量（砍名单不显著缩短，纪律保持不砍）。两档数字如实入档（gate.sh 头注释同步）
+- **proptest cases 实测**：256 cases × 2 属性 **0.05s**（风险 4 秒级预期兑现，无需降 cases）；解析版本 proptest 1.11.0（dev-dep +1，runtime deps +0 兑现）
+- **快档名单定稿**：附录 B 20 binary + 本阶段新增 `test_filter_proptest` = **21**（单次 cargo 调用 `--test` × 21 串行，省 spawn 开销）
+- **首跑拦截实证**：stage 2 会话首次跑 gate 快档即拦截 1 处 fmt 违规（rustfmt 对新增测试文件的换行改写）——门禁生效的直接证据
 
 ## stage 3 实装注记
 

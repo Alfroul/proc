@@ -819,6 +819,14 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 ---
 
+## v0.26 cycle 追踪（2026-08-31 起，展示冲刺 cycle）
+
+| 状态 | 条目 | 说明 |
+|---|---|---|
+| **stage 2 修复即关闭（未立 TD）** | R1 llama e2e flaky 竞态 | brainstorm「基线验证异常记录」R1 段首触发（2026-08-31，v0.20 引入以来首次）：`test_llama_cpp_provider` 内两个真实 server 测试默认并行，end_to_end 清理断言用**全局** `tasklist` 扫 llama-server.exe，被 grammar 测试自己仍存活的 server 误报「drop 后未退出」。stage 2 根治——`LlamaServerHandle::pid()` + `LlamaCppProvider::server_pid()` getter + 断言改查自身子进程 PID（`tasklist /FI "PID eq N"`），`--test test_llama_cpp_provider` 连跑 3 轮稳定绿（27/27 × 3）。按 brainstorm 决策 4 处置**不留 TD-62 观察项**。注意：非 TD-58 本体（TD-58 是 `test_alert::test_metric_extract_process_cpu` CPU 采集窗口 flaky，另一处，继续 open 观察） |
+
+---
+
 ## 历史回顾
 
 - v0.6.0 Review（本文件来源）：`docs/reviews/REVIEW-7.md` 产出 1 P0 + 9 P1 + 14 P2。
@@ -826,3 +834,4 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 - v0.7.0 候选：本文件 v0.7.0 段 11 项。
 - v0.8.0+ 候选：本文件 v0.8.0+ 段 6 项（含 v0.7.0 阶段 8 遗留的 TD-17 / TD-18 / TD-19 eBPF 相关）。
 - v0.25 cycle 清仓（2026-08-30）：关闭 TD-24 / TD-40 / TD-50 / TD-53（实装）+ TD-52 / TD-54（v0.17 落地回填）+ TD-34（判废）+ TD-22（已修回填）——打包清单三组全清（ADR-0035 D3 终判表只砍不加兑现，无新增债）。
+- v0.26 stage 2（2026-08-31）：R1 llama e2e flaky 竞态修复即关闭（未立 TD-62，brainstorm 决策 4 处置）——PID 断言替代全局 tasklist 扫描。

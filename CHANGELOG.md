@@ -7,6 +7,17 @@
 
 ## [Unreleased]
 
+### v0.26 stage 2 — Slice A：质量门禁与测试可靠性（R1 flaky 根治 + gate 脚本两档 + proptest 属性测试）
+
+- **Fixed**: R1 llama e2e flaky 竞态根治（brainstorm「基线验证异常记录」段，2026-08-31 首触发）——`src/agent/llama_server_handle.rs` 加 `LlamaServerHandle::pid()` + `src/agent/llama_cpp_provider.rs` 加 `LlamaCppProvider::server_pid()`（getter 小改）；`tests/test_llama_cpp_provider.rs` e2e 清理断言从**全局** `tasklist /FI "IMAGENAME eq llama-server.exe"` 改为查自身 spawn 的子进程 PID（`tasklist /FI "PID eq N"`）——同 binary 内 grammar 测试的 server 存活不再误报；`--test test_llama_cpp_provider` 连跑 3 轮稳定绿（27/27 × 3）；TD 台账回填（未立 TD-62，修复即关闭）
+- **Added**: `scripts/gate.sh`（新，ADR-0036 D2）——质量门禁两档：**快档**（默认）= fmt --check + clippy 双档（默认 + anthropic）+ 21 binary 核心测试子集（stage-1 附录 B 名单 20 + 新增 `test_filter_proptest`，单次 cargo 调用串行）；**全档**（`full`）= 快档 + 全量回归双档。`set -euo pipefail` 任一步失败即中止——R2「变更落在人工验证之后」的结构性关闭；首跑即拦截 1 处 fmt 违规（门禁生效实证）。实测：稳态 **29s**（< 5 min 目标 ✅）/ src 变更后首跑 ~9.5 min（clippy 双档编译 + release thin-LTO 链接主导）
+- **Added**: `.githooks/pre-push`（新，opt-in）——`exec bash scripts/gate.sh fast`；安装 `git config core.hooksPath .githooks` 不强推；**required checks 设置说明**（主防线：`check` / `check-macos` / `msrv` / `audit` 四 job 的 branch protection 步骤）落 `docs/stages/v0.26-stage-2.md`（仓库手动项，需 admin + push 后 job 名才入搜索框）
+- **Added**: `tests/test_filter_proptest.rs`（新，2 过，proptest 属性测试——ADR-0036 D3 预登记 dev-dep 兑现）——① roundtrip 语义等价：随机 AST（Process/Network 叶子 + And/Or/Not 复合）→ renderer 渲染回 filter 语法 → `parse()` 重解析 → 样本电池（8 进程 × `apply` + 6 flow × `apply_network`）行为逐一相同（`FilterExpr` 无 PartialEq（含 Regex），语义等价用行为等价判定）；② 乱输入不 panic：任意字符串 `parse()` / `parse_frame()` 绝不 panic + 成功表达式三 ctx 求值不 panic（容错契约锚）；cases 256（ADR 定值）实测 **0.05s**（16GB 机器秒级预期兑现）
+- **Changed**: `Cargo.toml` —— dev-deps **+1**：`proptest = "1.5"`（解析 1.11.0）；**runtime deps +0 纪律延续**（ADR-0036 D3 预登记批准）
+- **Changed**: `src/mcp/handler/mod.rs` —— 搭车 `proc_smart` description 过时文本：`will be removed in v0.18+`（v0.17 写下的预告，实际未删且 v0.25 TD-50 已拍板不删）→ `retained for backward compatibility with existing MCP clients and is not scheduled for removal (deprecated via _meta.x-deprecated)`（实际口径）；`tests/test_mcp_v0_17.rs` 锚定断言连改（`not scheduled for removal`）；MCP tool 46 不变锚保持
+- **Docs**: `docs/stages/v0.26-stage-2.md`（新）+ ADR-0036 stage 2 实装注记回填 + `docs/tech-debt.md` v0.26 cycle 追踪段（R1 修复即关闭）
+- 回归双档 **1742+2=1744 / 0 / 10 + 1766+2=1768 / 0 / 11**（新增 2 属性测试双档同量；test result **79 → 80 行**——test_filter_proptest 新 binary）；MCP tool 46 / catalog 47 不变锚在位；Cargo.lock 仅 dev-dep 依赖树变化
+
 ### v0.26 stage 1 — Spike：现状核查与实测取数 + ADR-0036 定稿
 
 - **Docs**: `docs/adr/0036-presentation-sprint.md`（新，D1~D5 五组决策：README 信息架构（评估者视图加顶部双受众）/ gate 两档（快档 < 3-5 min + 全档 + required checks 主防线，R2 结构性修复）/ proptest dev-dep 预登记（runtime deps +0 纪律延续）/ 深挖 10 条清单封闭 / 数字溯源纪律（Review 抽查 ≥ 10 数字））

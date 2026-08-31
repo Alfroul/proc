@@ -657,7 +657,7 @@ impl ProcMcpHandler {
 
     #[tool(
         name = "proc_smart",
-        description = "[Deprecated] SMART disk health. Prefer proc_metrics_smart for aggregated or single-device mode (richer schema + same SMART data source). This tool is kept for backward compatibility but will be removed in v0.18+. device=None lists all disks with summary; device=\"/dev/sda\" or \"PhysicalDrive0\" returns detailed attributes. Returns JSON { ok, disks[] | disk } with { device, model, serial, temperature, health, attributes[] }. health is one of Ok/Warning/Critical/Unknown.",
+        description = "[Deprecated] SMART disk health. Prefer proc_metrics_smart for aggregated or single-device mode (richer schema + same SMART data source). This tool is retained for backward compatibility with existing MCP clients and is not scheduled for removal (deprecated via _meta.x-deprecated). device=None lists all disks with summary; device=\"/dev/sda\" or \"PhysicalDrive0\" returns detailed attributes. Returns JSON { ok, disks[] | disk } with { device, model, serial, temperature, health, attributes[] }. health is one of Ok/Warning/Critical/Unknown.",
         meta = deprecated_meta()
     )]
     fn proc_smart(

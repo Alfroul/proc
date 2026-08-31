@@ -226,8 +226,8 @@ fn test_proc_smart_source_description_in_mod_rs_contains_deprecated() {
         "mod.rs proc_smart description should recommend proc_metrics_smart"
     );
     assert!(
-        source.contains("will be removed in v0.18+"),
-        "mod.rs proc_smart description should mention v0.18+ removal"
+        source.contains("not scheduled for removal"),
+        "mod.rs proc_smart description should state retention policy (v0.25 TD-50 拍板不删)"
     );
 }
 

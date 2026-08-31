@@ -518,16 +518,25 @@ async fn test_real_llama_server_end_to_end() {
     assert!(has_text, "流式应产出文本增量");
     assert!(has_end, "流式应以 EndTurn 终止");
 
-    // Drop 清理：句柄释放后 llama-server 子进程退出
+    // Drop 清理：句柄释放后 llama-server 子进程退出。
+    // R1 修复（v0.26 stage 2）：按自身 spawn 的 PID 查退出，不再全局扫
+    // llama-server.exe——并行的 grammar 测试自己的 server 存活时旧断言会误报。
+    let server_pid = provider
+        .server_pid()
+        .await
+        .expect("complete+stream 后 llama-server 应已 spawn");
     drop(stream);
     drop(provider);
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let still_alive = std::process::Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq llama-server.exe", "/FO", "CSV", "/NH"])
+        .args(["/FI", &format!("PID eq {server_pid}"), "/FO", "CSV", "/NH"])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("llama-server.exe"))
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("llama-server"))
         .unwrap_or(false);
-    assert!(!still_alive, "provider drop 后 llama-server 应已退出");
+    assert!(
+        !still_alive,
+        "provider drop 后 llama-server（PID {server_pid}）应已退出"
+    );
 }
 
 /// GBNF grammar 端到端验证：TOOL_CALL_GRAMMAR 经请求体 grammar 字段透传后
