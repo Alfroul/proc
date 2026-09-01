@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+### v0.26 stage 3 — Slice B：展示层主项（README 评估者视图 + AI/eval 纪律章 + performance.md）
+
+- **Added**: README 评估者视图（ADR-0036 D1 兑现，+114/-1 既有 825 行后移不删）——`## 项目概览` 插入首段定位之后：**CI badge 注释占位**（远端 CI 三 workflow 全红前提不成立，用户拍板 2026-09-01 占位 + 阻塞留档：clippy 1.98 漂移 2 处 / check-macos cfg-gate / audit rmcp+crossbeam 漏洞 / miri / winget；注释体含完整 badge 语法转绿即启用）+ **demo GIF 注释占位**（`docs/assets/demo.gif` 用户录制协作项未启动，规格 stage-1 附录 E）+ **mermaid 分层架构图**（UI → 领域面板 → App controllers → workers（SnapshotWorker + WorkerManager 崩溃自愈）→ 采集层（sysinfo / ETW×3 / NT API / smartctl·bollard）+ 横切 security / record-replay / MCP 46 / agent；术语逐个对齐 CONTEXT.md）+ **量化亮点条**（65,074 src / 26,968 tests / 1744+1768 双档 / 80 binaries / 46 tools / 47 catalog / 36 ADR / 61 TD / 25 releases / 198 unsafe，全部附录 F 溯源 + 本会话复核）+ **竞品对比表**（btop / bottom / System Informer / glances，as-of 2026-08-31 GitHub API 核实，「无 AI/MCP」判定方法注记 + btop4win 注脚 + 宁缺毋滥：不写竞品性能数字与功能矩阵断言，proc stars 如实 1）
+- **Added**: README「AI Agent 与 eval 纪律」章（组②）——六列 eval 矩阵（E2B 基线 / QUICK / promptv2 / best 方差列 / RAG-on / prompt v3：净通过 32/—/33/35/37/27 六维对照）+ 判读纪律五条（方差带 ±3/±6 标尺 / 预登记换默认门槛 净通过差 ≥+7 且 L2 方向性 / 负结果三连归档叙事（GBNF 结构性互斥 / v3 带外向下 revert / RAG「机制成立但 E2B 兑现不了」两分）/ L2 full-chain 5% 能力边界 / 杠杆穷尽结论）——每个数字对回 REVIEW-v0.22/23/24 + rag 归档原文（D5 数字溯源纪律）
+- **Added**: `docs/performance.md`（新，组④）——v0.26 stage 1 附录 A 7 项 bench 25 数据点逐行转写 + v0.13 基线同机对照 + 归因只写已溯源项（refresh_heavy 2.9× → TD-47 `4c7e294`；其余提升明确「不写归因」）+ 启动/内存实测补录（`proc ls --limit 5` ×3 = 2291/2527/2875 ms 启动+首轮采集合并口径 + `proc record --no-tui` 8s 稳态内存峰值 56.7 MB，单机单次样本非基准声明）
+- **Changed**: README `## Benchmark` 段改链——性能摘要三点（25 数据点无回归 / refresh_heavy 2.9× 溯源 / 1000 进程核心路径 <6ms）+ 链 `docs/performance.md`；`cargo bench` 用法 / 「不在 CI 跑」口径 / PERF-BASELINE-v0.13 链接保留；架构图「23 顶层子命令」为本会话 `--help` 实测（替代旧文 v0.15 时代「32 子命令」过时数）
+- **验收**：零 rs 变更纯 doc 阶段——回归双档 **1744 / 0 / 10 + 1768 / 0 / 11**（各 80 行核对，开工即终值）；fmt / clippy 双档 / build 双档 / bench --no-run 全过；MCP tool 46 / agent catalog 47 / runtime deps +0 不变锚在位；数字溯源 20 项核对表全 ✅（`docs/stages/v0.26-stage-3.md`，stage 4 Review 将抽查 ≥ 10 个）
+
 ### v0.26 stage 2 — Slice A：质量门禁与测试可靠性（R1 flaky 根治 + gate 脚本两档 + proptest 属性测试）
 
 - **Fixed**: R1 llama e2e flaky 竞态根治（brainstorm「基线验证异常记录」段，2026-08-31 首触发）——`src/agent/llama_server_handle.rs` 加 `LlamaServerHandle::pid()` + `src/agent/llama_cpp_provider.rs` 加 `LlamaCppProvider::server_pid()`（getter 小改）；`tests/test_llama_cpp_provider.rs` e2e 清理断言从**全局** `tasklist /FI "IMAGENAME eq llama-server.exe"` 改为查自身 spawn 的子进程 PID（`tasklist /FI "PID eq N"`）——同 binary 内 grammar 测试的 server 存活不再误报；`--test test_llama_cpp_provider` 连跑 3 轮稳定绿（27/27 × 3）；TD 台账回填（未立 TD-62，修复即关闭）

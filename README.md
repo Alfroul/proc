@@ -2,6 +2,88 @@
 
 Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络分析 + USB 占用 + 监控 + Docker + 安全评分 + 降频检测 + 磁盘 I/O + 终端录屏 + 告警 + SMART 磁盘健康 + per-process 网络流量 + DNS 查询日志 + 容器 exec** 融合到一个 TUI 中，并通过 **MCP server（外部 LLM → proc）+ 内置 AI agent（proc → LLM，v0.20）双向接入 LLM**。**Windows-only 应用**（Windows 10 1809+ / Windows 11 x64，详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。
 
+## 项目概览
+
+<!-- CI badge: 挂接待远端 CI 修复转绿后启用（v0.26 stage 3 记录：CI stable 1.98.0 与本地 1.95.0 clippy 漂移 2 处 + audit rmcp/crossbeam 漏洞 + miri/winget workflow 红，修复排期 v0.27；启用时删除本行与末行注释符）
+[![CI](https://github.com/Alfroul/proc/actions/workflows/ci.yml/badge.svg)](https://github.com/Alfroul/proc/actions/workflows/ci.yml)
+[![release](https://github.com/Alfroul/proc/actions/workflows/release.yml/badge.svg)](https://github.com/Alfroul/proc/actions/workflows/release.yml)
+-->
+
+<!-- demo GIF: docs/assets/demo.gif（15-30s：TUI 主界面 ~10-15s + AI Agent 面板一次 tool-use ~10-15s；录制规格见 v0.26 stage-1 附录 E，就绪后替换本注释为 ![demo](docs/assets/demo.gif)） -->
+
+**量化亮点**（实测口径见 [docs/performance.md](docs/performance.md) 与 [docs/stages/v0.26-stage-1.md](docs/stages/v0.26-stage-1.md) 附录 F）：
+
+| 工程规模 | 质量门禁 | AI / agent |
+|---|---|---|
+| **65,074** 行 src 代码 / **26,968** 行测试代码 | 全量回归双档 **1744 + 1768 passed / 0 failed**（默认 + `--features anthropic`） | 内置 AI agent（本地 LLM 默认，数据零外发）+ **46 个 MCP tools** |
+| **80** 个 test binaries / **25** 个 release tag | fmt + clippy 双档 `-D warnings` / cargo-audit / miri（unsafe UB 检测）/ [gate.sh](scripts/gate.sh) 快档 29s | 70 query eval 基准 + 六列实验矩阵 + 方差带判读纪律（见下方「AI Agent 与 eval 纪律」） |
+| **36** 份 [ADR](docs/adr/) / **61** 条 [TD ledger](docs/tech-debt.md) | proptest 属性测试（FilterExpr roundtrip）/ **198** 处 unsafe 逐处审计口径 | RAG 经验召回（默认 off）+ session JSONL 观测 |
+
+### 架构分层
+
+```mermaid
+graph TB
+    subgraph UI["UI 层"]
+        TUI["TUI（ratatui）<br/>10 主面板 · Ctrl+P 命令面板<br/>FilterExpr 表达式过滤"]
+        CLI["CLI（clap）<br/>23 顶层子命令 · JSON 导出"]
+        MCPCLIENT["外部 LLM client 接入<br/>Claude Desktop / Cursor 等"]
+    end
+
+    subgraph PANELS["领域面板"]
+        PP["进程列表 / 树 / 应用分组"]
+        NP["端口/网络 · DNS 日志"]
+        OP["USB · 监控 · Docker"]
+        AP["AI Agent 面板"]
+        RP["录屏 / 回放"]
+    end
+
+    subgraph CTRL["App controllers（从 App 上帝对象拆出，ADR-0012）"]
+        PC["PanelController ×5<br/>+ InspectorController（详情页 6 Tab）<br/>+ ReplayController"]
+        AS["AgentSession<br/>sync TUI 主循环 × async runtime 桥接"]
+    end
+
+    subgraph WORKERS["worker 层（独立线程 + channel，主线程 50ms tick 不阻塞）"]
+        SW["SnapshotWorker&lt;T&gt; 泛型采集抽象<br/>Light 1s / Heavy 2s / Smart 30s<br/>DNS 500ms / NetFlow 1s"]
+        WM["WorkerManager<br/>panic 指数退避重启 5s/30s/5min<br/>crash report + TUI banner（ADR-0019）"]
+    end
+
+    subgraph COLLECT["采集层（Windows）"]
+        SYS["sysinfo<br/>进程 / CPU / 内存"]
+        ETW["ETW ×3（手写 windows-rs）<br/>DNS 查询 / Schannel SNI / 磁盘 IO"]
+        NT["NT API<br/>句柄枚举 / TCP estats / 进程控制"]
+        MISC["smartctl 磁盘健康<br/>bollard Docker API"]
+    end
+
+    subgraph CROSS["横切能力"]
+        SEC["security<br/>18 项安全评分 · self-mitigation<br/>restricted spawn · env 脱敏"]
+        REC["record-replay<br/>VT100 + UiFrame 双格式<br/>书签 / 时间轴搜索 / 倒放"]
+        MCPS["MCP server<br/>46 tools（rmcp）<br/>stdio + SSE transport"]
+        AGENT["AI agent<br/>LlamaCpp / Anthropic / Mock 三 provider<br/>tool registry 两层架构 + RAG + eval"]
+    end
+
+    UI --> PANELS
+    PANELS --> CTRL
+    CTRL --> WORKERS
+    WORKERS --> COLLECT
+    SEC -. 约束 .-> COLLECT
+    MCPS -. 暴露 .-> CTRL
+    AGENT -. 调用 .-> MCPS
+```
+
+### 与同类工具对比（数据 as of 2026-08-31，GitHub API 核实）
+
+| | [btop](https://github.com/aristocratos/btop) | [bottom](https://github.com/ClementTsang/bottom) | [System Informer](https://github.com/winsiderss/systeminformer) | [glances](https://github.com/nicolargo/glances) | **proc** |
+|---|---|---|---|---|---|
+| 语言 | C++ | Rust | C | Python | Rust |
+| stars | 34,329 | 13,954 | 15,732 | 33,483 | 1 |
+| 最新 release | v1.4.7（2026-05-01） | 0.14.9（2026-08-27） | 4.0.26241（2026-08-29） | v4.5.6（2026-08-01） | v0.25.0 |
+| 内置 AI agent | 无 | 无 | 无 | 无 | ✅ 本地 Gemma E2B 默认 + Anthropic 云端 opt-in |
+| MCP server | 无 | 无 | 无 | 无 | ✅ 46 tools（stdio + SSE） |
+
+> 「无」= 四竞品仓库 README 全文关键词扫描（AI agent / MCP / LLM / model context protocol）零命中，2026-08-31 实测。竞品性能数字与功能完整性未核实，不列入（宁缺毋滥）。btop 的 Windows 支持由作者另维护的 [btop4win](https://github.com/aristocratos/btop4win) 移植提供（最后更新 2025-10-12）。
+
+---
+
 > **v0.20.0（2026-08-17）— 内置 AI agent + Tool registry 两层架构 cycle**：proc 历史上第二大 cycle（~3000 行，5 stage），proc 从「MCP server 暴露给外部 LLM」扩展为**自身有 LLM 调用能力**——CLI `proc agent ask "我电脑为什么这么卡？"` 自然语言 query → agent 多步 tool-use 循环（Gemma 4 E2B 本地推理调 proc_ls / proc_metrics_system 等 → 结果回填 → Markdown 总结）。(1) **multi-provider 抽象**（`LlmProvider` trait + LlamaCpp 本地默认 / Anthropic 云端 opt-in / Mock fixture 回放三 impl，同一份 agent 代码零改动跑三种 provider）；(2) **Tool registry 两层架构**（entry 4 tool 起步 + `proc_help(category)` 元 tool 动态发现剩余 43 个——单轮 tool-context 从 ~15K 降至 ~1.5K token 峰值，96% 减少，2B 模型可驱动）；(3) **小模型可靠循环实测结论**（few-shot 对话示例让 E2B 角色扮演编造结果→删；`tool_choice=required` + `proc_finish` 控制 tool 强制结构化；proc_help 发现的 schema 动态加入 tools 数组）；(4) **隐私架构**（本地 Gemma E2B 默认数据零外发 + 写操作 8 tool confirm gate 拦截 + PII 12 关键字过滤 + API key 只走 env 不落盘）；(5) **Mock fixture 基础设施**（50 query 真实 E2B 响应 JSONL 录制 + 确定性回放，CI 零 LLM 调用）。E2B 验收 QUICK 18/18 / FULL L0 23/23（含 2 个口径 artifact 放宽）+ L1 21/27（78%，τ²-bench 基线 29.4% 的 2.6 倍）；Sonnet 云端对照 deferred（无 API key，TD-55）。MCP tool 总数 46 → 46（不变）。详见 [ADR-0030](docs/adr/0030-builtin-ai-agent.md) + [CHANGELOG](CHANGELOG.md)。
 
 > **v0.17.0（2026-07-10）— 5 主题大 cycle（性能 + 可观测性 + VT100 + record + 写操作）**：proc 历史上最大 cycle（~5540 行业务代码 + 测试 + ADR/doc），5 主题合并全交付——(1) **主题 A 性能优化**（TD-47 `parent_chain: Vec<(u32, Arc<str>)>` 零 heap alloc + TD-54 MCP handler 持久 `snapshot` 字段 1s tick refresh + TD-44 itoa + TD-45 bincode encoding 选项层 + TD-50 `proc_smart` deprecated）；(2) **主题 B 可观测性**（rmcp 0.11 `ResourceRoute` trait 暴露 3 资源 URI + SSE transport 结构化 stub + TD-52 sparkline `proc_metrics_history` tool 30s 历史采样）；(3) **主题 F VT100 replay**（`Vt100ToUiFrameConverter` 1:1 映射澄清 ADR-0028 misreading + 透明转码路径 + RAII 临时文件，VT100 录屏现享受 search / 倒放 / 书签全部能力）；(4) **record 暴露**（spawn `proc record --no-tui` 子进程 + `record_handle` 跨 tool call 保活 + `confirm: bool` 必传 gate，[ADR-0029](docs/adr/0029-record-exposure-and-confirm-mechanism.md) 翻盘 ADR-0025b）；(5) **USB release + docker-rm 写操作**（`proc_usb_release` 三步链路 kill + flush + eject + `proc_docker_rm` / `image_rm` / `volume_rm` bollard API）。MCP tool 总数 **39 → 46**（+7 tool）。cycle 7 stage 全交付（5 主题 + 4 份新 ADR 0026~0029 + REVIEW-v0.17 P0 0 / P1 2 / P2 8，不触发拆分）。详见 [CHANGELOG](CHANGELOG.md)。
@@ -364,6 +446,32 @@ enabled = false                # 总开关（off 态不建索引零开销）
 ```
 
 **测试基础设施**：50 query（9 场景 L0/L1）真实 Gemma E2B 响应录制为 JSONL fixture，`--provider mock` 确定性回放——CI 跑 agent loop 零 LLM 调用、零 API 成本。E2B 实测：QUICK 18/18，FULL L0 23/23（含 2 个验收口径 artifact 放宽）+ L1 21/27（78%，τ²-bench 基线 29.4% 的 2.6 倍）。
+
+### AI Agent 与 eval 纪律<sup>v0.26.0</sup>
+
+agent 的每次配置变更（模型 / prompt / 检索策略）都过同一把尺子：`proc agent eval` 70 query 基准（L0 单步 23 / L1 单 tool 链 27 / L2 多步链 20），`--compare` 跨 run 对比。**v0.22~v0.24 三个 cycle 的六列实验矩阵**（数字逐列对回 [REVIEW-v0.22](docs/reviews/REVIEW-v0.22.md) / [REVIEW-v0.23](docs/reviews/REVIEW-v0.23.md) / [REVIEW-v0.24](docs/reviews/REVIEW-v0.24.md) 与 [实验归档](docs/eval/rag-v3-70q-v0.24.md)）：
+
+| 列（cycle · 变量） | run 时长 | 净通过（70q） | L0（23q） | L1（27q） | L2 full-chain（20q） | output_degraded | 判读 |
+|---|---|---|---|---|---|---|---|
+| **E2B 基线**（v0.22 · prompt v1 + RAG off） | 47m19s | 32 | 17（74%） | 14（52%） | 1（5%）· chain-step 12/43（28%） | 21 | 基线画像 |
+| QUICK 冒烟（v0.22 · 同配置 26q 抽样） | 18m46s | — | 7/9 | 4/9 | 0/8 · chain-step 4/17 | — | 挂 FULL 前的链路冒烟 |
+| prompt v2（v0.23 · 列① 措辞修订） | 37m07s | 33 | — | 16 | 0 | 16 | 净通过 +1 落方差带内 → 存疑，复跑定夺 |
+| best 方差列（v0.23 · 列② 同 binary 复跑） | 38m43s | 35 | 19 | — | — | 19 | 6 query 纯翻转（4 升 2 降）→ **方差带量化** |
+| RAG-on（v0.24 · prompt v1 + RAG on） | 25m20s | 37 | 20（87%） | 17（63%） | 0（三列平） | 9 | 机制成立但通过率 +2 带内 → **维持 off** |
+| prompt v3（v0.24 · 修订 2 单变量） | 54m53s | 27 | 13（57%） | — | — | 24 | -5/-8 落带外向下 → **revert**，TD-60 关闭 |
+
+「—」= 对应 REVIEW / 归档未单列该维度（分母口径见各归档）。
+
+**判读纪律**（数据先行于结论）：
+
+- **方差带标尺**（v0.23 首次量化）：单次 run 的 **±3 通过数 / ±6 失败模式计数**在噪声内——`--compare` 单列差异小于此量级不可单独归因，必须复跑定夺。上表 v2 列（+1）与 RAG 列（+2）的「带内」判读均由此标尺机械得出，不受结果偏好影响。
+- **预登记换默认门槛**（v0.24 D5 拍板标准，跑实验前锁定）：净通过差 **≥ +7** 且 **L2 方向性改善**——三分支：涨超带换默认 / 带内维持现状归档 / 带外向下 revert。
+- **负结果三连归档**（错误路径的证据价值）：
+  1. **GBNF 结构性互斥**（v0.23）——llama-server 对 grammar × tools 同传显式 400 拒绝（`Cannot use custom grammar constraints with tools.`），12 请求冒烟全部拒绝零生成，判定性关闭。冒烟先行：分钟级成本省一次 ~47m 挂机。
+  2. **prompt v3 带外向下 revert**（v0.24）——净通过 27（-5 vs 基线 / -8 vs 方差列），L0 掉 4-6 + degraded 24 双向一致恶化，非噪声主导 → revert 回 v1，TD-60 关闭。
+  3. **RAG「机制成立但 E2B 兑现不了」两分**（v0.24）——机制侧全绿（检索召回 12/15 = 80% / 经验引用 8/15 = 57% / 干扰 0/15 + degraded 21→9 超 -12 带），通过率侧 +2 带内。「机制不成立」与「机制成立但底座兑现不了」是两种不同结论——后者给模型升级后的复测留了直接输入。
+- **L2 能力边界**：full-chain 1/20（5%）+ chain-step 12/43（28%）双口径——E2B（1.6GB 量化 2B）的多步规划能力边界，不是 harness 缺陷。引用但未通过的 3 例（均 L2）是微观证据：链已向经验迁移，答案质量 / 多步规划仍受底座制约。
+- **杠杆穷尽结论**（v0.24）：GBNF（结构性）+ prompt v2（带内）+ prompt v3（带外向下）+ RAG 通过率（带内）四路关闭后，**E2B 底座上零代码 / 低成本杠杆全部穷尽**——进一步改善收敛「模型升级 × RAG-on 复测」组合（v0.25 起留档候选首位）。
 
 ### MCP server（LLM agent 接入）<sup>v0.7.0 · 扩 v0.15.0 · 扩 v0.16.0 · 扩 v0.17.0 · 扩 v0.18.0 · 扩 v0.19.0</sup>
 
@@ -818,7 +926,11 @@ cargo bench --bench bench_refresh_heavy      # 单独跑一个
 
 输出在 `target/criterion/<name>/<fixture>/new/estimates.json`（含 mean / median / stddev）。**不在 CI 跑**——criterion 在 GitHub Actions 共享 runner 抖动大，仅本地手跑。
 
-当前 baseline 数字（13th Gen Intel i7-13700HX / Win11 / Rust 1.95.0）见 [`docs/reviews/PERF-BASELINE-v0.13.md`](docs/reviews/PERF-BASELINE-v0.13.md)。**核心结论**：proc 当前架构在 1000 进程规模下无显著性能瓶颈；唯一 mean > 5 ms 的 hot path（parent_chain 16.5 ms @ 1000 进程）在 worker 独立线程不阻塞 UI 帧预算。报「卡」时附 `cargo bench` 数字可大幅降低定位成本。
+**性能摘要**（完整 25 数据点 + v0.13 基线逐项对照见 [`docs/performance.md`](docs/performance.md)，2026-08-31 同机实测）：
+
+- 25 数据点全无回归；1000 进程规模下全部核心 hot path < 6 ms（v0.13 基线报告「无显著性能瓶颈」结论延续）
+- **refresh_heavy 2.9×**（16.47 → 5.69 ms @ 1000 进程）——TD-47 `parent_chain` `Arc<str>` 重构消除 ~10,000 次/轮 String heap alloc（commit `4c7e294`，v0.17）
+- v0.13 基线报告（PERF-BASELINE，2026-07-04）：[`docs/reviews/PERF-BASELINE-v0.13.md`](docs/reviews/PERF-BASELINE-v0.13.md)。报「卡」时附 `cargo bench` 数字可大幅降低定位成本。
 
 ## License
 

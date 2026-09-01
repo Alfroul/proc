@@ -94,7 +94,14 @@ v0.26 是秋招窗口期（2026-08~11）的**展示冲刺轻 cycle**（brainstor
 
 ## stage 3 实装注记
 
-（stage 3 会话落地后回填：README 重构段清单 / performance.md 落地 / GIF 挂载状态）
+（2026-09-01 stage 3 会话回填）
+
+- **README 重构落地**（+114/-1，既有 825 行后移不删）：`## 项目概览` 插入首段定位之后（badge 注释占位 + GIF 注释占位 + mermaid 分层架构图 + 亮点条 3×3 + 竞品对比表）；`### AI Agent 与 eval 纪律` 章插在既有 AI Agent 段尾（六列矩阵 + 判读纪律五条）；`## Benchmark` 段改链 performance.md + 性能摘要三点
+- **badge 占位根因（用户拍板 2026-09-01）**：远端 CI 三 workflow 全红且本地领先 origin/master 7 commits 未 push——CI stable 1.98.0 vs 本地 1.95.0 clippy 漂移 2 处（`hash_cache.rs:146` / `smart/mod.rs:186`）+ check-macos cfg-gate unused imports + audit 2 漏洞（rmcp 0.11.0 RUSTSEC-2026-0189 / crossbeam-epoch 0.9.18）+ miri 历史全红（E0433）+ release winget action 上游删库。**「远端 CI 绿」前提不成立 → badge 注释占位**（注释体含完整 badge 语法，转绿即启用）；修复清单留档 stage-3 doc「已知阻塞」段，处置留 stage 4 搭车评估或 v0.27
+- **GIF 挂载状态**：`docs/assets/demo.gif` 未录制（用户协作项未启动）→ 按风险 1 占位不阻塞；亮点条口径改「23 顶层子命令」（本会话 `--help` 实测，替代旧文 v0.15 时代「32 子命令」过时数）
+- **performance.md 落地**（新 ~120 行）：附录 A 逐行转写 + v0.13 对照 + 归因只写 TD-47 `4c7e294`（其余提升明确不写归因——D5 兑现）+ 启动/内存实测（`proc ls` 2291-2875 ms 合并口径 + record headless 峰值 56.7 MB，单机单次样本非基准声明）
+- **eval 章数字溯源**：六列矩阵每个数字对回 REVIEW-v0.22/23/24 + rag 归档原文；「—」格注明来源未单列不自创；proc stars 如实写 1（gh api 2026-09-01）
+- **验收**：回归双档 1744/0/10 + 1768/0/11（80 行，零 rs 变更开工即终值）；tool 46 / catalog 47 / runtime deps +0 不变锚在位；数字溯源 20 项全 ✅（stage-3 doc 核对表）
 
 ## stage 4 实装注记
 
