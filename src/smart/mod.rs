@@ -180,10 +180,12 @@ pub fn parse_smartctl_json(json: &str) -> Result<SmartData> {
     // NVMe SMART 属性:smartctl 把它们放在 nvme_smart_health_information_log,
     // 是单层 key/value 而非 ATA 风格的属性表。我们把里面常见的几项转成
     // SmartAttribute 填进去,让 UI 能至少展示温度 / 可用冗余等。
+    // clippy 1.98 `manual_filter`：and_then + if/else → filter（本地 1.95
+    // 不报此 lint，修复为远端 CI stable 的标准写法，语义零变化）。
     if let Some(nvme) = v
         .pointer("/nvme_smart_health_information_log")
         .cloned()
-        .and_then(|x| if x.is_object() { Some(x) } else { None })
+        .filter(|x| x.is_object())
     {
         if let Some(obj) = nvme.as_object() {
             for (name, val) in obj {

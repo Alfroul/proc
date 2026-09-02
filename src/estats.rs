@@ -89,6 +89,9 @@ mod win32 {
         let table = unsafe { &*table_ptr };
         let num_entries = table.dwNumEntries as usize;
         // MIB_TCPTABLE2 has a flexible array member — slice from the raw buffer
+        // SAFETY: dwNumEntries 读自本次 GetTcpTable2 成功返回的表头（table_ptr
+        // 与 buf 同源且长度就是 table_size）；切片前显式校验
+        // buf.len() ≥ header + n × row_size，from_raw_parts 不越界。
         let rows: &[windows::Win32::NetworkManagement::IpHelper::MIB_TCPROW2] = unsafe {
             let header = std::mem::size_of::<u32>(); // dwNumEntries
             let row_size =

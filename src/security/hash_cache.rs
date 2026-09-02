@@ -143,10 +143,9 @@ impl HashReputation {
             return None;
         }
 
-        let hash = match self.path_index.get(exe_path) {
-            Some(h) => h.clone(),
-            None => return None,
-        };
+        // clippy 1.98 `question_mark`：match → `?`（本地 1.95 不报此 lint，
+        // 修复为远端 CI stable 的标准写法，语义零变化）。
+        let hash = self.path_index.get(exe_path)?.clone();
         let entry = self.verified.get(&hash)?;
 
         match entry.sig_status {

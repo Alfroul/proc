@@ -105,4 +105,11 @@ v0.26 是秋招窗口期（2026-08~11）的**展示冲刺轻 cycle**（brainstor
 
 ## stage 4 实装注记
 
-（stage 4 会话落地后回填：深挖导览条目数（10 或砍后 N）/ unsafe-audit 落点 / Review 抽查结果）
+（2026-09-01 stage 4 会话回填）
+
+- **深挖导览落地**：`docs/architecture-deep-dive.md` **10 条全保**（无砍单，单条 30-45 行预算内）；每条 L1/L2/L3 三层 + 证据链接 + 一句话结论。**条目①证据源修正**：D4 表引「ADR-0003」经 git 全历史查证是**幽灵引用**（`0003-pid-reuse-start-time-key.md` 从未入库，现行 0003 是 smartctl 选型）——产出改用代码层真实证据（app.rs / score.rs / mcp handler / detail_view / flow 五处 (pid, start_time) 键控 + TD-21/ADR-0005 边界 + process_cache 单键权衡的诚实声明）；幽灵引用归档 TD（v0.27 顺手修四处引用点）
+- **unsafe-audit 落地**：独立 doc `docs/unsafe-audit.md`（~120 行，非 deep-dive 附录）+ **4 处 SAFETY 注释小修**（handles ×2 / estats ×1 / collect ×1——动态加载 NT 函数 / 灵活数组 / 两段式 sizing / ToolHelp 四模式 invariant；纯注释零行为变化，回归双档数字不变）；NT API 层其余 ~93 处留 v0.27+ 专项（注释写错比没有更伤）
+- **Review 抽查**：数字溯源抽查 14 项（> 10 门槛）——**发现 1 处算术错误**（v0.24 归档汇总行「引用 57%」实际是 8/15=53%，8/14 才=57%；README 三处 + 深挖⑨已改 53% 并注勘误）+ 1 处漂移（亮点条 65,074/26,968 是 stage-1 时点值，收尾态实测 65,099/27,480 已更新）；**零自创数字**（P0 无）。gate 有效性实证：fmt 违规注入 → gate.sh [1/4] 步拦截 exit≠0 → 还原复绿
+- **CI 议题拍板（用户 2026-09-01）**：① clippy 1.98 漂移 2 处（hash_cache question_mark / smart manual_filter）**搭车修**（机械改写语义零变化，本地 1.95 clippy 双档仍绿）；② 收尾 commit + tag 后 **push 9 commits + tag 到 origin/master**（badge 维持占位——audit/mirii/macos 仍红，CI 修复专项留 v0.27）；③ demo GIF **用户本窗口录制并挂载**（`docs/assets/demo.gif` 1.34 MB / 35.1s，ShareX 采集，README 注释占位已替换）
+- **TD-62 新立**：session confirm 中断测试负载敏感 flaky（开工基线 anthropic 档连续 2 次同断言红→复跑绿→单跑绿）——观察项归档（不在 gate 快档名单，TD-58 同款处置）
+- **验收终值**：回归双档 1744/0/10 + 1768/0/11（80 行核对）；MCP tool 46 / catalog 47 / runtime deps +0 不变锚全程保持；CHANGELOG 0.26.0 + Cargo bump + README v0.26 banner + tag `v0.26.0` 三处版本一致

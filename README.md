@@ -9,13 +9,15 @@ Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络�
 [![release](https://github.com/Alfroul/proc/actions/workflows/release.yml/badge.svg)](https://github.com/Alfroul/proc/actions/workflows/release.yml)
 -->
 
-<!-- demo GIF: docs/assets/demo.gif（15-30s：TUI 主界面 ~10-15s + AI Agent 面板一次 tool-use ~10-15s；录制规格见 v0.26 stage-1 附录 E，就绪后替换本注释为 ![demo](docs/assets/demo.gif)） -->
+![demo](docs/assets/demo.gif)
 
-**量化亮点**（实测口径见 [docs/performance.md](docs/performance.md) 与 [docs/stages/v0.26-stage-1.md](docs/stages/v0.26-stage-1.md) 附录 F）：
+*TUI 主界面 → AI Agent 面板一次 tool-use（本地 Gemma E2B 推理：query → tool 调用步骤行 → streaming 回答；35s 实录，ShareX 采集）*
+
+**量化亮点**（实测口径见 [docs/performance.md](docs/performance.md)；规模数字为 v0.26.0 收尾态实测 2026-09-01，stage-1 附录 F 时点值 65,074 / 26,968 已随 stage 2 代码演进）：
 
 | 工程规模 | 质量门禁 | AI / agent |
 |---|---|---|
-| **65,074** 行 src 代码 / **26,968** 行测试代码 | 全量回归双档 **1744 + 1768 passed / 0 failed**（默认 + `--features anthropic`） | 内置 AI agent（本地 LLM 默认，数据零外发）+ **46 个 MCP tools** |
+| **65,099** 行 src 代码 / **27,480** 行测试代码 | 全量回归双档 **1744 + 1768 passed / 0 failed**（默认 + `--features anthropic`） | 内置 AI agent（本地 LLM 默认，数据零外发）+ **46 个 MCP tools** |
 | **80** 个 test binaries / **25** 个 release tag | fmt + clippy 双档 `-D warnings` / cargo-audit / miri（unsafe UB 检测）/ [gate.sh](scripts/gate.sh) 快档 29s | 70 query eval 基准 + 六列实验矩阵 + 方差带判读纪律（见下方「AI Agent 与 eval 纪律」） |
 | **36** 份 [ADR](docs/adr/) / **61** 条 [TD ledger](docs/tech-debt.md) | proptest 属性测试（FilterExpr roundtrip）/ **198** 处 unsafe 逐处审计口径 | RAG 经验召回（默认 off）+ session JSONL 观测 |
 
@@ -83,6 +85,8 @@ graph TB
 > 「无」= 四竞品仓库 README 全文关键词扫描（AI agent / MCP / LLM / model context protocol）零命中，2026-08-31 实测。竞品性能数字与功能完整性未核实，不列入（宁缺毋滥）。btop 的 Windows 支持由作者另维护的 [btop4win](https://github.com/aristocratos/btop4win) 移植提供（最后更新 2025-10-12）。
 
 ---
+
+> **v0.26.0（2026-09-02）— 秋招展示冲刺 cycle（评估者视图 + 质量门禁自动化 + 测试深度）**：轻 cycle（~2200 行级 doc 为主，零挂机），把工程强度从 docs 深处搬到评估者 10 分钟可见处——(1) **README 评估者视图**（本段上方：mermaid 分层架构图 + 量化亮点条 + 竞品对比表 as-of 2026-08-31 GitHub API 核实 + badge/GIF 占位）；(2) **AI Agent 与 eval 纪律章**（六列实验矩阵 + 方差带 ±3/±6 标尺 + 预登记换默认门槛（净通过差 ≥ +7 且 L2 方向性）+ 负结果三连归档叙事，数字逐个对回 REVIEW 原文）；(3) **质量门禁自动化**（[gate.sh](scripts/gate.sh) 两档——快档稳态 29s / 全档含回归双档 + R1 llama e2e flaky 根治（自身子进程 PID 断言替代全局 tasklist 扫描）+ pre-push hook opt-in + GitHub required checks 设置说明——R2「变更落在人工验证之后」的结构性关闭，首跑即拦截 fmt 违规）；(4) **性能叙事**（[docs/performance.md](docs/performance.md)：7 项 bench 25 数据点 vs v0.13 同机对照全无回归，refresh_heavy **2.9×** 溯源 TD-47 `4c7e294`，其余提升不写无依据归因）；(5) **设计深挖导览**（[docs/architecture-deep-dive.md](docs/architecture-deep-dive.md)：10 条设计决策 × L1/L2/L3 三层深挖 + 证据链接）；(6) **测试深度**（proptest FilterExpr roundtrip 属性测试 ×2（dev-dep +1 proptest 为预登记批准，runtime deps +0 延续）+ [docs/unsafe-audit.md](docs/unsafe-audit.md) 198 处 unsafe 分布判读 + 4 处 SAFETY invariant 注释）。MCP tool 46 / agent catalog 47 不变锚全程保持；回归双档 **1744 + 1768 passed / 0 failed**（80 test binaries）。详见 [ADR-0036](docs/adr/0036-presentation-sprint.md) + [REVIEW-v0.26](docs/reviews/REVIEW-v0.26.md) + [CHANGELOG](CHANGELOG.md)。
 
 > **v0.20.0（2026-08-17）— 内置 AI agent + Tool registry 两层架构 cycle**：proc 历史上第二大 cycle（~3000 行，5 stage），proc 从「MCP server 暴露给外部 LLM」扩展为**自身有 LLM 调用能力**——CLI `proc agent ask "我电脑为什么这么卡？"` 自然语言 query → agent 多步 tool-use 循环（Gemma 4 E2B 本地推理调 proc_ls / proc_metrics_system 等 → 结果回填 → Markdown 总结）。(1) **multi-provider 抽象**（`LlmProvider` trait + LlamaCpp 本地默认 / Anthropic 云端 opt-in / Mock fixture 回放三 impl，同一份 agent 代码零改动跑三种 provider）；(2) **Tool registry 两层架构**（entry 4 tool 起步 + `proc_help(category)` 元 tool 动态发现剩余 43 个——单轮 tool-context 从 ~15K 降至 ~1.5K token 峰值，96% 减少，2B 模型可驱动）；(3) **小模型可靠循环实测结论**（few-shot 对话示例让 E2B 角色扮演编造结果→删；`tool_choice=required` + `proc_finish` 控制 tool 强制结构化；proc_help 发现的 schema 动态加入 tools 数组）；(4) **隐私架构**（本地 Gemma E2B 默认数据零外发 + 写操作 8 tool confirm gate 拦截 + PII 12 关键字过滤 + API key 只走 env 不落盘）；(5) **Mock fixture 基础设施**（50 query 真实 E2B 响应 JSONL 录制 + 确定性回放，CI 零 LLM 调用）。E2B 验收 QUICK 18/18 / FULL L0 23/23（含 2 个口径 artifact 放宽）+ L1 21/27（78%，τ²-bench 基线 29.4% 的 2.6 倍）；Sonnet 云端对照 deferred（无 API key，TD-55）。MCP tool 总数 46 → 46（不变）。详见 [ADR-0030](docs/adr/0030-builtin-ai-agent.md) + [CHANGELOG](CHANGELOG.md)。
 
@@ -401,7 +405,7 @@ E2B 基线（v0.22 首跑，[归档报告](docs/eval/e2b-70q-v0.22.md)）：L0 1
 
 v0.23 变量实验（[ADR-0033](docs/adr/0033-eval-experiments-and-record-tools.md)，[实验归档](docs/eval/promptv2-70q-v0.23.md)）——两条候选修复路径均以数据关闭：**GBNF** 逃生舱结构性不可用（llama-server 对 grammar × tools 同传显式 400 拒绝，冒烟 12 请求判定性，结论绑定 llama-server b8685）；**prompt v2** 措辞无明确增益（净通过 33/35 vs 基线 32，落 E2B 方差带内 → 保守 revert 回 v1）。**E2B 方差带首次量化**：同 binary 同配置复跑 6 query 纯翻转——单次 run 的 ±3 通过数 / ±6 失败模式计数在噪声内，`--compare` 单列差异小于此量级不可单独归因（v0.24 模型底座决策的解读标尺）。E2B 画像维持基线，进一步改善的杠杆是模型升级（v0.24 与 RAG 一并评估）。另：v0.23 起 agent catalog **47 tool 全部真实可用**（录屏 tool 在 TUI Agent 面板经 y/n confirm 真实执行；CLI 单轮路径维持拦截——跨调用保活仅 TUI 会话支持）。
 
-v0.24 RAG + prompt v3 实验（[ADR-0034](docs/adr/0034-rag-experience-recall.md)，[实验归档](docs/eval/rag-v3-70q-v0.24.md)）——四列矩阵（v1 基线 32 / 方差列 35 / RAG-on 37 / v3 27）：**RAG 机制成立但通过率带内**——机制验证两主指标成立（检索召回 80% / 经验引用 57% / 干扰 0）+ **output_degraded 19→9（-12 超带，答案质量增益）**，但净通过 +2 vs 方差列落 ±3 带内 → `[rag]` 维持默认 off（「机制成立但 E2B 兑现不了通过率」）；**prompt v3 负结果**（修订 2 单变量，-5/-8 落带外向下 → revert 回 v1，TD-60 关闭）。E2B 零代码杠杆穷尽——进一步改善路径收敛「模型升级 × RAG-on 复测」组合（v0.25+ 候选首位）。
+v0.24 RAG + prompt v3 实验（[ADR-0034](docs/adr/0034-rag-experience-recall.md)，[实验归档](docs/eval/rag-v3-70q-v0.24.md)）——四列矩阵（v1 基线 32 / 方差列 35 / RAG-on 37 / v3 27）：**RAG 机制成立但通过率带内**——机制验证两主指标成立（检索召回 12/15 = 80% / 经验引用 8/15 = 53% / 干扰 0）+ **output_degraded 19→9（-12 超带，答案质量增益）**，但净通过 +2 vs 方差列落 ±3 带内 → `[rag]` 维持默认 off（「机制成立但 E2B 兑现不了通过率」）；**prompt v3 负结果**（修订 2 单变量，-5/-8 落带外向下 → revert 回 v1，TD-60 关闭）。E2B 零代码杠杆穷尽——进一步改善路径收敛「模型升级 × RAG-on 复测」组合（v0.25+ 候选首位）。
 
 **Session 观测**<sup>v0.22.0</sup>——TUI Agent 面板每次会话自动留档 JSONL（`~/.config/proc/sessions/`，`agent.toml [session].log = false` 可关；TextDelta 聚合落盘不逐 delta），离线提取 TTFT / 生成时长 / tool 轮数 / confirm 行为指标：
 
@@ -434,7 +438,7 @@ model = "claude-sonnet-4-6"     # API key 走 ANTHROPIC_API_KEY env，不写配�
 max_tokens = 4096
 ```
 
-**RAG 经验召回**<sup>v0.24.0</sup>（[ADR-0034](docs/adr/0034-rag-experience-recall.md)，默认 **off**）——把历史成功 query→tool 链检索出来注入 user message 前缀（`[历史经验参考]` 模板 + `[当前问题]` 原文），让 agent「见过一次就会第二次」。语料 = session JSONL 成功段（主语料，随日常使用自动积累；v0.25 起空会话不落盘——[ADR-0035](docs/adr/0035-td-cleanup-and-session-hygiene.md) D1 延迟创建，主语料只含真实活动）+ eval run passed trace（bootstrap，`eval_corpora` 显式列出才生效）；keyword BM25-lite 检索零依赖；与当前 query 相似的条目自动排除（防 eval 语料泄漏——排除命中数每 query 报告）。E2B 实测（[实验归档](docs/eval/rag-v3-70q-v0.24.md)）：机制成立（召回 80% / 引用 57% / 干扰 0 + degraded -12 超带）但通过率落方差带内 → 维持 off；更强模型底座上是首选复测项：
+**RAG 经验召回**<sup>v0.24.0</sup>（[ADR-0034](docs/adr/0034-rag-experience-recall.md)，默认 **off**）——把历史成功 query→tool 链检索出来注入 user message 前缀（`[历史经验参考]` 模板 + `[当前问题]` 原文），让 agent「见过一次就会第二次」。语料 = session JSONL 成功段（主语料，随日常使用自动积累；v0.25 起空会话不落盘——[ADR-0035](docs/adr/0035-td-cleanup-and-session-hygiene.md) D1 延迟创建，主语料只含真实活动）+ eval run passed trace（bootstrap，`eval_corpora` 显式列出才生效）；keyword BM25-lite 检索零依赖；与当前 query 相似的条目自动排除（防 eval 语料泄漏——排除命中数每 query 报告）。E2B 实测（[实验归档](docs/eval/rag-v3-70q-v0.24.md)）：机制成立（召回 12/15 = 80% / 引用 8/15 = 53% / 干扰 0 + degraded -12 超带）但通过率落方差带内 → 维持 off；更强模型底座上是首选复测项：
 
 ```toml
 [rag]
@@ -469,13 +473,13 @@ agent 的每次配置变更（模型 / prompt / 检索策略）都过同一把�
 - **负结果三连归档**（错误路径的证据价值）：
   1. **GBNF 结构性互斥**（v0.23）——llama-server 对 grammar × tools 同传显式 400 拒绝（`Cannot use custom grammar constraints with tools.`），12 请求冒烟全部拒绝零生成，判定性关闭。冒烟先行：分钟级成本省一次 ~47m 挂机。
   2. **prompt v3 带外向下 revert**（v0.24）——净通过 27（-5 vs 基线 / -8 vs 方差列），L0 掉 4-6 + degraded 24 双向一致恶化，非噪声主导 → revert 回 v1，TD-60 关闭。
-  3. **RAG「机制成立但 E2B 兑现不了」两分**（v0.24）——机制侧全绿（检索召回 12/15 = 80% / 经验引用 8/15 = 57% / 干扰 0/15 + degraded 21→9 超 -12 带），通过率侧 +2 带内。「机制不成立」与「机制成立但底座兑现不了」是两种不同结论——后者给模型升级后的复测留了直接输入。
+  3. **RAG「机制成立但 E2B 兑现不了」两分**（v0.24）——机制侧全绿（检索召回 12/15 = 80% / 经验引用 8/15 = 53% / 干扰 0/15 + degraded 21→9 超 -12 带），通过率侧 +2 带内。「机制不成立」与「机制成立但底座兑现不了」是两种不同结论——后者给模型升级后的复测留了直接输入。
 - **L2 能力边界**：full-chain 1/20（5%）+ chain-step 12/43（28%）双口径——E2B（1.6GB 量化 2B）的多步规划能力边界，不是 harness 缺陷。引用但未通过的 3 例（均 L2）是微观证据：链已向经验迁移，答案质量 / 多步规划仍受底座制约。
 - **杠杆穷尽结论**（v0.24）：GBNF（结构性）+ prompt v2（带内）+ prompt v3（带外向下）+ RAG 通过率（带内）四路关闭后，**E2B 底座上零代码 / 低成本杠杆全部穷尽**——进一步改善收敛「模型升级 × RAG-on 复测」组合（v0.25 起留档候选首位）。
 
 ### MCP server（LLM agent 接入）<sup>v0.7.0 · 扩 v0.15.0 · 扩 v0.16.0 · 扩 v0.17.0 · 扩 v0.18.0 · 扩 v0.19.0</sup>
 
-`proc mcp serve` 把 proc 的进程 / 网络 / DNS / Docker / 详情页 Tab / 系统指标 / 录屏 v2 / USB 状态 / record 暴露 / USB release / docker-rm 写操作能力暴露为 [MCP](https://modelcontextprotocol.io/) tools，让 Claude Code / Cursor / Windsurf 等客户端直接调用。详见 [`docs/adr/0009-mcp-server.md`](docs/adr/0009-mcp-server.md)（v0.7 设计）+ [`docs/adr/0023-mcp-inspect-tool-merge.md`](docs/adr/0023-mcp-inspect-tool-merge.md)（v0.15 详情页 6 Tab 合并）+ [`docs/adr/0024-mcp-handler-module-split.md`](docs/adr/0024-mcp-handler-module-split.md)（v0.15 子 module 拆分）+ [`docs/adr/0025a-mcp-replay-search-agent-schema.md`](docs/adr/0025a-mcp-replay-search-agent-schema.md)（v0.16 replay_search schema）+ [`docs/adr/0025b-mcp-record-not-exposed.md`](docs/adr/0025b-mcp-record-not-exposed.md)（v0.16 record 不暴露决策，v0.17 ADR-0029 翻盘）+ [`docs/adr/0026-mcp-handler-persistent-fields.md`](docs/adr/0026-mcp-handler-persistent-fields.md)（v0.17 MCP handler 持久字段）+ [`docs/adr/0027-resource-subscribe-and-sse-transport.md`](docs/adr/0027-resource-subscribe-and-sse-transport.md)（v0.17 Resource subscribe + SSE transport，v0.18 扩 §5 subscribe-push lifecycle）+ [`docs/adr/0028-vt100-to-uiframe-converter.md`](docs/adr/0028-vt100-to-uiframe-converter.md)（v0.17 VT100 转码）+ [`docs/adr/0029-record-exposure-and-confirm-mechanism.md`](docs/adr/0029-record-exposure-and-confirm-mechanism.md)（v0.17 record 暴露 + confirm 机制，v0.18 扩 §6 record auto-stop）。
+`proc mcp serve` 把 proc 的进程 / 网络 / DNS / Docker / 详情页 Tab / 系统指标 / 录屏 v2 / USB 状态 / record 暴露 / USB release / docker-rm 写操作能力暴露为 [MCP](https://modelcontextprotocol.io/) tools，让 Claude Code / Cursor / Windsurf 等客户端直接调用。详见 [`docs/adr/0009-mcp-server.md`](docs/adr/0009-mcp-server.md)（v0.7 设计）+ [`docs/adr/0023-mcp-inspect-tool-merge.md`](docs/adr/0023-mcp-inspect-tool-merge.md)（v0.15 详情页 6 Tab 合并）+ [`docs/adr/0024-mcp-handler-module-split.md`](docs/adr/0024-mcp-handler-module-split.md)（v0.15 子 module 拆分）+ [`docs/adr/0025a-mcp-replay-search-agent-schema.md`](docs/adr/0025a-mcp-replay-search-agent-schema.md)（v0.16 replay_search schema）+ [`docs/adr/0025b-mcp-record-not-exposed.md`](docs/adr/0025b-mcp-record-not-exposed.md)（v0.16 record 不暴露决策，v0.17 ADR-0029 翻盘）+ [`docs/adr/0026-mcp-handler-persistent-fields.md`](docs/adr/0026-mcp-handler-persistent-fields.md)（v0.17 MCP handler 持久字段）+ [`docs/adr/0027-rmcp-resource-subscribe-sse-transport.md`](docs/adr/0027-rmcp-resource-subscribe-sse-transport.md)（v0.17 Resource subscribe + SSE transport，v0.18 扩 §5 subscribe-push lifecycle）+ [`docs/adr/0028-vt100-to-uiframe-converter.md`](docs/adr/0028-vt100-to-uiframe-converter.md)（v0.17 VT100 转码）+ [`docs/adr/0029-record-exposure-and-confirm-mechanism.md`](docs/adr/0029-record-exposure-and-confirm-mechanism.md)（v0.17 record 暴露 + confirm 机制，v0.18 扩 §6 record auto-stop）。
 
 **Claude Desktop 配置**（macOS：`~/Library/Application Support/Claude/claude_desktop_config.json`；Windows：`%APPDATA%\Claude\claude_desktop_config.json`）：
 

@@ -175,6 +175,10 @@ mod windows_impl {
         for _ in 0..8 {
             let mut buffer = vec![0u8; size as usize];
             let mut return_length: u32 = 0;
+            // SAFETY: 动态加载的 NT 函数（GetProcAddress → transmute，签名按
+            // NtQuerySystemInformation 文档人工对表）；buffer 与 size 同源
+            // （vec![0; size]），API 至多写 ReturnLength ≤ size 字节，
+            // STATUS_INFO_LENGTH_MISMATCH 时整块丢弃重分配，无越界写路径。
             let status = unsafe {
                 (ntdll.query_system_information)(
                     SYSTEM_EXTENDED_HANDLE_INFORMATION,
@@ -254,6 +258,9 @@ mod windows_impl {
         if buffer.len() < std::mem::size_of::<SystemHandleInformationExHeader>() {
             return Ok(Vec::new());
         }
+        // SAFETY: 上一行已校验 buffer.len() ≥ header 大小，cast 只读头部两个
+        // usize 字段；count 条目的遍历在下方 expected_bytes 字节预算校验通过后
+        // 才开始（灵活数组成员契约）。
         let header: &SystemHandleInformationExHeader =
             unsafe { &*(buffer.as_ptr() as *const SystemHandleInformationExHeader) };
         let count = header.number_of_handles;

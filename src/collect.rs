@@ -146,6 +146,8 @@ fn collect_missing_processes(
         Err(_) => return result,
     };
 
+    // SAFETY: PROCESSENTRY32 全零是合法初始态（Win32 POD 结构，全整数字段），
+    // dwSize 按文档契约预置为本机结构大小后，Process32First/Next 只写该结构。
     let mut entry: PROCESSENTRY32 = unsafe { std::mem::zeroed() };
     entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
 

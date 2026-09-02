@@ -799,6 +799,18 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.24 cycle 追踪**：维持观察——v0.24 未升级 llama-server（四列实验均 b8685），节点未触发。若 v0.25+ 启动「模型升级 × RAG-on 复测」需升级 llama.cpp，则 GBNF 复测顺手并入（附录 B 判定表 smoke1 即可判定）。
 
+### TD-62（REVIEW-v0.26 P2）：`test_session_drop_during_confirm_does_not_hang` 负载敏感 flaky（观察项，首触发 2026-09-01）
+
+**位置**：`tests/test_agent_v0_21_stage_2.rs:843-874`（v0.21 stage 2 引入的 confirm 挂起中断测试）
+
+**现状**：v0.26 stage 4 开工基线 anthropic 档全量回归**连续 2 次红在同一断言**（`cancel 后 run 应 Interrupted 收尾（不悬挂）`——`handle.interrupt()` 后 5s 内未观察到 `SessionFinished(Interrupted)`），第三次复跑绿 + 单跑该 binary 稳定绿（35 passed + 1 ignored）+ 默认档全量绿。机制：`await_confirm_decision`（`src/agent/runner.rs:745-759`）靠 100ms 轮询 cancel 退出 confirm 等待——理论远快于 5s 预算，但全量并行（同 binary 36 测试并行 + 机器后台负载，当日实测两个 java + 两个 claude 进程在跑）下调度饥饿可超 5s。与 TD-58（test_alert CPU 采集窗口 flaky）、R1（llama e2e 全局 tasklist 误报，v0.26 stage 2 已修）是**三种不同 flaky 机制**。
+
+**影响**：全量回归偶发首跑红（复跑绿），非业务缺陷——session 中断路径生产语义无恙（interrupt → 100ms 轮询 → Interrupted 收尾）。
+
+**修复方案**（触发时实施）：drain 预算 5s → 15s（一行）或该测试转 `#[ignore]` nightly；修前先评估——它**不在** gate 快档 21 binary 名单内，只影响全档偶发首跑。
+
+**v0.26 stage 4 决策**：观察项归档（TD-58 同款——首触发不修，复现再修）。理由：R1 当初入册即修是因为 gate 门禁会随机撞它（修复是门禁可靠性前置），本测试不在 gate 名单，优先级不同。
+
 ---
 
 ## v0.25 cycle 清仓盘点（2026-08-30，stage 3 收尾状态总检）
@@ -824,6 +836,10 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 | 状态 | 条目 | 说明 |
 |---|---|---|
 | **stage 2 修复即关闭（未立 TD）** | R1 llama e2e flaky 竞态 | brainstorm「基线验证异常记录」R1 段首触发（2026-08-31，v0.20 引入以来首次）：`test_llama_cpp_provider` 内两个真实 server 测试默认并行，end_to_end 清理断言用**全局** `tasklist` 扫 llama-server.exe，被 grammar 测试自己仍存活的 server 误报「drop 后未退出」。stage 2 根治——`LlamaServerHandle::pid()` + `LlamaCppProvider::server_pid()` getter + 断言改查自身子进程 PID（`tasklist /FI "PID eq N"`），`--test test_llama_cpp_provider` 连跑 3 轮稳定绿（27/27 × 3）。按 brainstorm 决策 4 处置**不留 TD-62 观察项**。注意：非 TD-58 本体（TD-58 是 `test_alert::test_metric_extract_process_cpu` CPU 采集窗口 flaky，另一处，继续 open 观察） |
+| **stage 4 新立（观察项）** | TD-62 session confirm 中断测试负载敏感 flaky | 开工基线 anthropic 档连续 2 次同断言红（复跑绿 + 单跑绿），详见上方 TD-62 条目——cycle 内唯一新增 TD |
+| **stage 4 补注释（doc 类，非 TD）** | NT API 层 SAFETY 注释 4 处 | handles ×2 / estats ×1 / collect ×1（纯注释零行为变化），NT API 层其余 ~93 处维持现状（全量补注释 = v0.27+ 候选专项，见 `docs/unsafe-audit.md` §4） |
+| **stage 4 doc finding（P2，v0.27 顺手修）** | ADR-0003 幽灵引用四处 | app.rs:181 注释 / CONTEXT.md PID 词条 / ADR-0021 Related / ADR-0036 D4 表①把「PID 复用键控」引到不存在的 `0003-pid-reuse-start-time-key.md`——深挖导览①已改用代码层证据，四处引用点修正留 v0.27（REVIEW-v0.26 Findings ②） |
+| **stage 4 搭车小修（用户拍板）** | clippy 1.98 漂移 2 处 | `hash_cache.rs:146` match→`?`（question_mark）+ `smart/mod.rs:186` and_then→filter（manual_filter）——本地 1.95 不报此 lint，按远端 CI stable 标准写法机械修复，语义零变化；push 后远端 CI `check` job 的 clippy 红可解（audit/mirii/macos 仍红，badge 维持占位） |
 
 ---
 
@@ -835,3 +851,4 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 - v0.8.0+ 候选：本文件 v0.8.0+ 段 6 项（含 v0.7.0 阶段 8 遗留的 TD-17 / TD-18 / TD-19 eBPF 相关）。
 - v0.25 cycle 清仓（2026-08-30）：关闭 TD-24 / TD-40 / TD-50 / TD-53（实装）+ TD-52 / TD-54（v0.17 落地回填）+ TD-34（判废）+ TD-22（已修回填）——打包清单三组全清（ADR-0035 D3 终判表只砍不加兑现，无新增债）。
 - v0.26 stage 2（2026-08-31）：R1 llama e2e flaky 竞态修复即关闭（未立 TD-62，brainstorm 决策 4 处置）——PID 断言替代全局 tasklist 扫描。
+- v0.26 stage 4（2026-09-01）：新立 TD-62（session confirm 中断测试负载敏感 flaky 观察项，首触发本 stage 开工基线）——cycle 唯一新增；NT API 层 SAFETY 注释补 4 处（59→63）；ADR-0003 幽灵引用 doc finding 归档（v0.27 顺手修）；clippy 1.98 漂移 2 处搭车小修（用户拍板）。
