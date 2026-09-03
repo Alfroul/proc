@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### Added (v0.27 stage 1 — CI 修复专项 Spike 取证与设计定稿)
+
+- **ADR-0037（CI 修复决策集 D1~D5）** + `docs/stages/v0.27-stage-1.md`（取证附录 A-F）。三项修正性取证发现：① **远端 CI 从未绿过**（ci.yml 18/18 failure；check-macos/msrv/audit 自 2026-06-17 引入起 11/11 红；miri 06-23 起 14/14 红——首错 `nvml_wrapper` E0433）；② **check job test 步 6h 挂死自 2026-07-01 已存在 3 次**（非 09-02 新增；6 月是快失败，07-11~08-27 clippy 挡路使 test 步未执行，09-02 修 clippy 后复现）；③ **lib 在非 Windows 结构性编译不过与 feature 无关**（lib.rs 43 模块零 cfg 门控；check-macos 74 错误中 ~71 个非 feature 相关）——macOS B 路径实证否决拍 C（移除 job）+ msrv job 必须迁 windows runner + miri 在 ubuntu 不可修。D1 测试策略：WinVerifyTrust 整类挂点 choke-point 单点 gate（`verify_signature_with_policy` CI env → Unknown，覆盖 scorer 200 synthetic exe 间接路径）+ ETW/真实网络两文件 per-test gate + timeout-minutes 兜底；D2 msrv 双修：job ubuntu→windows + rust-version 1.85→1.88（B 方案推荐，16 包 pin 清单留档备选）；D3 check-macos 移除（ADR-0022 补完）；D4 audit：permissions 块 + crossbeam-epoch ≥0.9.20 + rmcp RUSTSEC-2026-0189 ignore（暴露面评估：advisory 原文「stdio 不受影响」+ proc SSE 路径三条件窄暴露）；D5 miri 移除（声明性降级）+ winget job 移除（action 删库 + winget-pkgs 无 manifest，从未工作过零用户破坏）。开工基线：回归双档 1744/0/10 + 1768/0/11（各 80 行核对）+ 三件套全过，零首跑异常（R1 未复现）。
+
 ## [0.26.0] - 2026-09-02
 
 ### v0.26.0 cycle 完结 — 秋招展示冲刺（评估者视图 + 质量门禁自动化 + 测试深度）
