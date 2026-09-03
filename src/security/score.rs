@@ -218,7 +218,8 @@ impl SecurityScorer {
         flows: &[crate::flow::ProcessFlow],
     ) -> SecurityScore {
         let exe_path = proc.exe.as_deref().unwrap_or("");
-        // ADR-0003：键加 start_time，PID 复用后旧实例的签名缓存不会过继给新进程。
+        // 键加 start_time：PID 复用后旧实例的签名缓存不会过继给新进程（键控证据
+        // 见 docs/architecture-deep-dive.md 条目①；v0.27 勘误：原 ADR-0003 引用为幽灵引用）。
         let cache_key = format!(
             "{}:{}:{}",
             proc.pid,

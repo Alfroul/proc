@@ -13,6 +13,15 @@
 
 use proc::dns_log::{DnsCollectorKind, detect_collector};
 
+/// v0.27（ADR-0037 D1.2）：CI gate——GitHub windows runner 默认提权，本文件的
+/// 「collector 启动失败→SKIP」降级守卫失效（ETW 能启动），真实路径测试会走外网
+/// DNS 查询（Resolve-DnsName example.com）+ ETW 抓包断言——漏抓重试已文档化的
+/// 非确定性 + runner 代理网络外网依赖。CI=true 时跳过真实路径测试；本地不设
+/// CI 故行为零变化。纯契约测试（kind enum / serde）不受影响继续跑。
+fn ci_env() -> bool {
+    std::env::var("CI").is_ok_and(|v| v == "true")
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // 跨平台：DnsCollectorKind enum 契约
 // ──────────────────────────────────────────────────────────────────────────
@@ -67,6 +76,10 @@ fn dns_collector_kind_traits() {
 /// `(None, None)`（PowerShell 也失败时）。
 #[test]
 fn detect_collector_returns_aligned_tuple() {
+    if ci_env() {
+        eprintln!("SKIP: CI 环境（真实 collector 路径 gate，ADR-0037 D1.2）");
+        return;
+    }
     let (collector, kind) = detect_collector();
     // tuple 必须自洽：collector Some 时 kind != None；collector None 时 kind == None
     match (&collector, kind) {
@@ -110,6 +123,10 @@ fn detect_collector_returns_aligned_tuple() {
 #[cfg(target_os = "windows")]
 #[test]
 fn detect_collector_windows_round_trip_clean() {
+    if ci_env() {
+        eprintln!("SKIP: CI 环境（真实 ETW 启停路径 gate，ADR-0037 D1.2）");
+        return;
+    }
     let (collector, kind) = detect_collector();
     // Windows 上：要么 ETW（admin），要么 PowerShell（fallback），要么 None（都失败）
     assert!(
@@ -146,6 +163,10 @@ fn detect_collector_windows_round_trip_clean() {
 fn etw_collects_example_com_query_when_admin() {
     use std::time::{Duration, Instant};
 
+    if ci_env() {
+        eprintln!("SKIP: CI 环境（真实 DNS/ETW 路径 gate，ADR-0037 D1.2）");
+        return;
+    }
     let (collector, kind) = detect_collector();
     let Some(mut collector) = collector else {
         eprintln!("SKIP: 无 DNS collector 可用（非 Windows / PowerShell 缺失 / ETW 失败）");

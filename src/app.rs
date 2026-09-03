@@ -178,7 +178,8 @@ pub struct App {
     pub throttle_reason: crate::throttle::ThrottleReason,
 
     // Per-process disk speed
-    // 键 = (pid, start_time)：避免 PID 复用后把死进程的累计 IO 算到新进程头上（ADR-0003）。
+    // 键 = (pid, start_time)：避免 PID 复用后把死进程的累计 IO 算到新进程头上
+    //（代码层键控证据见 docs/architecture-deep-dive.md 条目①；v0.27 勘误：原 ADR-0003 引用为幽灵引用）。
     prev_process_disk: HashMap<(u32, u64), (u64, u64)>,
     prev_process_disk_time: Instant,
 

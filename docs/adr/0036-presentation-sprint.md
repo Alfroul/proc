@@ -55,7 +55,7 @@ v0.26 是秋招窗口期（2026-08~11）的**展示冲刺轻 cycle**（brainstor
 
 | # | 条目 | 证据源 |
 |---|---|---|
-| ① | PID 复用键控（(pid, start_time) 元组） | ADR-0003 |
+| ① | PID 复用键控（(pid, start_time) 元组） | 代码层五处键控（app.rs / score.rs / mcp handler / detail_view / flow——v0.27 勘误：原引 ADR-0003 为幽灵引用，深挖①已改代码证据） |
 | ② | 采集三路 + ETW→sysinfo delta 改道三理由 | ADR-0035 D2 |
 | ③ | worker 指数退避 + TD-24 止损 | ADR-0019 + TD-24 |
 | ④ | D1 延迟创建 vs Drop 三缺陷 | ADR-0035 D1 |

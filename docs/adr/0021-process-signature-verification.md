@@ -3,7 +3,7 @@
 - **Status**: Accepted
 - **Date**: 2026-06-30
 - **Phase**: v0.11.0 阶段 4
-- **Related**: [ADR-0008](0008-avoid-runtime-image-signing-policy.md)（self-mitigation 不开 `ProcessSignaturePolicy`）、[ADR-0003](0003-pid-reuse-start-time-key.md)（缓存键加 start_time 防 PID 复用）
+- **Related**: [ADR-0008](0008-avoid-runtime-image-signing-policy.md)（self-mitigation 不开 `ProcessSignaturePolicy`）、缓存键加 start_time 防 PID 复用（代码层键控，证据见 [深挖导览条目①](../architecture-deep-dive.md)；v0.27 勘误：原引 ADR-0003 为幽灵引用——`0003-pid-reuse-start-time-key.md` 从未入库，现行 0003 是 smartctl 选型）
 
 ## 背景
 

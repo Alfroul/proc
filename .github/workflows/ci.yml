@@ -11,7 +11,11 @@ env:
 
 jobs:
   check:
+    # v0.27（ADR-0037 D1）：真实环境测试已 env-gate（signature choke-point +
+    # ETW 两文件，src 侧 CI=true 判定），timeout 是未知挂点的确定性止损——
+    # 历史 test 步 6h 挂死 3 次实证（07-01/07-04×2 + 09-02）。
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -33,42 +37,46 @@ jobs:
 
       - name: test
         run: cargo test --release
+        timeout-minutes: 45
 
-  check-macos:
-    # macOS 仅 cargo check + clippy（与 Linux 同样的 cfg-gated 降级）。
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-
-      - name: fmt
-        run: cargo fmt --all -- --check
-
-      - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: check (no default features)
-        run: cargo check --no-default-features --all-targets
+  # v0.27（ADR-0037 D3）：check-macos job 移除——lib 在非 Windows 结构性编译不过
+  # （lib.rs 43 模块零 cfg 门控，74 错误中 ~71 个与 feature 无关，`--no-default-features`
+  # 卫生检查在 macOS 从未成立，job 11/11 从未绿）；该卫生已由 check job 的 Windows
+  # build 步覆盖。平台决策依据 ADR-0022（Windows-only）。
 
   msrv:
-    # 验证 rust-version = "1.85" 声明确实可编译。
-    runs-on: ubuntu-latest
+    # 验证 rust-version = "1.88" 声明确实可编译。
+    # v0.27（ADR-0037 D2 双修）：ubuntu→windows（lib 在非 Windows 编译不过，该 job
+    # 在 ubuntu 从未可能绿过）+ 1.85→1.88（lockfile 16 包要求 1.86-1.88，1.85 声明
+    # 已失真；本地 cargo +1.88.0 check 实证）。
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
 
       - name: check (no default features)
-        run: cargo check --no-default-features --all-targets
+        # v0.27 stage 2 实装注记：去掉原 --all-targets——集成测试按默认 feature 写
+        # （mock-provider / llama-cpp 是 default），--no-default-features --all-targets
+        # 在任何工具链都编不过测试目标（预存在问题，ubuntu 时代死于依赖解析从未暴露）。
+        # lib+bins 与 check job 的 build (release, no default features) 步同编译域；
+        # 本地 cargo +1.88.0 check --no-default-features 实证通过。
+        run: cargo check --no-default-features
 
   audit:
     # 安全审计：cargo-audit 扫描 Cargo.lock 已知漏洞。
+    # v0.27（ADR-0037 D4）：permissions 块（audit-check action 建 check-run 所需，
+    # 现状 Resource not accessible by integration）；crossbeam-epoch 已 update 到
+    # ≥0.9.20（RUSTSEC-2026-0204 patched）；rmcp RUSTSEC-2026-0189 ignore——
+    # stdio transport 不受影响（advisory 原文）+ SSE 路径三条件窄暴露，评估见
+    # ADR-0037 D4 / stage-1 附录 E，major 升级追踪 TD-63。
+    permissions:
+      contents: read
+      checks: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2026-0189

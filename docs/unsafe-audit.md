@@ -35,7 +35,7 @@ SAFETY 注释 59 处（30%），分布极不均匀：
 ## 3. lint 与编译期防线
 
 - **edition 2024**（`Cargo.toml:4`）：`unsafe_op_in_unsafe_fn` 默认启用。项目仅有的 2 个 `unsafe fn`（`src/inspect/env.rs:128/148`，ReadProcessMemory 封装）体内已显式包 unsafe block——**现状合规零变更**（双档 clippy `-D warnings` 全过即机器证据）。
-- **miri**：workflow 存在（`.github/workflows/miri.yml`）但历史 run 全红（E0433 编译配置问题，非 unsafe 判定失败）——workflow 修复是 v0.27 候选（[stage-3 doc「已知阻塞」段](stages/v0.26-stage-3.md)）；修好前 miri 不构成有效防线，此处如实声明。
+- **miri**：防线**已移除**（v0.27，[ADR-0037](adr/0037-ci-recovery.md) D5 声明性降级）——三重论据：ubuntu 上 lib 编译不过（平台性不可修，14/14 全红史）/ 198 处 unsafe 全在 NT FFI 层（miri 不支持 Win32 调用）/ 两个目标测试 binary 合计 15 处 `thread::sleep` 时序断言不适合解释器（慢 20-100×）。unsafe 防线的实际承担者 = SAFETY 注释 63 处 + 本审计 doc + 全量回归双档。
 - **回归护栏**：unsafe 密集模块的行为契约由集成测试锚定（如 estats 差分精确断言、handles 枚举降级路径、ETW provider 回调解析 fixture）。
 
 ## 4. 本 cycle 补的 SAFETY 注释（4 处，纯注释零行为变化）
@@ -53,5 +53,5 @@ SAFETY 注释 59 处（30%），分布极不均匀：
 
 1. **198 处 unsafe 全部位于 FFI 边界层**，业务逻辑层零 unsafe——集中度是系统工具的领域属性。
 2. **高风险区（回调 / 特权变更）SAFETY 覆盖 80-100%**，低风险 thin-wrapper 层零覆盖——优先级判断与实际风险排序一致。
-3. **编译期防线合规**（edition 2024 lint + clippy -D warnings 双档）；miri 防线如实声明为不可用（workflow 待修）。
+3. **编译期防线合规**（edition 2024 lint + clippy -D warnings 双档）；miri 防线已移除（ADR-0037 D5：NT FFI 主导 + 时序型测试不适合解释器，理由见 §3）。
 4. 补注释策略：挑代表性模式（本 cycle 4 处）而不是撒胡椒面——每处注释声明可核对的 invariant。

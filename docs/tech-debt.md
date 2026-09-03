@@ -811,6 +811,18 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.26 stage 4 决策**：观察项归档（TD-58 同款——首触发不修，复现再修）。理由：R1 当初入册即修是因为 gate 门禁会随机撞它（修复是门禁可靠性前置），本测试不在 gate 名单，优先级不同。
 
+### TD-63（ADR-0037 D4）：rmcp 0.11 RUSTSEC-2026-0189 —— 0.11→≥1.4 major 升级（独立 cycle 候选）
+
+**位置**：`src/mcp/transport.rs::serve_sse`（rmcp 0.11 Streamable HTTP transport 不校验 `Host` header——DNS rebinding 攻击面，CVE-2026-42559，<1.4.0 受影响；patched ≥1.4.0 默认 loopback-only host 校验）
+
+**现状**：v0.27 stage 2 起 ci.yml audit job 挂 `ignore: RUSTSEC-2026-0189`。暴露面评估（ADR-0037 D4 / stage-1 附录 E）：默认 `proc mcp serve` = stdio transport **不受影响**（advisory 原文明示「Non-HTTP transports such as stdio... are not affected」）；受影响面仅 opt-in SSE 路径（`serve_sse` 用 `StreamableHttpServerConfig::default()` 即漏洞配置），攻击链需「用户显式 `--transport sse` + 服务运行中 + 受害者浏览恶意页（DNS rebinding 到 loopback）」三条件同时成立；缓解在位：CLI `--bind-addr` 默认 `127.0.0.1`（全网卡需显式 opt-in）+ 写操作 tool confirm 契约（`confirm=false` 拒绝执行）。
+
+**影响**：audit 输出留痕 ignore 条目（ADR-0037 D4 + 附录 E + 本 TD 构成完整答复链——面试追问「为什么 ignore」有据可答）；SSE 用户在 major 升级前处于窄而真实的暴露面（README SSE 段有如实注记）。
+
+**修复方案**：rmcp 0.11 → ≥1.4 major 升级——46 MCP tool 底座的 breaking 变更面（`ServerHandler` trait / `ResourceRoute` / transport API），独立 cycle 评估（v0.28+ 候选）；升级完成后删 ci.yml audit job 的 ignore 参数 + 本 TD 关闭。
+
+**v0.27 stage 2 决策**：brainstorm 决策 3A 拍板——ignore + TD 追踪，不与 CI 修复 cycle 混装（B「本 cycle major 升级」否决：容量风险 + cycle 失焦）。
+
 ---
 
 ## v0.25 cycle 清仓盘点（2026-08-30，stage 3 收尾状态总检）
@@ -843,6 +855,18 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 ---
 
+## v0.27 cycle 追踪（2026-09-03 起，CI 修复专项 cycle）
+
+| 状态 | 条目 | 说明 |
+|---|---|---|
+| **stage 2 新立** | TD-63 rmcp RUSTSEC-2026-0189 ignore + major 追踪 | brainstorm 决策 3A 兑现（见上方 TD-63 条目）——cycle 唯一新增 TD |
+| **stage 2 顺手修（doc 类）** | ADR-0003 幽灵引用清零 | REVIEW-v0.26 Findings ② 四处（app.rs:181 / CONTEXT.md PID 词条 / ADR-0021 Related / ADR-0036 D4①）+ 全仓 grep 同类四处（mcp/handler/mod.rs:362 / net_flow/mod.rs:14+35 / score.rs:221）共 **8 处**改代码层锚（深挖导览①）；smartctl 语境合法引用（smart/mod.rs ×2 / ADR-0004 ×2）与冻结历史文档保留——grep 验收锚通过（PID 复用语境零残留） |
+| **stage 2 口径核实（D5 延伸）** | README winget/scoop 安装指引失实 | stage-1 实证 winget-pkgs 无 `Alfroul.proc` manifest + 本 stage 核实 scoop Main/Extras bucket 均无 proc、作者名下无自建 bucket——「方式 3」整体改 GitHub Releases 下载，:674 补全部署句 + :773 平台支持段同步（v0.27 勘误注记在位） |
+| **stage 2 新发现（D2 连带，留 v0.28+）** | rust-version 1.88 解锁 clippy let-chain 版 `collapsible_if` | 1.85→1.88 声明使该 lint 的折叠建议（`if let ... && ...`，需 MSRV ≥1.88）在**本地 1.95 与远端 1.98 同时启用**，37 处既有代码（16 文件：mcp handler record/mod / replay / dns_log / agent provider 等）被打红——本 cycle CI 修复专项不动业务代码，`Cargo.toml [lints.clippy] collapsible_if = "allow"` 过渡 + 本行归档；**v0.28+ 候选**：37 处机械现代化（折叠为 let-chain）后删 allow 恢复 lint |
+| **stage 2 开工基线观察** | 双档各一起首跑 flaky | 默认档 TD-62 本体（第 2 次触发）+ anthropic 档 `test_inspect::inspect_aggregates_three_buckets`（dlls empty，首触发）——均单跑绿 + 复跑绿，观察项口径（见 TD-62 词条；inspect dlls 枚举复现再评估入册） |
+
+---
+
 ## 历史回顾
 
 - v0.6.0 Review（本文件来源）：`docs/reviews/REVIEW-7.md` 产出 1 P0 + 9 P1 + 14 P2。
@@ -852,3 +876,4 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 - v0.25 cycle 清仓（2026-08-30）：关闭 TD-24 / TD-40 / TD-50 / TD-53（实装）+ TD-52 / TD-54（v0.17 落地回填）+ TD-34（判废）+ TD-22（已修回填）——打包清单三组全清（ADR-0035 D3 终判表只砍不加兑现，无新增债）。
 - v0.26 stage 2（2026-08-31）：R1 llama e2e flaky 竞态修复即关闭（未立 TD-62，brainstorm 决策 4 处置）——PID 断言替代全局 tasklist 扫描。
 - v0.26 stage 4（2026-09-01）：新立 TD-62（session confirm 中断测试负载敏感 flaky 观察项，首触发本 stage 开工基线）——cycle 唯一新增；NT API 层 SAFETY 注释补 4 处（59→63）；ADR-0003 幽灵引用 doc finding 归档（v0.27 顺手修）；clippy 1.98 漂移 2 处搭车小修（用户拍板）。
+- v0.27 stage 2（2026-09-03）：新立 TD-63（rmcp RUSTSEC-2026-0189 ignore + 0.11→≥1.4 major 追踪，决策 3A 兑现）；ADR-0003 幽灵引用 8 处清零（REVIEW 四处 + 同类四处）；README winget/scoop 失实指引勘误；CI 修复主项落地（ADR-0037 D1-D5 实装）。

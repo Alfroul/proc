@@ -11,6 +11,15 @@
 
 use proc::schannel_etw::{SniRecord, try_spawn};
 
+/// v0.27（ADR-0037 D1.2）：CI gate——GitHub windows runner 默认提权，本文件的
+/// 「ETW 启动失败→SKIP」降级守卫失效（Schannel ETW 能启动），真实路径测试会走
+/// 外网 TLS（curl https://example.com）+ ETW SNI 抓包断言——漏抓重试已文档化的
+/// 非确定性 + runner 代理网络外网依赖。CI=true 时跳过；本地不设 CI 行为零变化。
+/// 纯契约测试（sni_record_shape）不受影响继续跑。
+fn ci_env() -> bool {
+    std::env::var("CI").is_ok_and(|v| v == "true")
+}
+
 /// SniRecord struct 数据格式：pid / sni / ts 字段 + Clone / Serialize 契约。
 #[test]
 fn sni_record_shape() {
@@ -43,6 +52,10 @@ fn sni_record_shape() {
 fn worker_spawns_and_drops_cleanly() {
     use std::time::Duration;
 
+    if ci_env() {
+        eprintln!("SKIP: CI 环境（真实 Schannel ETW 启停路径 gate，ADR-0037 D1.2）");
+        return;
+    }
     let worker = match try_spawn(None) {
         Some(w) => w,
         None => {
@@ -76,6 +89,10 @@ fn worker_spawns_and_drops_cleanly() {
 fn spawn_collects_self_sni_when_admin() {
     use std::time::{Duration, Instant};
 
+    if ci_env() {
+        eprintln!("SKIP: CI 环境（真实 TLS/Schannel ETW 路径 gate，ADR-0037 D1.2）");
+        return;
+    }
     let worker = match try_spawn(None) {
         Some(w) => w,
         None => {

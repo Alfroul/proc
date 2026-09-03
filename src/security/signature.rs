@@ -192,6 +192,16 @@ pub(crate) fn verify_signature_with_policy(
     };
     use windows::core::PCWSTR;
 
+    // v0.27（ADR-0037 D1.1，choke-point gate）：GitHub Actions windows runner 默认提权，
+    // 下方 is_elevated() 早退失效，真实 WinVerifyTrust 在 runner 上无限挂起（09-02 run
+    // 实证：real_path_does_not_panic 报 over 60 seconds 后零输出直至 6h 超时取消）。
+    // CI=true（GitHub 自动设置，本地不设故行为零变化）时返回 Unknown——与本地非提权
+    // 行为一致，单点覆盖 lib + 集成测试（scorer big_request 200 synthetic exe 间接
+    // 路径）全部真实 WinVerifyTrust 触点，对未来新增测试同样生效。
+    if std::env::var("CI").is_ok_and(|v| v == "true") {
+        return SignatureStatus::Unknown;
+    }
+
     if !crate::collect::is_elevated() {
         return SignatureStatus::Unknown;
     }

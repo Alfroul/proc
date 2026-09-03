@@ -2,7 +2,9 @@
 name = "proc"
 version = "0.26.0"
 edition = "2024"
-rust-version = "1.85"
+# v0.27（ADR-0037 D2）：1.85 → 1.88——lockfile 16 包传递依赖要求 1.86-1.88，
+# 1.85 声明已失真（编不了）；1.88 是 14 个月老基线，edition 2024 最低线不受影响。
+rust-version = "1.88"
 description = "交互式 TUI 系统进程管理器，集成进程/网络/USB/Docker/安全评分/录屏"
 license = "MIT"
 repository = "https://github.com/Alfroul/proc"
@@ -17,6 +19,14 @@ pkg-fmt = "tar.gz"
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
 pkg-fmt = "zip"
+
+# v0.27（ADR-0037 D2 连带处置）：rust-version 1.85→1.88 解锁 clippy let-chain 版
+# collapsible_if（折叠为 `if let ... && ...` 的建议需 MSRV ≥ 1.88 才启用），37 处既有
+# 代码（16 文件，agent/mcp/replay 等本 cycle 未触碰路径）被新启用的 lint 打红。
+# 本 cycle 是 CI 修复专项不动业务代码——let-chain 现代化归档 tech-debt v0.27 段
+# （v0.28+ 候选），完成后删本 allow 恢复 lint。
+[lints.clippy]
+collapsible_if = "allow"
 
 [dependencies]
 ratatui = "0.29"

@@ -11,7 +11,7 @@
 //!
 //! # PID 复用
 //!
-//! `ProcessNetRate` 带 `start_time` 字段（参考 ADR-0003 缓存键策略）。Windows
+//! `ProcessNetRate` 带 `start_time` 字段（PID 复用键控，证据见 docs/architecture-deep-dive.md 条目①）。Windows
 //! IP Helper 不暴露 start_time，collector 本身填 0；主线程在把速率贴回
 //! `ProcessInfo` 时按 PID 查 `cached_processes` 拿真实 start_time。PID 在 1s
 //! poll 间隔内被复用是极小概率事件；collector 内部用「计数回退」检测 PID
@@ -32,7 +32,7 @@ use std::fmt;
 
 /// 单进程的字节速率快照（自上次 collector refresh 以来的差值，已归一化到 bytes/sec）。
 ///
-/// `start_time` 用于防 PID 复用（ADR-0003）。collector 本身不总能拿到
+/// `start_time` 用于防 PID 复用（(pid, start_time) 键控——docs/architecture-deep-dive.md 条目①）。collector 本身不总能拿到
 /// start_time（如 Windows IP Helper 不暴露），此时填 0；消费者按 PID 查
 /// `cached_processes` 拿真实 start_time 后再做 (pid, start_time) tuple 缓存。
 #[derive(Debug, Clone, PartialEq, Eq)]

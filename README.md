@@ -18,8 +18,8 @@ Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络�
 | 工程规模 | 质量门禁 | AI / agent |
 |---|---|---|
 | **65,099** 行 src 代码 / **27,480** 行测试代码 | 全量回归双档 **1744 + 1768 passed / 0 failed**（默认 + `--features anthropic`） | 内置 AI agent（本地 LLM 默认，数据零外发）+ **46 个 MCP tools** |
-| **80** 个 test binaries / **25** 个 release tag | fmt + clippy 双档 `-D warnings` / cargo-audit / miri（unsafe UB 检测）/ [gate.sh](scripts/gate.sh) 快档 29s | 70 query eval 基准 + 六列实验矩阵 + 方差带判读纪律（见下方「AI Agent 与 eval 纪律」） |
-| **36** 份 [ADR](docs/adr/) / **61** 条 [TD ledger](docs/tech-debt.md) | proptest 属性测试（FilterExpr roundtrip）/ **198** 处 unsafe 逐处审计口径 | RAG 经验召回（默认 off）+ session JSONL 观测 |
+| **80** 个 test binaries / **25** 个 release tag | fmt + clippy 双档 `-D warnings` / cargo-audit / [gate.sh](scripts/gate.sh) 快档 29s | 70 query eval 基准 + 六列实验矩阵 + 方差带判读纪律（见下方「AI Agent 与 eval 纪律」） |
+| **37** 份 [ADR](docs/adr/) / **62** 条 [TD ledger](docs/tech-debt.md) | proptest 属性测试（FilterExpr roundtrip）/ **198** 处 unsafe 逐处审计口径（miri 防线移除决策见 [ADR-0037](docs/adr/0037-ci-recovery.md) D5） | RAG 经验召回（默认 off）+ session JSONL 观测 |
 
 ### 架构分层
 
@@ -625,6 +625,8 @@ agent 的每次配置变更（模型 / prompt / 检索策略）都过同一把�
 
 **bind-addr 安全默认**（ADR-0027 §6.4）：CLI flag `--bind-addr` 默认 `127.0.0.1`（仅本机，与 ADR-0008 self-mitigation policy 对齐）/ `0.0.0.0`（全网卡，用户显式 opt-in）。SSE 暴露 proc MCP tool（含 `proc_docker_rm` / `proc_docker_image_rm` / `proc_docker_volume_rm` / `proc_usb_release` / `proc_record_start` 等写操作），全网卡监听需用户显式 opt-in 避免意外暴露到 LAN。
 
+**RUSTSEC-2026-0189 注记**（v0.27，[ADR-0037](docs/adr/0037-ci-recovery.md) D4）：rmcp <1.4 的 Streamable HTTP transport 不校验 `Host` header（DNS rebinding 攻击面）。proc 默认 `proc mcp serve` = **stdio transport，不受影响**（advisory 原文明示非 HTTP transport 不受影响）；受影响面仅 opt-in SSE 路径，攻击链需「显式开 SSE + 服务运行中 + 受害者浏览恶意页」三条件同时成立，且 `--bind-addr` 默认 `127.0.0.1` + 写操作 confirm 契约在位缓解。处置：CI audit 挂 ignore + [TD-63](docs/tech-debt.md) 追踪 0.11→≥1.4 major 升级（46 tool 底座 breaking，独立 cycle）。
+
 **已知限制**（v0.19 stage 2 兜底策略，留 v0.20+ cycle 补全）：
 
 - **subscribe 跨调用不做 dedup**：rmcp 0.11 `Peer<R>` struct 字段全 private（`tx` / `request_id_provider` / `progress_token_provider` / `progress_timeout_watchers` / `info`），无 public identity method。同 client 多次 subscribe 同 URI 会在 vec push 多个 `Arc<Peer>` 项；依赖 push task 失败 cleanup 兜底（client 断开后下一次 push 失败对应 Arc 被精确移除）
@@ -656,9 +658,8 @@ cd proc
 cargo build --release
 ./target/release/proc
 
-# 方式 3：Windows 包管理器（v0.6.0+）
-winget install Alfroul.proc
-scoop install proc
+# 方式 3：GitHub Releases 直接下载 zip（预编译二进制 + 补全文件）
+# https://github.com/Alfroul/proc/releases
 ```
 
 ### Shell 补全（v0.7.0+）
@@ -671,7 +672,7 @@ proc completions --shell fish    > ~/.config/fish/completions/proc.fish
 proc completions --shell powershell > $PROFILE
 ```
 
-Release artifact 也附带预生成的 4 个补全文件（`completions/` 目录），scoop / winget 安装时会一并部署。
+Release artifact 也附带预生成的 4 个补全文件（`completions/` 目录；v0.27 勘误：原「scoop / winget 安装」表述失实——两渠道均无 proc manifest，分发渠道为 GitHub Releases + cargo-binstall）。
 
 也可 `cargo install --path .` 装到 `~/.cargo/bin/`。
 
@@ -771,7 +772,7 @@ proc docker exec <container> bash -lc "env"       # exec 指定命令
 
 **v0.12.0 起 Windows-only**（详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。Windows 10 1809+ / Windows 11 x64。Linux / macOS 用户迁移路径：`git checkout v0.11.0`（最后含 Linux 代码的 release）。
 
-**release CI 仅覆盖 1 个 target**（v0.12.0+）：`x86_64-pc-windows-msvc`。`cargo binstall proc` / `winget install Alfroul.proc` / `scoop install proc` 任选一种安装（Linux / macOS 的 binstall / winget / scoop 包不再发布，详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。
+**release CI 仅覆盖 1 个 target**（v0.12.0+）：`x86_64-pc-windows-msvc`。`cargo binstall proc` 或 [GitHub Releases](https://github.com/Alfroul/proc/releases) 下载 zip 安装（v0.27 勘误：winget / scoop 渠道从未实际存在——两处包管理器仓库均无 proc manifest，原指引失实，详见 [ADR-0037](docs/adr/0037-ci-recovery.md) D5；Linux / macOS 包不再发布，详见 [ADR-0022](docs/adr/0022-windows-only-platform.md)）。
 
 | 功能 | Windows 10 1809+ / Windows 11 x64 |
 |---|---|

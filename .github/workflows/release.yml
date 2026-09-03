@@ -52,14 +52,8 @@ jobs:
           generate_release_notes: true
           draft: true   # 草稿状态，给用户审核后手动 publish
 
-  update-winget:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: russellbanks/release-automation-winget@v1
-        with:
-          identifier: Alfroul.proc
-          version: ${{ github.ref_name }}
-          installers: https://github.com/Alfroul/proc/releases/download/${{ github.ref_name }}/proc-x86_64-pc-windows-msvc.zip
-          token: ${{ secrets.WINGET_TOKEN }}
+  # v0.27（ADR-0037 D5）：update-winget job 移除——上游 action
+  # russellbanks/release-automation-winget 仓库已删（首次执行 2026-07-04 即 404，
+  # 6/6 全红），且 microsoft/winget-pkgs 无 Alfroul.proc manifest（winget 分发从未
+  # 存在，删除零用户破坏）。实际分发渠道 = GitHub Releases（本 build job）+
+  # cargo-binstall。未来上 winget 走 winget-pkgs 手动 PR 流程，届时立独立 job。

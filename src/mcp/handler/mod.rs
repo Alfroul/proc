@@ -359,7 +359,7 @@ fn run_snapshot_worker(
 /// v0.25 stage 3 TD-53（ADR-0035 D2 改道）：per-process 磁盘速率 sysinfo delta 计算。
 ///
 /// TUI `App::update_disk_speeds`（app.rs）同款口径：key = `(pid, start_time)`
-/// （PID 复用防护，ADR-0003），prev tick 的 `disk_usage` 累计值差分 / elapsed 填
+/// （PID 复用防护，代码层键控证据见 docs/architecture-deep-dive.md 条目①），prev tick 的 `disk_usage` 累计值差分 / elapsed 填
 /// `disk_read_speed` / `disk_write_speed`。MCP snapshot worker 每 tick 在
 /// `refresh_heavy_incremental` 返 `Ok(true)` 时调用。
 ///

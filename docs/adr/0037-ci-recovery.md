@@ -37,6 +37,7 @@ v0.26 push（tag `v0.26.0`，2026-09-02）触发远端 CI 三 workflow 全红，
 **两步修复**（缺一不可）：
 
 1. **job 平台修正**：msrv job `ubuntu-latest` → `windows-latest`（发现 3：ubuntu 上 lib 编译不过，该 job 在 ubuntu 从未可能绿过；MSRV 验证本就该在 crate 实际构建平台跑）。步骤不变（`cargo check --no-default-features --all-targets`——该档在 Windows 本地实测编译通过，v0.26 gate 与 ci.yml check job 的 `build (release, no default features)` 步均绿）。
+   - **stage 2 实装注记（2026-09-03）**：上文「该档实测编译通过」的依据是 `build --no-default-features`（lib+bins），`--all-targets` 是未验证外推——本地 `cargo check --no-default-features --all-targets` 实测**在任何工具链（1.95 / 1.88 均验证）编不过测试目标**：`test_agent_v0_20_stage_2` / `_stage_3b` 引用 `mock-provider` / `llama-cpp` 门控模块（两者是 default feature，测试按默认 feature 写是合理设计；该失败 ubuntu 时代死于依赖解析从未暴露）。msrv job 步骤修正为 `cargo check --no-default-features`（lib+bins，与 check job 的 build 步同编译域），`cargo +1.88.0 check --no-default-features` 本地实证通过（34.6s）。
 2. **MSRV 声明 B 方案（升 1.88）**：`rust-version = "1.88"`（Cargo.toml 一行）+ workflow toolchain `1.85.0` → `1.88.0`。理由：
    - **现状声明已失真**：lockfile 16 包要求 1.86-1.88（附录 C 权威清单），1.85 今天已经编不了 proc——诚实的 1.88 声明优于失真的 1.85 声明；
    - **pin 面（A 方案）是 4 条独立链 16 包**（icu×8←idna_adapter←url / image←arboard / serde_with+time←bollard-stubs / instability→darling×3←ratatui），全是活跃链，任何未来 `cargo update` 都会再漂移（brainstorm 风险 2 承认的复发面）；
