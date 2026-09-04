@@ -167,8 +167,10 @@ unsafe fn read_u32(
 fn parse_utf16_env(raw: &[u8]) -> Vec<EnvVar> {
     // UTF-16 LE，NUL 分隔每条，结尾双 NUL。多余字节按 lossy 处理。
     let units: Vec<u16> = raw
-        .chunks_exact(2)
-        .map(|c| u16::from_ne_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_ne_bytes(*c))
         .collect();
     let s = String::from_utf16_lossy(&units);
     // 截到首个双 NUL（完整环境块结束）。
