@@ -1,6 +1,6 @@
 [package]
 name = "proc"
-version = "0.26.0"
+version = "0.27.0"
 edition = "2024"
 # v0.27（ADR-0037 D2）：1.85 → 1.88——lockfile 16 包传递依赖要求 1.86-1.88，
 # 1.85 声明已失真（编不了）；1.88 是 14 个月老基线，edition 2024 最低线不受影响。

@@ -69,6 +69,15 @@ B 方案（job 改仅 `--no-default-features` check）被发现 3 **实证否决
    - `docs/unsafe-audit.md` 相应一句改写（「workflow 待修」→「已移除，理由见 ADR-0037 D5」）。
 2. **release.yml update-winget job 删除**。依据：上游 action `russellbanks/release-automation-winget` 仓库已删（404），首次执行（2026-07-04）起从未成功；`microsoft/winget-pkgs` 无 `Alfroul.proc` manifest（2026-09-03 API 核实 404）——即 winget 分发从未实际存在，删除零用户破坏。实际分发渠道 = GitHub Releases（build job 绿，10/10）+ cargo-binstall（Cargo.toml `[package.metadata.binstall]` 元数据在位）。若未来要上 winget：走 winget-pkgs 手动 PR 流程（社区标准），届时再立独立 job。
 
+## stage 3 实装注记（2026-09-04，远端验证收官）
+
+D1~D5 全部经远端验证：**R4 run `33867317029` check/msrv/audit 全绿——ci.yml 历史 18/18 failure 后首次**（badge 随之 `CI - passing` 实挂）。4 轮迭代留档 stage-3 doc「远端验证记录」段：
+
+1. **R1**：msrv/audit 双修首验即绿；check 挂在远端 stable clippy **1.98 新 lint** `chunks_exact_to_as_chunks`（env.rs:170 单点机械修——本地装 1.98 复现验证后一次收敛）。
+2. **R2**：D1.3 timeout 初值 60/45 **实测校准为 180/170** + rust-cache `cache-on-failure: true`——test 步冷缓存编译 proc 自身 79 个 test target（本地 949s 实测定标）在 60 min job 上限内跑不完，属预算估算偏乐观非设计缺陷；D1.4「全量不裁剪」经受验证（R4 全量 1744 远端跑通）。
+3. **R3**：D1 摸底清单**一处误分类修正**——`test_disk_io_etw` 原 B.3「CI 自跳过类」，实为 runner 提权下 ETW 真启动走真实路径（B.2 同族），其硬时序断言 gate 后全绿；宽松断言的 `spawn_collects_self_io_when_admin` 不 gate（保留真实 ETW 冒烟信号）。
+4. **B.5 时序断言观察项**（perf_baseline / search_perf / scorer sleep）与 kill_by_name 降级路径在 R4 全量通过——**零触发**，无需 TD 归档。
+
 ## Consequences
 
 - **正面**：远端三 workflow → 两 workflow（ci + release）且全部失败点有确定性修复路径；badge 兑现前提成立；6h 挂死止损（timeout + 挂点 gate）；面试叙事从「CI 全红」变「CI 绿 + 有记录的工程决策集」（本 ADR 五组决策全部有取证链）。

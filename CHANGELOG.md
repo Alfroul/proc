@@ -5,7 +5,20 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.27.0] - 2026-09-04
+
+### v0.27.0 cycle 完结 — CI 修复专项（展示冲刺收尾）
+
+v0.27 是 CI 修复专项**轻-中 cycle**（brainstorm 5 决策 2026-09-02 拍板；workflow/依赖/小 rs 为主，零挂机）——**「远端 CI 历史 18/18 全红 + check job 每次 push 6h 挂死，到首次全绿 + badge 实挂」**。ADR-0037 五组决策（D1 测试策略 choke-point env-gate / D2 msrv 双修 / D3 check-macos 移除 / D4 audit 三修 / D5 miri+winget 声明性降级）全部实装并经远端 4 轮迭代验证（R1 clippy 1.98 新 lint 单点修 / R2 timeout 实测校准 180/170 + cache-on-failure / R3 test_disk_io_etw B.3 误分类修正 gate / **R4 `33867317029` 全绿——ci.yml 历史首次**）。badge 从注释占位变实挂（HTTP 200 + SVG `CI - passing`）；required checks 设置说明兑现（3 job：check / msrv / audit）；6h 挂死止损为确定性预算。回归双档 **1744 / 0 / 10 + 1768 / 0 / 11 全程不变**；MCP tool 46 / agent catalog 47 / runtime deps +0 不变锚保持。详见 [REVIEW-v0.27](docs/reviews/REVIEW-v0.27.md)。
+
+### Fixed (v0.27 stage 3 — 远端验证与收尾)
+
+- **CI 迭代 1（commit `575ed91`）**：远端 stable clippy **1.98 新 lint `chunks_exact_to_as_chunks`**——`src/inspect/env.rs:170` `.chunks_exact(2)` → `.as_chunks::<2>().0.iter()`（官方建议写法；`as_chunks` 是 1.88 稳定 API 与 msrv job 同前提；全仓 grep 唯一挂点；语义零变化）。本地 rsproxy 装 1.98.0 工具链（直连 2.6KB/s 不可用，镜像 19s）复现远端同款单错误、修后 `--all-targets` 全绿一次收敛 + 1.95 双档 clippy/fmt 绿 + 覆盖测试 3 binary 绿（11/12/39）
+- **CI 迭代 2（commit `656c5dc`）**：check job **timeout 实测校准 60→180 / test 步 45→170 + rust-cache `cache-on-failure: true`**——R2 取证：build 前置 ~17 min + test 步冷缓存编译 proc 自身 79 个 test target（本地 `cargo clean -p proc` 实测 **949s**，runner 4 核推算 32-63 min）43.5 min 未完零测试执行即被 60 min job 上限取消；判定慢非挂（无挂点日志特征 + env-gate 单点覆盖）；命令零改动与本地同口径（`--tests` 等价性 79 executable 同集已验证不缩面）
+- **CI 迭代 3（commit `1dc0043`）**：`tests/test_disk_io_etw.rs` CI gate——R3 首个真实测试失败 `try_spawn_returns_some_on_admin_or_none_on_user`（「刚 spawn 不应有 poll」实得 5）；**stage-1 附录 B.3 误分类修正**：GitHub runner 提权使 ETW 真启动走真实路径（D1.2 dns/schannel 同族）；仅 gate 该硬时序测试，宽松断言的 `spawn_collects_self_io_when_admin` 不 gate（保留 runner 真实 ETW 冒烟信号，R3 实测过）；本地无 CI 行为零变化 + `CI=true` 模拟 SKIP 实证
+- **badge 激活 + README 收尾态**：README badge 注释符删除（占位语法零重写）+ badge URL 200 + SVG `CI - passing` 实证；亮点条数字更新（65,114 src / 27,518 tests / 27 release tags / 63 TD（stage 2 漏计 62→63 修正，REVIEW-v0.27 Findings ①）+ 远端 CI 三 job 全绿口径入质量门禁列）
+- **push 前尾注清理（用户拍板）**：GitHub Contributors 出现 Anthropic `claude` 账号（130 个历史 commit 带 co-author 尾注被新版 UI 计入）——用户确认 Alfroul 归因正确（121 direct）、历史不动、未 push 的 3 个本地 commit filter-branch 清尾注后 push（tree 零变化）、后续 commit 一律不带
+- 回归双档终值 **1744 / 0 / 10 + 1768 / 0 / 11（各 80 行核对）**与开工基线一致；TD-62 第 3 次触发（默认档首跑红 → 单跑绿 + 复跑绿，负载敏感口径归档维持观察）；三件套 + 1.98 clippy 全绿；远端 R4 `33867317029` check/msrv/audit **全绿**（ci.yml 18/18 红后首次）+ badge passing；REVIEW-v0.27（16 项溯源抽查）+ required checks 设置说明兑现（3 job 名单）+ Cargo 0.26.0→0.27.0 + tag `v0.27.0`（用户拍板）
 
 ### Changed (v0.27 stage 2 — CI 修复主项落地：ADR-0037 D1-D5 实装)
 

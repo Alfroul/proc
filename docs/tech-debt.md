@@ -811,6 +811,8 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 
 **v0.26 stage 4 决策**：观察项归档（TD-58 同款——首触发不修，复现再修）。理由：R1 当初入册即修是因为 gate 门禁会随机撞它（修复是门禁可靠性前置），本测试不在 gate 名单，优先级不同。
 
+**v0.27 stage 3 触发记录**：第 3 次触发（2026-09-04 终值回归默认档首跑红，同断言）——单跑该 binary 35 passed + 1 ignored 绿 + 复跑全档绿，口径处置归档；**远端 CI R4 全量（runner 单机串行）零触发**——负载敏感机制判断的侧证。维持观察不修。
+
 ### TD-63（ADR-0037 D4）：rmcp 0.11 RUSTSEC-2026-0189 —— 0.11→≥1.4 major 升级（独立 cycle 候选）
 
 **位置**：`src/mcp/transport.rs::serve_sse`（rmcp 0.11 Streamable HTTP transport 不校验 `Host` header——DNS rebinding 攻击面，CVE-2026-42559，<1.4.0 受影响；patched ≥1.4.0 默认 loopback-only host 校验）
@@ -864,6 +866,7 @@ CONTEXT.md 明确「surgical 原则——安全评分偏向严格」。这是设
 | **stage 2 口径核实（D5 延伸）** | README winget/scoop 安装指引失实 | stage-1 实证 winget-pkgs 无 `Alfroul.proc` manifest + 本 stage 核实 scoop Main/Extras bucket 均无 proc、作者名下无自建 bucket——「方式 3」整体改 GitHub Releases 下载，:674 补全部署句 + :773 平台支持段同步（v0.27 勘误注记在位） |
 | **stage 2 新发现（D2 连带，留 v0.28+）** | rust-version 1.88 解锁 clippy let-chain 版 `collapsible_if` | 1.85→1.88 声明使该 lint 的折叠建议（`if let ... && ...`，需 MSRV ≥1.88）在**本地 1.95 与远端 1.98 同时启用**，37 处既有代码（16 文件：mcp handler record/mod / replay / dns_log / agent provider 等）被打红——本 cycle CI 修复专项不动业务代码，`Cargo.toml [lints.clippy] collapsible_if = "allow"` 过渡 + 本行归档；**v0.28+ 候选**：37 处机械现代化（折叠为 let-chain）后删 allow 恢复 lint |
 | **stage 2 开工基线观察** | 双档各一起首跑 flaky | 默认档 TD-62 本体（第 2 次触发）+ anthropic 档 `test_inspect::inspect_aggregates_three_buckets`（dlls empty，首触发）——均单跑绿 + 复跑绿，观察项口径（见 TD-62 词条；inspect dlls 枚举复现再评估入册） |
+| **stage 3 远端验证收官（零新 TD）** | ci.yml 首次全绿（R4 `33867317029`） | 4 轮迭代全留档 stage-3 doc：R1 clippy 1.98 新 lint 单点修（`575ed91`）/ R2 timeout 实测校准 180/170 + cache-on-failure（`656c5dc`，本地 949s 定标）/ R3 test_disk_io_etw B.3 误分类修正 gate（`1dc0043`，D1.2 同族仅 gate 硬时序断言）/ R4 全绿；B.5 时序断言观察项 + kill_by_name 降级路径远端全量**零触发**；TD-62 第 3 次触发（本地终值首跑，单跑绿+复跑绿）维持观察；badge 实挂 + TD 计数勘误（README 62→63，stage 2 漏计由 REVIEW-v0.27 抓出） |
 
 ---
 

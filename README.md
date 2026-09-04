@@ -4,22 +4,20 @@ Rust 编写的交互式 TUI 系统进程管理器。把 **进程管理 + 网络�
 
 ## 项目概览
 
-<!-- CI badge: 挂接待远端 CI 修复转绿后启用（v0.26 stage 3 记录：CI stable 1.98.0 与本地 1.95.0 clippy 漂移 2 处 + audit rmcp/crossbeam 漏洞 + miri/winget workflow 红，修复排期 v0.27；启用时删除本行与末行注释符）
 [![CI](https://github.com/Alfroul/proc/actions/workflows/ci.yml/badge.svg)](https://github.com/Alfroul/proc/actions/workflows/ci.yml)
 [![release](https://github.com/Alfroul/proc/actions/workflows/release.yml/badge.svg)](https://github.com/Alfroul/proc/actions/workflows/release.yml)
--->
 
 ![demo](docs/assets/demo.gif)
 
 *TUI 主界面 → AI Agent 面板一次 tool-use（本地 Gemma E2B 推理：query → tool 调用步骤行 → streaming 回答；35s 实录，ShareX 采集）*
 
-**量化亮点**（实测口径见 [docs/performance.md](docs/performance.md)；规模数字为 v0.26.0 收尾态实测 2026-09-01，stage-1 附录 F 时点值 65,074 / 26,968 已随 stage 2 代码演进）：
+**量化亮点**（实测口径见 [docs/performance.md](docs/performance.md)；规模数字为 v0.27.0 收尾态实测 2026-09-04，v0.26.0 时点值 65,099 / 27,480 已随 v0.27 代码演进）：
 
 | 工程规模 | 质量门禁 | AI / agent |
 |---|---|---|
-| **65,099** 行 src 代码 / **27,480** 行测试代码 | 全量回归双档 **1744 + 1768 passed / 0 failed**（默认 + `--features anthropic`） | 内置 AI agent（本地 LLM 默认，数据零外发）+ **46 个 MCP tools** |
-| **80** 个 test binaries / **25** 个 release tag | fmt + clippy 双档 `-D warnings` / cargo-audit / [gate.sh](scripts/gate.sh) 快档 29s | 70 query eval 基准 + 六列实验矩阵 + 方差带判读纪律（见下方「AI Agent 与 eval 纪律」） |
-| **37** 份 [ADR](docs/adr/) / **62** 条 [TD ledger](docs/tech-debt.md) | proptest 属性测试（FilterExpr roundtrip）/ **198** 处 unsafe 逐处审计口径（miri 防线移除决策见 [ADR-0037](docs/adr/0037-ci-recovery.md) D5） | RAG 经验召回（默认 off）+ session JSONL 观测 |
+| **65,114** 行 src 代码 / **27,518** 行测试代码 | 全量回归双档 **1744 + 1768 passed / 0 failed**（默认 + `--features anthropic`，本地与远端 CI 同口径） | 内置 AI agent（本地 LLM 默认，数据零外发）+ **46 个 MCP tools** |
+| **80** 个 test binaries / **27** 个 release tag | 远端 CI 三 job 全绿（check / msrv / audit，[ADR-0037](docs/adr/0037-ci-recovery.md)）+ fmt + clippy 双档 `-D warnings` / cargo-audit / [gate.sh](scripts/gate.sh) 快档 29s | 70 query eval 基准 + 六列实验矩阵 + 方差带判读纪律（见下方「AI Agent 与 eval 纪律」） |
+| **37** 份 [ADR](docs/adr/) / **63** 条 [TD ledger](docs/tech-debt.md) | proptest 属性测试（FilterExpr roundtrip）/ **198** 处 unsafe 逐处审计口径（miri 防线移除决策见 [ADR-0037](docs/adr/0037-ci-recovery.md) D5） | RAG 经验召回（默认 off）+ session JSONL 观测 |
 
 ### 架构分层
 
